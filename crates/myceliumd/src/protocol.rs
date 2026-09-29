@@ -44,6 +44,18 @@ pub enum Request {
     /// Pull observations from every open device and merge the topology.
     Scan,
     Topology,
+    /// Set durable human knowledge on exactly one discovered node.
+    TopologyAnnotate {
+        selector: String,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        kind: Option<String>,
+        #[serde(default)]
+        write: bool,
+        #[serde(default)]
+        dry_run: bool,
+    },
     /// Plan one local SSH forward through an inventory gateway. The daemon
     /// returns only argv and an optional env-var name, never secret values.
     TunnelPlan {

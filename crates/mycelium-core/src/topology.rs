@@ -179,6 +179,12 @@ pub struct ServiceRecord {
     pub origin: Origin,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeAnnotation {
+    pub name: Option<String>,
+    pub kind: Option<String>,
+}
+
 /// One atomic piece of topology truth from one device.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Observation {
@@ -242,6 +248,8 @@ pub struct TopoNode {
     pub sites: BTreeSet<String>,
     #[serde(default)]
     pub services: BTreeMap<String, ServiceRecord>,
+    #[serde(default)]
+    pub annotation: NodeAnnotation,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -342,6 +350,7 @@ impl Topology {
                         origins: BTreeSet::new(),
                         sites: BTreeSet::new(),
                         services: BTreeMap::new(),
+                        annotation: NodeAnnotation::default(),
                     }
                 });
                 if let Some(site) = &origin.site {
@@ -624,6 +633,7 @@ impl Topology {
                 origins: BTreeSet::new(),
                 sites: BTreeSet::new(),
                 services: BTreeMap::new(),
+                annotation: NodeAnnotation::default(),
             });
         node.device = true;
         if node.mac.is_none() {

@@ -314,6 +314,58 @@ impl Daemon {
                 let topo = self.topology.lock().await;
                 to_value(&*topo).map_err(json_err)
             }
+            Request::TopologyAnnotate {
+                selector,
+                name,
+                kind,
+                write,
+                dry_run,
+            } => {
+                validate_annotation(name.as_deref(), kind.as_deref())?;
+                if !write && !dry_run {
+                    return Err(MyceliumError::WritesNotPermitted(
+                        "topology annotation requires --write".into(),
+                    ));
+                }
+                let mut topology = self.topology.lock().await;
+                let matches = topology
+                    .nodes
+                    .iter()
+                    .filter(|(id, node)| node_matches(id, node, &selector))
+                    .map(|(id, _)| id.clone())
+                    .collect::<Vec<_>>();
+                let node_id = match matches.as_slice() {
+                    [node_id] => node_id.clone(),
+                    [] => return Err(MyceliumError::UnknownDevice(selector)),
+                    _ => {
+                        return Err(MyceliumError::Validation(format!(
+                            "annotation selector `{selector}` is ambiguous: {}",
+                            matches.join(", ")
+                        )))
+                    }
+                };
+                let plan = serde_json::json!({
+                    "node": node_id,
+                    "name": name,
+                    "kind": kind,
+                    "dry_run": dry_run,
+                });
+                if !dry_run {
+                    let node = topology
+                        .nodes
+                        .get_mut(&node_id)
+                        .expect("resolved node exists");
+                    if name.is_some() {
+                        node.annotation.name = name;
+                    }
+                    if kind.is_some() {
+                        node.annotation.kind = kind;
+                    }
+                    drop(topology);
+                    self.persist_topology().await?;
+                }
+                Ok(plan)
+            }
             Request::TunnelPlan {
                 target,
                 remote_port,
@@ -510,6 +562,48 @@ fn creds_from(s: &SavedDevice) -> CredentialSet {
         key_path: s.key_path.clone(),
         sudo_password: None,
     }
+}
+
+fn node_matches(id: &str, node: &mycelium_core::TopoNode, selector: &str) -> bool {
+    id.eq_ignore_ascii_case(selector)
+        || node
+            .ips
+            .keys()
+            .any(|address| address.to_string() == selector)
+        || node
+            .hostnames
+            .iter()
+            .any(|hostname| hostname.eq_ignore_ascii_case(selector))
+        || node
+            .annotation
+            .name
+            .as_deref()
+            .is_some_and(|name| name.eq_ignore_ascii_case(selector))
+}
+
+fn validate_annotation(name: Option<&str>, kind: Option<&str>) -> Result<()> {
+    if name.is_none() && kind.is_none() {
+        return Err(MyceliumError::Validation(
+            "annotation needs --name and/or --kind".into(),
+        ));
+    }
+    if name.is_some_and(|name| name.trim().is_empty() || name.len() > 127) {
+        return Err(MyceliumError::Validation(
+            "annotation name must be 1..127 characters".into(),
+        ));
+    }
+    if kind.is_some_and(|kind| {
+        kind.is_empty()
+            || kind.len() > 63
+            || !kind.chars().all(|character| {
+                character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
+            })
+    }) {
+        return Err(MyceliumError::Validation(
+            "annotation kind must use lowercase letters, digits, or hyphens".into(),
+        ));
+    }
+    Ok(())
 }
 
 async fn fingerprint_http(
@@ -750,6 +844,14 @@ mod tests {
             Some("Frigate")
         );
         assert_eq!(classify_http("nginx", "generic page"), None);
+    }
+
+    #[test]
+    fn validates_annotation_fields() {
+        assert!(validate_annotation(Some("Front camera"), Some("camera")).is_ok());
+        assert!(validate_annotation(None, None).is_err());
+        assert!(validate_annotation(Some(""), None).is_err());
+        assert!(validate_annotation(None, Some("IP Camera")).is_err());
     }
 
     #[tokio::test]

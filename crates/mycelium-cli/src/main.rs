@@ -64,6 +64,7 @@ usage:
   mycelium scan
   mycelium topology [--json]
   mycelium map [--json]
+  mycelium annotate <node> [--name NAME] [--kind KIND] --write [--dry-run]
   mycelium boot-path <device> --target <IP-or-URL>... [--json]
   mycelium nbde plan <device> --tang <IP-or-URL>... --threshold N [--json]
   mycelium tunnel <target>:<port> [--via DEVICE] [--local-port N] [--write] [--json]
@@ -90,6 +91,8 @@ struct Flags {
     threshold: Option<usize>,
     via: Option<String>,
     local_port: Option<u16>,
+    name: Option<String>,
+    kind: Option<String>,
     rest: Vec<String>,
 }
 
@@ -108,6 +111,8 @@ fn parse_flags(args: &[String]) -> Flags {
         threshold: None,
         via: None,
         local_port: None,
+        name: None,
+        kind: None,
         rest: Vec::new(),
     };
     let mut i = 0;
@@ -165,6 +170,14 @@ fn parse_flags(args: &[String]) -> Flags {
             "--local-port" => {
                 i += 1;
                 f.local_port = args.get(i).and_then(|value| value.parse().ok());
+            }
+            "--name" => {
+                i += 1;
+                f.name = args.get(i).cloned();
+            }
+            "--kind" => {
+                i += 1;
+                f.kind = args.get(i).cloned();
             }
             other => f.rest.push(other.to_owned()),
         }
@@ -267,6 +280,35 @@ async fn run(cmd: &str, args: &[String]) -> Result<Vec<String>, ClientError> {
             let topo: Topology = serde_json::from_value(v)
                 .map_err(|e| err_usage(&format!("bad topology json: {e}")))?;
             Ok(render_topology(&topo))
+        }
+        "annotate" => {
+            let f = parse_flags(args);
+            let selector = f
+                .rest
+                .first()
+                .ok_or(err_usage("annotate needs a node selector"))?;
+            let mut client = connect().await?;
+            let value = client
+                .call(&Request::TopologyAnnotate {
+                    selector: selector.clone(),
+                    name: f.name,
+                    kind: f.kind,
+                    write: f.write,
+                    dry_run: f.dry_run,
+                })
+                .await?;
+            if f.json {
+                Ok(vec![value.to_string()])
+            } else if value["dry_run"].as_bool() == Some(true) {
+                Ok(vec![format!("DRY RUN: {value}")])
+            } else {
+                Ok(vec![format!(
+                    "annotated {} name={} kind={}",
+                    value["node"].as_str().unwrap_or("?"),
+                    value["name"].as_str().unwrap_or("-"),
+                    value["kind"].as_str().unwrap_or("-")
+                )])
+            }
         }
         "boot-path" => {
             let f = parse_flags(args);
@@ -695,6 +737,13 @@ fn render_topology(topo: &Topology) -> Vec<String> {
     }
     out.push("appliances:".into());
     for node in topo.nodes.values().filter(|n| n.device) {
+        let label = node.annotation.name.as_deref().unwrap_or(&node.id);
+        let kind = node
+            .annotation
+            .kind
+            .as_deref()
+            .map(|kind| format!(" kind={kind}"))
+            .unwrap_or_default();
         let ips = node
             .ips
             .keys()
@@ -703,9 +752,9 @@ fn render_topology(topo: &Topology) -> Vec<String> {
             .join(",");
         out.push(format!(
             "  {:<28} ports={} ips={}",
-            node.id,
+            label,
             node.ports.len(),
-            ips
+            format_args!("{ips}{kind}")
         ));
         render_services(&mut out, node);
     }
@@ -714,7 +763,9 @@ fn render_topology(topo: &Topology) -> Vec<String> {
         topo.nodes.values().filter(|n| !n.device).count()
     ));
     for node in topo.nodes.values().filter(|n| !n.device) {
-        let names = if node.hostnames.is_empty() {
+        let names = if let Some(name) = &node.annotation.name {
+            name.clone()
+        } else if node.hostnames.is_empty() {
             "-".to_owned()
         } else {
             node.hostnames.iter().cloned().collect::<Vec<_>>().join(",")
@@ -725,8 +776,14 @@ fn render_topology(topo: &Topology) -> Vec<String> {
             .map(|i| i.to_string())
             .collect::<Vec<_>>()
             .join(",");
+        let kind = node
+            .annotation
+            .kind
+            .as_deref()
+            .map(|kind| format!(" kind={kind}"))
+            .unwrap_or_default();
         out.push(format!(
-            "  {:<20} {:<20} {names}  [{ips}]",
+            "  {:<20} {:<20} {names}  [{ips}]{kind}",
             node.mac
                 .map(|m| m.to_string())
                 .unwrap_or_else(|| "no-mac".into()),
