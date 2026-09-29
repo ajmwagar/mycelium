@@ -63,6 +63,7 @@ usage:
   mycelium call <id> <capability> [--param k=v ...] [--write] [--dry-run]
   mycelium scan
   mycelium topology [--json]
+  mycelium map [--json]
   mycelium boot-path <device> --target <IP-or-URL>... [--json]
   mycelium nbde plan <device> --tang <IP-or-URL>... --threshold N [--json]
   mycelium tunnel <target>:<port> [--via DEVICE] [--local-port N] [--write] [--json]
@@ -256,7 +257,7 @@ async fn run(cmd: &str, args: &[String]) -> Result<Vec<String>, ClientError> {
             }
             Ok(render_scan(&v))
         }
-        "topology" => {
+        "topology" | "map" => {
             let f = parse_flags(args);
             let mut c = connect().await?;
             let v = c.call(&Request::Topology).await?;
@@ -730,6 +731,9 @@ fn render_topology(topo: &Topology) -> Vec<String> {
                 .unwrap_or_else(|| "no-mac".into()),
             node.id
         ));
+        for link in node.ports.values().filter_map(|link| link.b.as_ref()) {
+            out.push(format!("    └─ {}", link));
+        }
     }
     if !topo.leases.is_empty() {
         out.push("leases:".into());

@@ -5,8 +5,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use mycelium_core::{
     CapResult, CapSpec, CredentialSet, Device, DeviceId, DeviceKind, DeviceMeta, Driver,
-    ExecContext, Inventory, MyceliumError, ParamType, Params, Result, Secret, Target, Value,
-    ID_IDENTIFY, ID_WLAN_GUEST_ENABLE, ID_WLAN_LIST_SSID,
+    ExecContext, Inventory, MacAddress, MyceliumError, Observation, Origin, ParamType, Params,
+    PortRef, Result, Secret, Target, Value, ID_IDENTIFY, ID_WLAN_GUEST_ENABLE, ID_WLAN_LIST_SSID,
 };
 use reqwest::header::{COOKIE, SET_COOKIE};
 use serde_json::{json, Map as JsonMap};
@@ -297,6 +297,60 @@ impl Device for ControllerDevice {
             }),
         }
     }
+
+    async fn observe(&self) -> Result<(Vec<Observation>, Vec<String>)> {
+        let session = self.handle.login().await?;
+        let mut observations = Vec::new();
+        let mut warnings = Vec::new();
+        for site in &self.sites {
+            let path = format!("/api/s/{site}/stat/sta");
+            match self.handle.get(&session, &path).await {
+                Ok(body) => {
+                    for client in data(&body) {
+                        let Some(mac) = client
+                            .get("mac")
+                            .and_then(|value| value.as_str())
+                            .and_then(MacAddress::parse)
+                        else {
+                            continue;
+                        };
+                        let ap = client
+                            .get("ap_mac")
+                            .and_then(|value| value.as_str())
+                            .and_then(MacAddress::parse)
+                            .map(|value| value.to_string())
+                            .or_else(|| {
+                                client
+                                    .get("ap_name")
+                                    .and_then(|value| value.as_str())
+                                    .map(str::to_owned)
+                            })
+                            .unwrap_or_else(|| self.meta.id.to_string());
+                        observations.push(Observation::Attachment {
+                            mac,
+                            hostname: client
+                                .get("hostname")
+                                .and_then(|value| value.as_str())
+                                .map(str::to_owned),
+                            port: PortRef {
+                                device: ap,
+                                port: client
+                                    .get("essid")
+                                    .and_then(|value| value.as_str())
+                                    .unwrap_or("wifi")
+                                    .to_owned(),
+                                vif: None,
+                            },
+                            origin: Origin::new(self.meta.id.to_string(), "unifi-stations")
+                                .at_site(site),
+                        });
+                    }
+                }
+                Err(error) => warnings.push(format!("site {site} clients: {error}")),
+            }
+        }
+        Ok((observations, warnings))
+    }
 }
 
 impl ControllerDevice {
@@ -443,7 +497,7 @@ fn client_view(site: &str, item: &serde_json::Value) -> Option<Value> {
             item,
             &[
                 "hostname", "ip", "mac", "ap_name", "essid", "channel", "radio", "signal", "noise",
-                "uptime",
+                "uptime", "ap_mac",
             ],
         ),
     ))

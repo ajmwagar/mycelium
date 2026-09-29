@@ -26,6 +26,10 @@ const IF_OPER: &str = "1.3.6.1.2.1.2.2.1.8";
 const ARP_IFIDX: &str = "1.3.6.1.2.1.4.22.2.1.1";
 const ARP_IP: &str = "1.3.6.1.2.1.4.22.2.1.2";
 const ARP_MAC: &str = "1.3.6.1.2.1.4.22.2.1.4";
+// BRIDGE-MIB: learned MAC -> bridge port, then bridge port -> ifIndex.
+const BRIDGE_PORT_IFINDEX: &str = "1.3.6.1.2.1.17.1.4.1.2";
+const FDB_PORT: &str = "1.3.6.1.2.1.17.4.3.1.2";
+const Q_FDB_PORT: &str = "1.3.6.1.2.1.17.7.1.2.2.1.2";
 
 pub const ID_SNMP_GET: &str = "snmp.get";
 pub const ID_SNMP_WALK: &str = "snmp.walk";
@@ -186,6 +190,43 @@ impl SnmpDevice {
             .collect())
     }
 
+    async fn forwarding_table(&self) -> Result<Vec<(MacAddress, u32, Option<u16>)>> {
+        let bridge_ports = self.handle.walk(BRIDGE_PORT_IFINDEX, 4096).await?;
+        let port_to_ifindex = bridge_ports
+            .into_iter()
+            .filter_map(|(oid, value)| Some((row_index(&oid), value.as_i64()? as u32)))
+            .collect::<HashMap<_, _>>();
+        let mut rows = self
+            .handle
+            .walk(FDB_PORT, 16384)
+            .await?
+            .into_iter()
+            .filter_map(|(oid, value)| {
+                let bridge_port = value.as_i64()? as u32;
+                let ifindex = *port_to_ifindex.get(&bridge_port)?;
+                Some((mac_from_oid_index(&oid)?, ifindex, None))
+            })
+            .collect::<Vec<_>>();
+        rows.extend(
+            self.handle
+                .walk(Q_FDB_PORT, 16384)
+                .await?
+                .into_iter()
+                .filter_map(|(oid, value)| {
+                    let bridge_port = value.as_i64()? as u32;
+                    let ifindex = *port_to_ifindex.get(&bridge_port)?;
+                    Some((
+                        mac_from_oid_index(&oid)?,
+                        ifindex,
+                        vlan_from_q_fdb_oid(&oid),
+                    ))
+                }),
+        );
+        rows.sort_unstable_by_key(|(mac, ifindex, vlan)| (*mac, *ifindex, *vlan));
+        rows.dedup();
+        Ok(rows)
+    }
+
     fn ifindex_names(
         &self,
         map: &BTreeMap<u32, (String, Option<String>, Option<u32>)>,
@@ -217,6 +258,22 @@ fn row_index(oid: &str) -> u32 {
         .next()
         .and_then(|s| s.parse().ok())
         .unwrap_or(0)
+}
+
+fn mac_from_oid_index(oid: &str) -> Option<MacAddress> {
+    let arcs = oid
+        .split('.')
+        .rev()
+        .take(6)
+        .map(|arc| arc.parse::<u8>().ok())
+        .collect::<Option<Vec<_>>>()?;
+    Some(MacAddress([
+        arcs[5], arcs[4], arcs[3], arcs[2], arcs[1], arcs[0],
+    ]))
+}
+
+fn vlan_from_q_fdb_oid(oid: &str) -> Option<u16> {
+    oid.split('.').rev().nth(6)?.parse().ok()
 }
 
 /// `<prefix>.<col>.<rowkey>` — rowkey is the last arc for ifTable, the
@@ -468,7 +525,43 @@ impl Device for SnmpDevice {
             Err(e) => warnings.push(format!("ipNetToMedia: {e}")),
         }
 
+        match (self.forwarding_table().await, self.iface_rows().await) {
+            (Ok(rows), Ok(ifaces)) => {
+                let names = self.ifindex_names(&ifaces);
+                for (mac, ifindex, vlan) in rows {
+                    obs.push(Observation::Attachment {
+                        mac,
+                        hostname: None,
+                        port: PortRef {
+                            device: me.clone(),
+                            port: names
+                                .get(&ifindex)
+                                .cloned()
+                                .unwrap_or_else(|| format!("if{ifindex}")),
+                            vif: vlan.map(mycelium_core::VlanId),
+                        },
+                        origin: Origin::new(me.clone(), "snmp-bridge-fdb"),
+                    });
+                }
+            }
+            (Err(e), _) => warnings.push(format!("bridge FDB: {e}")),
+            (_, Err(e)) => warnings.push(format!("ifTable for bridge FDB: {e}")),
+        }
+
         Ok((obs, warnings))
+    }
+}
+
+#[cfg(test)]
+mod fdb_tests {
+    use super::*;
+
+    #[test]
+    fn parses_bridge_mib_mac_index() {
+        let oid = "1.3.6.1.2.1.17.7.1.2.2.1.2.30.160.96.50.5.0.202";
+        let mac = mac_from_oid_index(oid).unwrap();
+        assert_eq!(mac.to_string(), "a0:60:32:05:00:ca");
+        assert_eq!(vlan_from_q_fdb_oid(oid), Some(30));
     }
 }
 

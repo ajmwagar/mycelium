@@ -72,7 +72,11 @@ pub struct Origin {
 
 impl Origin {
     pub fn new(device: impl Into<String>, source: impl Into<String>) -> Self {
-        Self { device: device.into(), source: source.into(), site: None }
+        Self {
+            device: device.into(),
+            source: source.into(),
+            site: None,
+        }
     }
 
     pub fn at_site(mut self, site: impl Into<String>) -> Self {
@@ -136,8 +140,7 @@ pub enum SegmentKind {
 
 /// An L2/L3 domain as seen by one or more devices. Segment ids are stable
 /// across reports: `<net>` for IPv4 LANs, `vlan:<id>` when reported.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 pub struct Segment {
     pub id: String,
     pub kind: SegmentKind,
@@ -161,11 +164,37 @@ pub struct LeaseRecord {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Observation {
     /// Reachable host seen in a forwarding table (arp/neighbors).
-    Neighbor { mac: Option<MacAddress>, ip: IpAddr, hostname: Option<String>, port: Option<PortRef>, origin: Origin },
+    Neighbor {
+        mac: Option<MacAddress>,
+        ip: IpAddr,
+        hostname: Option<String>,
+        port: Option<PortRef>,
+        origin: Origin,
+    },
+    /// A layer-2 attachment learned without an IP address (for example from
+    /// a switch forwarding table or a wireless controller association).
+    Attachment {
+        mac: MacAddress,
+        hostname: Option<String>,
+        port: PortRef,
+        origin: Origin,
+    },
     /// A port of a device, with link state.
-    DevicePort { device: String, port: String, mac: Option<MacAddress>, ips: Vec<IpAddr>, state: LinkState, origin: Origin },
+    DevicePort {
+        device: String,
+        port: String,
+        mac: Option<MacAddress>,
+        ips: Vec<IpAddr>,
+        state: LinkState,
+        origin: Origin,
+    },
     /// VLAN membership: device trunk/access port carrying a VLAN.
-    VlanMember { device: String, vlan: VlanId, members: Vec<String>, origin: Origin },
+    VlanMember {
+        device: String,
+        vlan: VlanId,
+        members: Vec<String>,
+        origin: Origin,
+    },
     /// A DHCP pool / network segment as configured on a device.
     Segment { segment: Segment, origin: Origin },
     /// A configured or active DHCP lease.
@@ -173,8 +202,7 @@ pub enum Observation {
 }
 
 /// A node in the merged graph: one host, or one appliance device.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 pub struct TopoNode {
     pub id: String,
     pub mac: Option<MacAddress>,
@@ -189,9 +217,22 @@ pub struct TopoNode {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Conflict {
-    SameIpDiffMac { ip: IpAddr, macs: Vec<MacAddress>, sources: Vec<String> },
-    SameMacDiffSubnet { mac: MacAddress, subnets: Vec<String>, sources: Vec<String> },
-    SegmentParamsDiff { segment: String, field: String, values: Vec<String>, sources: Vec<String> },
+    SameIpDiffMac {
+        ip: IpAddr,
+        macs: Vec<MacAddress>,
+        sources: Vec<String>,
+    },
+    SameMacDiffSubnet {
+        mac: MacAddress,
+        subnets: Vec<String>,
+        sources: Vec<String>,
+    },
+    SegmentParamsDiff {
+        segment: String,
+        field: String,
+        values: Vec<String>,
+        sources: Vec<String>,
+    },
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -252,7 +293,13 @@ impl Topology {
     fn observe_one(&mut self, obs: Observation, report: &mut TopologyReport) {
         let obs_origin = observation_origin(&obs);
         match obs {
-            Observation::Neighbor { mac, ip, hostname, port, origin } => {
+            Observation::Neighbor {
+                mac,
+                ip,
+                hostname,
+                port,
+                origin,
+            } => {
                 let key = node_key(mac, ip, origin.site.as_deref());
                 let node = self.nodes.entry(key.clone()).or_insert_with(|| {
                     report.new_nodes += 1;
@@ -277,12 +324,15 @@ impl Topology {
                 }
                 match node.ips.get_mut(&ip) {
                     None => {
-                        node.ips.insert(ip, IpRecord {
-                            addr: ip,
-                            prefix: None,
-                            vlan: None,
-                            origins: BTreeSet::from_iter([origin_key(&origin)]),
-                        });
+                        node.ips.insert(
+                            ip,
+                            IpRecord {
+                                addr: ip,
+                                prefix: None,
+                                vlan: None,
+                                origins: BTreeSet::from_iter([origin_key(&origin)]),
+                            },
+                        );
                     }
                     Some(rec) => {
                         rec.origins.insert(origin_key(&origin));
@@ -290,7 +340,11 @@ impl Topology {
                 }
                 if let Some(port) = port {
                     let entry = node.ports.entry(port.port.clone()).or_insert_with(|| Link {
-                        a: PortRef { device: node.id.clone(), port: port.port.clone(), vif: None },
+                        a: PortRef {
+                            device: node.id.clone(),
+                            port: port.port.clone(),
+                            vif: None,
+                        },
                         b: None,
                         state: LinkState::Unknown,
                         origins: BTreeSet::new(),
@@ -304,7 +358,52 @@ impl Topology {
                 let snapshot = node.clone();
                 self.check_ip_mac(&snapshot, ip, mac, &origin, report);
             }
-            Observation::DevicePort { device, port, mac, ips, state, origin } => {
+            Observation::Attachment {
+                mac,
+                hostname,
+                port,
+                origin,
+            } => {
+                let key = mac.to_string();
+                let node = self.nodes.entry(key.clone()).or_insert_with(|| {
+                    report.new_nodes += 1;
+                    TopoNode {
+                        id: key,
+                        mac: Some(mac),
+                        ..TopoNode::default()
+                    }
+                });
+                if let Some(site) = &origin.site {
+                    node.sites.insert(site.clone());
+                }
+                if let Some(hostname) = hostname.filter(|name| !name.is_empty()) {
+                    node.hostnames.insert(hostname.to_lowercase());
+                }
+                let origin = origin_key(&origin);
+                node.origins.insert(origin.clone());
+                node.ports.insert(
+                    format!("{}/{}", port.device, port.port),
+                    Link {
+                        a: PortRef {
+                            device: node.id.clone(),
+                            port: "attachment".into(),
+                            vif: None,
+                        },
+                        b: Some(port),
+                        state: LinkState::Up,
+                        origins: BTreeSet::from_iter([origin]),
+                    },
+                );
+                report.updated_nodes += 1;
+            }
+            Observation::DevicePort {
+                device,
+                port,
+                mac,
+                ips,
+                state,
+                origin,
+            } => {
                 let node = self.device_node(&device, mac, &origin);
                 let k = origin_key(&origin);
                 node.origins.insert(k.clone());
@@ -321,7 +420,11 @@ impl Topology {
                         .insert(k.clone());
                 }
                 let entry = node.ports.entry(port.clone()).or_insert_with(|| Link {
-                    a: PortRef { device: device.clone(), port: port.clone(), vif: None },
+                    a: PortRef {
+                        device: device.clone(),
+                        port: port.clone(),
+                        vif: None,
+                    },
                     b: None,
                     state: LinkState::Unknown,
                     origins: BTreeSet::new(),
@@ -330,7 +433,12 @@ impl Topology {
                 entry.origins.insert(k);
                 report.updated_nodes += 1;
             }
-            Observation::VlanMember { device, vlan, members, origin } => {
+            Observation::VlanMember {
+                device,
+                vlan,
+                members,
+                origin,
+            } => {
                 let k = origin_key(&origin);
                 let id = scoped_id(origin.site.as_deref(), &format!("vlan:{}", vlan.0));
                 let seg = self.segments.entry(id.clone()).or_insert_with(|| {
@@ -375,7 +483,9 @@ impl Topology {
                             });
                         }
                     }
-                    if let (Some((a_ip, a_pfx)), Some((b_ip, b_pfx))) = (existing.subnet, segment.subnet) {
+                    if let (Some((a_ip, a_pfx)), Some((b_ip, b_pfx))) =
+                        (existing.subnet, segment.subnet)
+                    {
                         if a_ip != b_ip || a_pfx != b_pfx {
                             report.conflicts_push(Conflict::SegmentParamsDiff {
                                 segment: segment.id.clone(),
@@ -430,17 +540,25 @@ impl Topology {
         self.updated_from.push(obs_origin);
     }
 
-    fn device_node(&mut self, device: &str, mac: Option<MacAddress>, _origin: &Origin) -> &mut TopoNode {
-        let node = self.nodes.entry(device.to_owned()).or_insert_with(|| TopoNode {
-            id: device.to_owned(),
-            mac,
-            ips: BTreeMap::new(),
-            hostnames: BTreeSet::new(),
-            device: true,
-            ports: BTreeMap::new(),
-            origins: BTreeSet::new(),
-            sites: BTreeSet::new(),
-        });
+    fn device_node(
+        &mut self,
+        device: &str,
+        mac: Option<MacAddress>,
+        _origin: &Origin,
+    ) -> &mut TopoNode {
+        let node = self
+            .nodes
+            .entry(device.to_owned())
+            .or_insert_with(|| TopoNode {
+                id: device.to_owned(),
+                mac,
+                ips: BTreeMap::new(),
+                hostnames: BTreeSet::new(),
+                device: true,
+                ports: BTreeMap::new(),
+                origins: BTreeSet::new(),
+                sites: BTreeSet::new(),
+            });
         node.device = true;
         if node.mac.is_none() {
             node.mac = mac;
@@ -490,6 +608,7 @@ impl Topology {
 fn observation_origin(o: &Observation) -> Origin {
     match o {
         Observation::Neighbor { origin, .. }
+        | Observation::Attachment { origin, .. }
         | Observation::DevicePort { origin, .. }
         | Observation::VlanMember { origin, .. }
         | Observation::Segment { origin, .. }
@@ -532,7 +651,11 @@ pub fn ipv4_in_cidr(ip: IpAddr, network: IpAddr, prefix: u8) -> bool {
     if prefix > 32 {
         return false;
     }
-    let mask: u32 = if prefix == 0 { 0 } else { u32::MAX << (32 - prefix) };
+    let mask: u32 = if prefix == 0 {
+        0
+    } else {
+        u32::MAX << (32 - prefix)
+    };
     u32::from(ip) & mask == u32::from(net) & mask
 }
 
@@ -574,7 +697,11 @@ mod tests {
                 mac: MacAddress::parse("aa:bb:cc:dd:ee:01"),
                 ip: ip("10.0.7.20"),
                 hostname: None,
-                port: Some(PortRef { device: "sw-1".into(), port: "eth2".into(), vif: None }),
+                port: Some(PortRef {
+                    device: "sw-1".into(),
+                    port: "eth2".into(),
+                    vif: None,
+                }),
                 origin: Origin::new("sw-1", "arp"),
             },
         ]);
@@ -612,7 +739,10 @@ mod tests {
             },
             origin: Origin::new(dev, "dhcp-config"),
         };
-        topo.observe_all([seg("10.0.7.0/24", "10.0.7.1", "er-1"), seg("10.0.7.0/24", "10.0.7.9", "er-2")]);
+        topo.observe_all([
+            seg("10.0.7.0/24", "10.0.7.1", "er-1"),
+            seg("10.0.7.0/24", "10.0.7.9", "er-2"),
+        ]);
         assert!(matches!(
             topo.conflicts.as_slice(),
             [Conflict::SegmentParamsDiff { field, .. }] if field == "gateway"
@@ -642,7 +772,10 @@ mod tests {
             port: None,
             origin: Origin::new("pris-second", "ip-neigh").at_site("pris"),
         }]);
-        assert!(matches!(topo.conflicts.as_slice(), [Conflict::SameIpDiffMac { .. }]));
+        assert!(matches!(
+            topo.conflicts.as_slice(),
+            [Conflict::SameIpDiffMac { .. }]
+        ));
     }
 
     #[test]
@@ -660,6 +793,24 @@ mod tests {
         };
         topo.observe_all([lease.clone(), lease]);
         assert_eq!(topo.leases.len(), 1);
+    }
+
+    #[test]
+    fn mac_only_attachment_preserves_parent_port() {
+        let mut topo = Topology::empty();
+        topo.observe_all([Observation::Attachment {
+            mac: MacAddress::parse("02:00:00:00:00:05").unwrap(),
+            hostname: Some("camera".into()),
+            port: PortRef {
+                device: "switch-1".into(),
+                port: "g25".into(),
+                vif: None,
+            },
+            origin: Origin::new("switch-1", "bridge-fdb"),
+        }]);
+        let node = &topo.nodes["02:00:00:00:00:05"];
+        assert!(node.hostnames.contains("camera"));
+        assert_eq!(node.ports["switch-1/g25"].b.as_ref().unwrap().port, "g25");
     }
 
     #[test]
