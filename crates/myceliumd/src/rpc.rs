@@ -386,6 +386,30 @@ impl Daemon {
                 }))
                 .map_err(json_err)
             }
+            Request::ConsolePlan { id } => {
+                let saved = self.saved.lock().await;
+                let device = saved
+                    .values()
+                    .find(|device| device.meta.id.to_string() == id)
+                    .ok_or_else(|| MyceliumError::UnknownDevice(id.clone()))?;
+                if device.meta.driver != "redfish" || device.meta.vendor.as_deref() != Some("HPE") {
+                    return Err(MyceliumError::Unsupported {
+                        device: id,
+                        capability: "interactive text console".into(),
+                    });
+                }
+                let username = device.username.clone().ok_or_else(|| {
+                    MyceliumError::Validation(format!("{} has no console username", device.meta.id))
+                })?;
+                to_value(serde_json::json!({
+                    "device": device.meta.id,
+                    "kind": "ilo4_textcons",
+                    "host": device.meta.address,
+                    "username": username,
+                    "password_env": device.password_env,
+                }))
+                .map_err(json_err)
+            }
             Request::Shutdown => {
                 self.persist().await?;
                 self.persist_topology().await?;

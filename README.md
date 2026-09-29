@@ -106,11 +106,17 @@ mycelium add 192.168.20.11 --driver redfish --user Administrator --password-env 
 mycelium call ilo-mxq33702q8 server.power-state
 mycelium call ilo-mxq33702q8 server.thermal
 mycelium call ilo-mxq33702q8 server.power-on --write --dry-run
+mycelium console ilo-mxq33702q8
 ```
 
 Controller passwords remain env-backed; inventory persists only the variable
 name. Self-signed controller certificates are accepted, but transport remains
 HTTPS-only.
+
+`mycelium console` opens the HPE iLO4 SSH text console in the current terminal.
+It accounts for iLO4's legacy SSH algorithms while preserving normal terminal
+ownership, so boot prompts such as LUKS can be answered interactively. Press
+`Esc` then `(` to leave `textcons` and return to the iLO CLI.
 
 ## UniFi access points
 

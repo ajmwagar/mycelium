@@ -66,6 +66,7 @@ usage:
   mycelium boot-path <device> --target <IP-or-URL>... [--json]
   mycelium nbde plan <device> --tang <IP-or-URL>... --threshold N [--json]
   mycelium tunnel <target>:<port> [--via DEVICE] [--local-port N] [--write] [--json]
+  mycelium console <device> [--json]
   mycelium remove <id>
 
 environment:
@@ -289,6 +290,7 @@ async fn run(cmd: &str, args: &[String]) -> Result<Vec<String>, ClientError> {
         }
         "nbde" => nbde(args).await,
         "tunnel" => tunnel(args).await,
+        "console" => console(args).await,
         "remove" => {
             let f = parse_flags(args);
             let id = f.rest.first().ok_or(err_usage("remove needs an id"))?;
@@ -300,6 +302,64 @@ async fn run(cmd: &str, args: &[String]) -> Result<Vec<String>, ClientError> {
             "unknown command `{other}` (see `mycelium`)"
         ))),
     }
+}
+
+async fn console(args: &[String]) -> Result<Vec<String>, ClientError> {
+    let f = parse_flags(args);
+    let id = f
+        .rest
+        .first()
+        .ok_or(err_usage("console needs a device id"))?;
+    let mut client = connect().await?;
+    let plan = client
+        .call(&Request::ConsolePlan { id: id.clone() })
+        .await?;
+    if f.json {
+        return Ok(vec![plan.to_string()]);
+    }
+    run_console(&plan)?;
+    Ok(vec!["console closed".into()])
+}
+
+fn run_console(plan: &serde_json::Value) -> Result<(), ClientError> {
+    if plan["kind"].as_str() != Some("ilo4_textcons") {
+        return Err(err_usage("daemon returned an unsupported console kind"));
+    }
+    let host = plan["host"]
+        .as_str()
+        .ok_or(err_usage("console plan has no host"))?;
+    let username = plan["username"]
+        .as_str()
+        .ok_or(err_usage("console plan has no username"))?;
+    let password_name = plan["password_env"]
+        .as_str()
+        .ok_or(err_usage("console plan has no password environment"))?;
+    let password = std::env::var(password_name).map_err(|_| {
+        err_usage(&format!(
+            "{password_name} is not exported; source the credential environment first"
+        ))
+    })?;
+    let destination = format!("{username}@{host}");
+    let script = r#"
+set timeout 20
+spawn sshpass -e ssh -tt -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o KexAlgorithms=+diffie-hellman-group14-sha1 -o HostKeyAlgorithms=+ssh-rsa -- [lindex $argv 0]
+expect {
+  -re {hpiLO->} { send -- "textcons\r" }
+  timeout { puts stderr "timed out waiting for iLO CLI"; exit 3 }
+  eof { puts stderr "iLO disconnected before console start"; exit 4 }
+}
+set timeout -1
+interact
+"#;
+    let status = std::process::Command::new("expect")
+        .args(["-c", script, &destination])
+        .env("SSHPASS", password)
+        .status()
+        .map_err(|error| err_usage(&format!("could not launch console: {error}")))?;
+    if !status.success() {
+        return Err(err_usage(&format!("console exited with {status}")));
+    }
+    Ok(())
 }
 
 async fn tunnel(args: &[String]) -> Result<Vec<String>, ClientError> {

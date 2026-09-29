@@ -53,6 +53,11 @@ pub enum Request {
         #[serde(default)]
         via: Option<String>,
     },
+    /// Resolve a device's interactive out-of-band console without sending
+    /// credentials over RPC.
+    ConsolePlan {
+        id: String,
+    },
     /// Persist state and exit.
     Shutdown,
 }
