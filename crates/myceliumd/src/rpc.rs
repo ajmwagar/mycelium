@@ -300,6 +300,7 @@ impl Daemon {
                     let mut topo = self.topology.lock().await;
                     topo.observe_all(observations)
                 };
+                warnings.extend(self.fingerprint_services().await);
                 self.persist_topology().await?;
                 to_value(serde_json::json!({
                     "report": report,
@@ -421,6 +422,85 @@ impl Daemon {
             }
         }
     }
+
+    /// Fingerprint only endpoints already reported by an authoritative
+    /// driver. This never adds hosts or ports and is deliberately bounded.
+    async fn fingerprint_services(&self) -> Vec<String> {
+        let saved = self.saved.lock().await;
+        let topology = self.topology.lock().await;
+        let candidates = topology
+            .nodes
+            .iter()
+            .filter_map(|(node_id, node)| {
+                let host = saved
+                    .values()
+                    .find(|saved| saved.meta.id.to_string() == *node_id)?
+                    .meta
+                    .address
+                    .split(':')
+                    .next()?
+                    .to_owned();
+                Some(node.services.iter().filter_map(move |(key, service)| {
+                    (service.product.is_none() && matches!(service.name.as_str(), "http" | "https"))
+                        .then(|| {
+                            (
+                                node_id.clone(),
+                                key.clone(),
+                                host.clone(),
+                                service.name.clone(),
+                                service.port,
+                            )
+                        })
+                }))
+            })
+            .flatten()
+            .collect::<Vec<_>>();
+        drop(topology);
+        drop(saved);
+
+        let client = match reqwest::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .timeout(std::time::Duration::from_secs(3))
+            .redirect(reqwest::redirect::Policy::limited(2))
+            .build()
+        {
+            Ok(client) => client,
+            Err(error) => return vec![format!("service fingerprint client: {error}")],
+        };
+        let mut pending = tokio::task::JoinSet::new();
+        for (node_id, key, host, scheme, port) in candidates {
+            let url = format!("{scheme}://{host}:{port}/");
+            let client = client.clone();
+            pending.spawn(async move {
+                let result = fingerprint_http(&client, &url).await;
+                (node_id, key, scheme, port, result)
+            });
+        }
+        let mut warnings = Vec::new();
+        while let Some(joined) = pending.join_next().await {
+            let Ok((node_id, key, scheme, port, result)) = joined else {
+                warnings.push("service fingerprint task failed".into());
+                continue;
+            };
+            match result {
+                Ok(Some(product)) => {
+                    if let Some(service) = self
+                        .topology
+                        .lock()
+                        .await
+                        .nodes
+                        .get_mut(&node_id)
+                        .and_then(|node| node.services.get_mut(&key))
+                    {
+                        service.product = Some(product);
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => warnings.push(format!("{node_id} {scheme}:{port}: {error}")),
+            }
+        }
+        warnings
+    }
 }
 
 fn creds_from(s: &SavedDevice) -> CredentialSet {
@@ -430,6 +510,44 @@ fn creds_from(s: &SavedDevice) -> CredentialSet {
         key_path: s.key_path.clone(),
         sudo_password: None,
     }
+}
+
+async fn fingerprint_http(
+    client: &reqwest::Client,
+    url: &str,
+) -> std::result::Result<Option<String>, reqwest::Error> {
+    let mut response = client.get(url).send().await?;
+    let server = response
+        .headers()
+        .get(reqwest::header::SERVER)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+    let mut body = Vec::new();
+    while body.len() < 65_536 {
+        let Some(chunk) = response.chunk().await? else {
+            break;
+        };
+        let remaining = 65_536 - body.len();
+        body.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+    }
+    Ok(classify_http(&server, &String::from_utf8_lossy(&body)))
+}
+
+fn classify_http(server: &str, body: &str) -> Option<String> {
+    let evidence = format!("{server}\n{body}").to_ascii_lowercase();
+    [
+        ("gramps web", "Gramps Web"),
+        ("frigate", "Frigate"),
+        ("home assistant", "Home Assistant"),
+        ("warpgate", "Warpgate"),
+        ("unifi", "UniFi Network"),
+        ("plex", "Plex Media Server"),
+        ("airtunes", "Apple AirTunes"),
+    ]
+    .into_iter()
+    .find(|(needle, _)| evidence.contains(needle))
+    .map(|(_, product)| product.to_owned())
 }
 
 fn json_err(e: serde_json::Error) -> MyceliumError {
@@ -619,6 +737,19 @@ mod tests {
             topology: Mutex::new(Topology::empty()),
             saved: Mutex::new(BTreeMap::new()),
         }
+    }
+
+    #[test]
+    fn fingerprints_known_web_products_from_bounded_evidence() {
+        assert_eq!(
+            classify_http("gunicorn", "<meta name=description content='Gramps Web'>").as_deref(),
+            Some("Gramps Web")
+        );
+        assert_eq!(
+            classify_http("nginx", "<title>Frigate</title>").as_deref(),
+            Some("Frigate")
+        );
+        assert_eq!(classify_http("nginx", "generic page"), None);
     }
 
     #[tokio::test]
