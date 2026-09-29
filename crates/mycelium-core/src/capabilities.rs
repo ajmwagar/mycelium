@@ -130,30 +130,26 @@ pub trait Sensors: Device {
     }
 }
 
-// Blanket wiring: every Device gets the facades (drivers override as needed).
-#[async_trait]
-impl<T: Device + ?Sized> Identity for T {}
-#[async_trait]
-impl<T: Device + ?Sized> VlanManagement for T {}
-#[async_trait]
-impl<T: Device + ?Sized> DhcpManagement for T {}
-#[async_trait]
-impl<T: Device + ?Sized> DnsFiltering for T {}
-#[async_trait]
-impl<T: Device + ?Sized> Wireless for T {}
-#[async_trait]
-impl<T: Device + ?Sized> Sensors for T {}
+// No blanket impls: a device implements only the slices it honestly
+// supports, and may override any method where the conventional shape does
+// not match the appliance (e.g. EdgeOS has no VLAN objects separable from
+// port membership). The default bodies route to the conventional ids so
+// supporting a slice is usually a one-line `impl Trait for Device {}`.
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::device::{DeviceId, DeviceKind, DeviceMeta};
     use crate::inventory::Device;
+    use crate::params;
     use crate::spec::CapSpec;
     use crate::MyceliumError;
     use std::collections::BTreeMap;
 
     struct OnlyVlans;
+
+    #[async_trait]
+    impl VlanManagement for OnlyVlans {}
 
     #[async_trait]
     impl Device for OnlyVlans {
@@ -198,7 +194,7 @@ mod tests {
     async fn undeclared_slice_is_unsupported_not_panic() {
         let dev = OnlyVlans;
         let ctx = ExecContext::readonly(ID_DHCP_LIST_POOLS);
-        let err = dev.list_pools(&ctx).await.unwrap_err();
+        let err = dev.invoke(&ctx, ID_DHCP_LIST_POOLS, Params::new()).await.unwrap_err();
         assert!(matches!(err, MyceliumError::UnknownCapability(_)));
     }
 }

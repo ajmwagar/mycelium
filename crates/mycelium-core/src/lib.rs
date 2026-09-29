@@ -18,6 +18,7 @@ pub mod error;
 pub mod exec;
 pub mod inventory;
 pub mod spec;
+pub mod topology;
 pub mod value;
 
 pub use capabilities::{
@@ -32,4 +33,8 @@ pub use inventory::{
     result_from_outcome, CapabilityInfo, Device, Inventory, InvokeResult,
 };
 pub use spec::{CapResult, CapSpec, ParamSpec, ParamType};
+pub use topology::{
+    ipv4_in_cidr, Conflict, IpRecord, LeaseRecord, Link, LinkState, MacAddress, Observation,
+    Origin, PortRef, Segment, SegmentKind, TopoNode, Topology, TopologyReport, VlanId,
+};
 pub use value::{IntoValue, Params, Value};
