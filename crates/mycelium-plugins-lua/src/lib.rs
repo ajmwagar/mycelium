@@ -225,7 +225,7 @@ impl Driver for LuaDriver {
         let plugin = plugin_table(&lua, &self.plugin.name)?;
         let f: mlua::Function = plugin.get("match").expect("checked");
         let desc = serde_json::to_value(match target {
-            Target::Host { host, port } => serde_json::json!({"address": host, "port": port.unwrap_or(0)}),
+            Target::Host { host, port, .. } => serde_json::json!({"address": host, "port": port.unwrap_or(0)}),
             Target::Subnet { network } => serde_json::json!({"subnet": network}),
         })
         .expect("infallible");
@@ -251,7 +251,7 @@ impl Driver for LuaDriver {
         }
 
         let address = match target {
-            Target::Host { host, port } => format!("{host}:{}", port.unwrap_or(0)),
+            Target::Host { host, port, .. } => format!("{host}:{}", port.unwrap_or(0)),
             Target::Subnet { network } => network.clone(),
         };
         let device = LuaDevice {
@@ -321,6 +321,32 @@ impl Device for LuaDevice {
 
     fn capabilities(&self) -> BTreeMap<String, CapSpec> {
         self.caps()
+    }
+
+    /// A plugin that declares `topology.observe` (pure result: an array of
+    /// observation rows) contributes to the network map.
+    async fn observe(&self) -> Result<(Vec<mycelium_core::Observation>, Vec<String>)> {
+        const ID: &str = "topology.observe";
+        if !self.caps().contains_key(ID) {
+            return Ok((Vec::new(), Vec::new()));
+        }
+        let ctx = ExecContext::readonly(ID);
+        let out = self.invoke(&ctx, ID, Params::new()).await?;
+        match out.output {
+            Value::List(rows) => {
+                let json = serde_json::Value::Array(rows.iter().map(Value::to_json).collect());
+                let obs: Vec<mycelium_core::Observation> =
+                    serde_json::from_value(json).map_err(|e| MyceliumError::Plugin {
+                        plugin: self.plugin.name.clone(),
+                        message: format!("topology.observe rows must match Observation: {e}"),
+                    })?;
+                Ok((obs, Vec::new()))
+            }
+            _ => Err(MyceliumError::Plugin {
+                plugin: self.plugin.name.clone(),
+                message: "topology.observe must return a list result".into(),
+            }),
+        }
     }
 
     async fn exec(&self, ctx: &ExecContext, cap: &str, params: Params) -> Result<CapResult> {
@@ -462,7 +488,7 @@ mod tests {
     async fn match_is_pure_lua_on_target_desc() {
         let (plugin, _transport) = fixture();
         let driver = plugin.driver(Arc::new(|_: Target, _| async { panic!("no connect for match") }));
-        assert!(driver.recognizes(&Target::Host { host: "x".into(), port: Some(8053) }, &CredentialSet::default()).await.unwrap());
+        assert!(driver.recognizes(&Target::Host { host: "x".into(), port: Some(8053), jump: None }, &CredentialSet::default()).await.unwrap());
         assert!(!driver.recognizes(&Target::host("x"), &CredentialSet::default()).await.unwrap());
     }
 

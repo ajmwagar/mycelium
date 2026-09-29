@@ -33,6 +33,13 @@ impl EdgeOsDriver {
         }
     }
 
+    fn jump_of(target: &Target) -> Option<String> {
+        match target {
+            Target::Host { jump, .. } => jump.clone(),
+            Target::Subnet { .. } => None,
+        }
+    }
+
     fn host_of(target: &Target) -> Result<&str> {
         match target {
             Target::Host { host, .. } => Ok(host),
@@ -69,31 +76,50 @@ impl Driver for EdgeOsDriver {
 
     async fn recognizes(&self, target: &Target, creds: &CredentialSet) -> Result<bool> {
         let host = Self::host_of(target)?;
-        let Ok(session) =
-            SshSession::connect(host, Self::port_of(target), creds, self.connect_timeout).await
-        else {
-            // transport/auth failure => not EdgeOS, or unreachable; the
-            // daemon surfaces raw connect errors via attach(), which does
-            // not swallow them.
-            return Ok(false);
+        let jump = Self::jump_of(target);
+        let session = match SshSession::connect(host, Self::port_of(target), creds, self.connect_timeout, jump.as_deref()).await {
+            Ok(s) => s,
+            // Unreachable/refused => not this class. But bad credentials is
+            // the user's error, not a negative observation: fail loud.
+            Err(MyceliumError::Auth(_)) => return Err(MyceliumError::Auth(format!("{host}: {}", creds.username().unwrap_or("?")))),
+            Err(e) => {
+                eprintln!("edgeos: recognize {host} failed: {e}");
+                return Ok(false);
+            }
         };
-        match session.exec("show version").await {
+        match session.cli("show version").await {
             Ok(out) if out.success() => {
                 let text = out.stdout;
-                Ok(text.contains("vyos")
+                let hit = text.contains("vyos")
                     || text.contains("EdgeOS")
                     || text.contains("EdgeRouter")
                     || text.contains("EdgeRunner")
-                    || text.contains("Ubiquiti"))
+                    || text.contains("Ubiquiti");
+                if !hit {
+                    eprintln!("edgeos: {host} banner matched no known marker:\n{}", &text[..text.len().min(400)]);
+                }
+                Ok(hit)
             }
-            _ => Ok(false),
+            Ok(out) => {
+                eprintln!(
+                    "edgeos: {host} probe exit {}: {}",
+                    out.exit_code,
+                    out.stderr.trim().lines().next().unwrap_or("")
+                );
+                Ok(false)
+            }
+            Err(e) => {
+                eprintln!("edgeos: recognize {host} probe failed: {e}");
+                Ok(false)
+            }
         }
     }
 
     async fn attach(&self, target: &Target, creds: &CredentialSet, inventory: &Inventory) -> Result<DeviceId> {
         let host = Self::host_of(target)?.to_owned();
+        let jump = Self::jump_of(target);
         let session =
-            SshSession::connect(&host, Self::port_of(target), creds, self.connect_timeout).await?;
+            SshSession::connect(&host, Self::port_of(target), creds, self.connect_timeout, jump.as_deref()).await?;
         let (identity, config) = EdgeOsDevice::identify(&session).await?;
         let model = identity.model.clone().or_else(|| config.hostname.clone());
         let kind = model.as_deref().map(classify).unwrap_or(DeviceKind::Router);

@@ -350,12 +350,53 @@ impl EdgeConfig {
                 }
                 "default-router" => subnet.default_router = tail.first().and_then(|v| v.parse::<IpAddr>().ok()),
                 "domain-name" => subnet.domain_name = tail.first().cloned(),
-                "lease-time" => subnet.lease_time = tail.first().and_then(|v| v.parse::<u32>().ok()),
-                "name-server" => {
+                "lease" | "lease-time" => subnet.lease_time = tail.first().and_then(|v| v.parse::<u32>().ok()),
+                "dns-server" | "name-server" => {
                     if let Some(ip) = tail.first().and_then(|v| v.parse::<IpAddr>().ok()) {
                         if !subnet.name_servers.contains(&ip) {
                             subnet.name_servers.push(ip);
                         }
+                    }
+                }
+                // classic EdgeOS range: `start X stop Y`
+                "start" => {
+                    let Some(value) = tail.first().and_then(|v| v.parse::<IpAddr>().ok()) else {
+                        return;
+                    };
+                    let stop = tail.get(2).and_then(|v| v.parse::<IpAddr>().ok());
+                    subnet.ranges.push(DhcpRange { start: Some(value), stop });
+                }
+                "stop" => {
+                    if let Some(stop) = tail.first().and_then(|v| v.parse::<IpAddr>().ok()) {
+                        if let Some(open) = subnet.ranges.iter_mut().find(|r| r.start.is_some() && r.stop.is_none()) {
+                            open.stop = Some(stop);
+                        } else {
+                            subnet.ranges.push(DhcpRange { start: None, stop: Some(stop) });
+                        }
+                    }
+                }
+                // classic EdgeOS leases: `static-mapping NAME ip-address X` / `mac-address Y`
+                "static-mapping" => {
+                    let Some(name) = tail.first() else { return };
+                    let entry = match subnet.static_leases.iter_mut().find(|l| l.name.as_deref() == Some(name.as_str())) {
+                        Some(e) => e,
+                        None => {
+                            subnet.static_leases.push(StaticLease {
+                                mac: MacAddress([0; 6]),
+                                ip: None,
+                                name: Some(name.clone()),
+                            });
+                            subnet.static_leases.last_mut().unwrap()
+                        }
+                    };
+                    match (tail.get(1).map(|s| s.as_str()), tail.get(2)) {
+                        (Some("ip-address"), Some(ip)) => entry.ip = ip.parse().ok(),
+                        (Some("mac-address"), Some(mac)) => {
+                            if let Some(m) = MacAddress::parse(mac) {
+                                entry.mac = m;
+                            }
+                        }
+                        _ => {}
                     }
                 }
                 "static-mac" => {
@@ -374,7 +415,7 @@ impl EdgeConfig {
                         }
                     };
                     match (tail.get(1).map(|s| s.as_str()), tail.get(2)) {
-                        (Some("ip"), Some(ip)) => entry.ip = ip.parse().ok(),
+                        (Some("ip") | Some("ip-address"), Some(ip)) => entry.ip = ip.parse().ok(),
                         (Some("name"), Some(n)) => entry.name = Some(n.clone()),
                         _ => {}
                     }
@@ -394,7 +435,10 @@ pub struct ArpEntry {
     pub kind: String,
 }
 
-/// Parse `show arp` (and, best-effort, `show ipv6 neighbors`).
+/// Parse the ARP/neigh table. Two real shapes:
+/// - classic: `10.0.7.25  aa:bb:cc:dd:ee:ff  eth0  dynamic`
+/// - `show arp` on EdgeOS (ip neigh): `192.168.99.12  ether  c0:ff:...  C  eth1.99`
+/// `(incomplete)` rows carry no MAC and are skipped.
 pub fn parse_arp_table(text: &str) -> Vec<ArpEntry> {
     let mut out = Vec::new();
     for line in text.lines() {
@@ -402,16 +446,26 @@ pub fn parse_arp_table(text: &str) -> Vec<ArpEntry> {
         if cols.len() < 2 {
             continue;
         }
-        let (Some(ip), Some(mac)) = (cols[0].parse::<IpAddr>().ok(), MacAddress::parse(cols[1]))
-        else {
+        let Ok(ip) = cols[0].parse::<IpAddr>() else { continue };
+        let Some(mac_idx) = cols[1..].iter().position(|c| MacAddress::parse(c).is_some()) else {
             continue;
         };
-        out.push(ArpEntry {
-            ip,
-            mac,
-            iface: cols.get(2).unwrap_or(&"?").to_string(),
-            kind: cols.get(3).unwrap_or(&"dynamic").to_string(),
-        });
+        let mac_idx = mac_idx + 1;
+        let mac = MacAddress::parse(cols[mac_idx]).unwrap();
+        let (iface, kind) = if cols.get(mac_idx + 1) == Some(&"C") || cols.get(mac_idx + 1) == Some(&"R")
+        {
+            // ip neigh: flags then iface
+            (
+                cols.get(mac_idx + 2).unwrap_or(&"?").to_string(),
+                "dynamic".to_string(),
+            )
+        } else {
+            (
+                cols.get(mac_idx + 1).unwrap_or(&"?").to_string(),
+                cols.get(mac_idx + 2).unwrap_or(&"dynamic").to_string(),
+            )
+        };
+        out.push(ArpEntry { ip, mac, iface, kind });
     }
     out
 }
@@ -490,6 +544,23 @@ set system host name 'er-10x'
     #[test]
     fn parses_arp_table() {
         let text = "\
+Address                  HWtype  HWaddress           Flags Mask            Iface
+192.168.99.12            ether   c0:ff:d4:a7:ec:c4   C                     eth1.99
+192.168.1.7                      (incomplete)                              eth1
+192.168.10.74            ether   dc:a6:32:fb:86:68   C                     eth1.10
+192.168.30.12                    (incomplete)                              eth1.30
+";
+        let entries = parse_arp_table(text);
+        assert_eq!(entries.len(), 2, "{entries:?}");
+        assert_eq!(entries[0].ip.to_string(), "192.168.99.12");
+        assert_eq!(entries[0].mac.to_string(), "c0:ff:d4:a7:ec:c4");
+        assert_eq!(entries[0].iface, "eth1.99");
+        assert_eq!(entries[1].iface, "eth1.10");
+    }
+
+    #[test]
+    fn parses_classic_arp_table() {
+        let text = "\
 Address          Mac Address        Interface   Type
 10.0.7.25        dc:a6:32:11:22:33  eth0        dynamic
 10.0.7.1         00:d0:41:aa:bb:cc  eth0        static
@@ -497,7 +568,6 @@ garbage line here
 ";
         let entries = parse_arp_table(text);
         assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].ip.to_string(), "10.0.7.25");
         assert_eq!(entries[0].iface, "eth0");
         assert_eq!(entries[1].kind, "static");
     }
@@ -505,5 +575,31 @@ garbage line here
     #[test]
     fn parses_host_name() {
         assert_eq!(parse_host_name("Host name: er-10x").as_deref(), Some("er-10x"));
+    }
+
+    // The classic EdgeOS 2.x dialect, captured from a live EdgeRouter 6P.
+    #[test]
+    fn parses_classic_vyos_dhcp_dialect() {
+        let text = "\
+set service dhcp-server shared-network-name CCTV subnet 192.168.30.0/24 default-router 192.168.30.1
+set service dhcp-server shared-network-name CCTV subnet 192.168.30.0/24 dns-server 1.1.1.1
+set service dhcp-server shared-network-name CCTV subnet 192.168.30.0/24 dns-server 9.9.9.9
+set service dhcp-server shared-network-name CCTV subnet 192.168.30.0/24 lease 86400
+set service dhcp-server shared-network-name CCTV subnet 192.168.30.0/24 start 192.168.30.10 stop 192.168.30.250
+set service dhcp-server shared-network-name CCTV subnet 192.168.30.0/24 static-mapping Camera1 ip-address 192.168.30.11
+set service dhcp-server shared-network-name CCTV subnet 192.168.30.0/24 static-mapping Camera1 mac-address 'a0:60:32:05:00:ca'
+";
+        let cfg = EdgeConfig::from_commands(text);
+        let pool = &cfg.dhcp[0];
+        assert_eq!(pool.name, "CCTV");
+        let sub = &pool.subnets[0];
+        assert_eq!(sub.lease_time, Some(86400));
+        assert_eq!(sub.name_servers.len(), 2);
+        assert_eq!(sub.ranges[0].start.unwrap().to_string(), "192.168.30.10");
+        assert_eq!(sub.ranges[0].stop.unwrap().to_string(), "192.168.30.250");
+        let cam = &sub.static_leases[0];
+        assert_eq!(cam.name.as_deref(), Some("Camera1"));
+        assert_eq!(cam.mac.to_string(), "a0:60:32:05:00:ca");
+        assert_eq!(cam.ip.unwrap().to_string(), "192.168.30.11");
     }
 }

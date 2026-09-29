@@ -141,7 +141,6 @@ mod tests {
     use super::*;
     use crate::device::{DeviceId, DeviceKind, DeviceMeta};
     use crate::inventory::Device;
-    use crate::params;
     use crate::spec::CapSpec;
     use crate::MyceliumError;
     use std::collections::BTreeMap;

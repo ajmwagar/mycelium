@@ -115,13 +115,13 @@ impl EdgeOsDevice {
     /// by Lua plugins that borrow this transport).
     pub async fn identify(session: &SshSession) -> Result<(EdgeIdentity, EdgeConfig)> {
         let out = session
-            .exec("show version")
+            .cli("show version")
             .await
             .map_err(|e| MyceliumError::Transport(format!("identify: {e}")))?;
         if !out.success() {
             return Err(MyceliumError::Device { exit_code: out.exit_code, stderr: out.stderr });
         }
-        let cfg_out = session.exec(PRIMARY_COMMAND).await?;
+        let cfg_out = session.cli(PRIMARY_COMMAND).await?;
         if !cfg_out.success() {
             return Err(MyceliumError::Device { exit_code: cfg_out.exit_code, stderr: cfg_out.stderr });
         }
@@ -155,7 +155,7 @@ impl EdgeOsDevice {
         script.reserve(cmds.iter().map(|c| c.len() + 1).sum::<usize>() + 32);
         script.push_str(&cmds.join("\n"));
         script.push_str("\ndetect commit\nsave\nexit\n");
-        let out = self.session.exec(&script).await?;
+        let out = self.session.cli(&script).await?;
         let failed = !out.success() || line_error(&out.stdout).is_some();
         if failed {
             let detail = line_error(&out.stdout)
@@ -167,7 +167,7 @@ impl EdgeOsDevice {
     }
 
     async fn show(&self, command: &str) -> Result<String> {
-        let out = self.session.exec(command).await?;
+        let out = self.session.cli(command).await?;
         if out.success() && line_error(&out.stdout).is_none() {
             Ok(out.stdout)
         } else {
@@ -186,10 +186,8 @@ impl EdgeOsDevice {
     }
 
     /// Topology facts as seen from this appliance, plus non-fatal scan
-    /// warnings (e.g. arp table unavailable). Not a declared capability
-    /// (that would force every device class to speak vyos); the daemon
-    /// calls it through the EdgeOS-typed handle.
-    pub async fn observations(&self) -> Result<(Vec<mycelium_core::Observation>, Vec<String>)> {
+    /// warnings. The daemon pulls this on `mycelium scan`.
+    async fn observations_impl(&self) -> Result<(Vec<mycelium_core::Observation>, Vec<String>)> {
         use mycelium_core::{
             LeaseRecord, LinkState, Observation, Origin, PortRef, Segment, SegmentKind,
         };
@@ -323,6 +321,10 @@ impl Device for EdgeOsDevice {
 
     fn capabilities(&self) -> BTreeMap<String, CapSpec> {
         caps().clone()
+    }
+
+    async fn observe(&self) -> Result<(Vec<mycelium_core::Observation>, Vec<String>)> {
+        self.observations_impl().await
     }
 
     async fn exec(&self, ctx: &ExecContext, cap: &str, params: Params) -> Result<CapResult> {
@@ -478,8 +480,10 @@ impl Device for EdgeOsDevice {
 }
 
 fn serde_json_to_value<T: serde::Serialize>(v: &T) -> Result<Value> {
-    serde_json::from_value(serde_json::to_value(v).map_err(|e| MyceliumError::Parse(e.to_string()))?)
-        .map_err(|e| MyceliumError::Parse(e.to_string()))
+    // through *plain* JSON via the Value<->serde_json bridge; the serde
+    // derive form of mycelium Value is Rust-tagged and not the wire shape
+    let j = serde_json::to_value(v).map_err(|e| MyceliumError::Parse(e.to_string()))?;
+    Ok(Value::from_json(&j))
 }
 
 #[async_trait]

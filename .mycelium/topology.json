@@ -1,0 +1,1077 @@
+{
+  "nodes": {
+    "2c:59:e5:40:32:f6": {
+      "id": "2c:59:e5:40:32:f6",
+      "mac": [
+        44,
+        89,
+        229,
+        64,
+        50,
+        246
+      ],
+      "ips": {
+        "192.168.20.11": {
+          "addr": "192.168.20.11",
+          "prefix": null,
+          "vlan": null,
+          "origins": [
+            "6p-192-168-99-1:arp"
+          ]
+        }
+      },
+      "hostnames": [],
+      "device": false,
+      "ports": {
+        "eth1.20": {
+          "a": {
+            "device": "2c:59:e5:40:32:f6",
+            "port": "eth1.20",
+            "vif": null
+          },
+          "b": null,
+          "state": "unknown",
+          "origins": [
+            "6p-192-168-99-1:arp"
+          ]
+        }
+      },
+      "origins": [
+        "6p-192-168-99-1:arp"
+      ]
+    },
+    "40:44:f7:f4:5c:90": {
+      "id": "40:44:f7:f4:5c:90",
+      "mac": [
+        64,
+        68,
+        247,
+        244,
+        92,
+        144
+      ],
+      "ips": {
+        "192.168.40.10": {
+          "addr": "192.168.40.10",
+          "prefix": null,
+          "vlan": null,
+          "origins": [
+            "6p-192-168-99-1:arp"
+          ]
+        }
+      },
+      "hostnames": [],
+      "device": false,
+      "ports": {
+        "eth1.40": {
+          "a": {
+            "device": "40:44:f7:f4:5c:90",
+            "port": "eth1.40",
+            "vif": null
+          },
+          "b": null,
+          "state": "unknown",
+          "origins": [
+            "6p-192-168-99-1:arp"
+          ]
+        }
+      },
+      "origins": [
+        "6p-192-168-99-1:arp"
+      ]
+    },
+    "5c:13:cc:68:fa:ef": {
+      "id": "5c:13:cc:68:fa:ef",
+      "mac": [
+        92,
+        19,
+        204,
+        104,
+        250,
+        239
+      ],
+      "ips": {
+        "192.168.10.11": {
+          "addr": "192.168.10.11",
+          "prefix": null,
+          "vlan": null,
+          "origins": [
+            "6p-192-168-99-1:arp"
+          ]
+        }
+      },
+      "hostnames": [],
+      "device": false,
+      "ports": {
+        "eth1.10": {
+          "a": {
+            "device": "5c:13:cc:68:fa:ef",
+            "port": "eth1.10",
+            "vif": null
+          },
+          "b": null,
+          "state": "unknown",
+          "origins": [
+            "6p-192-168-99-1:arp"
+          ]
+        }
+      },
+      "origins": [
+        "6p-192-168-99-1:arp"
+      ]
+    },
+    "6p-192-168-99-1": {
+      "id": "6p-192-168-99-1",
+      "mac": null,
+      "ips": {
+        "192.168.1.1": {
+          "addr": "192.168.1.1",
+          "prefix": null,
+          "vlan": null,
+          "origins": [
+            "6p-192-168-99-1:config"
+          ]
+        },
+        "192.168.2.1": {
+          "addr": "192.168.2.1",
+          "prefix": null,
+          "vlan": null,
+          "origins": [
+            "6p-192-168-99-1:config"
+          ]
+        }
+      },
+      "hostnames": [],
+      "device": true,
+      "ports": {
+        "eth1": {
+          "a": {
+            "device": "6p-192-168-99-1",
+            "port": "eth1",
+            "vif": null
+          },
+          "b": null,
+          "state": "unknown",
+          "origins": [
+            "6p-192-168-99-1:config"
+          ]
+        },
+        "eth2": {
+          "a": {
+            "device": "6p-192-168-99-1",
+            "port": "eth2",
+            "vif": null
+          },
+          "b": null,
+          "state": "unknown",
+          "origins": [
+            "6p-192-168-99-1:config"
+          ]
+        }
+      },
+      "origins": [
+        "6p-192-168-99-1:config"
+      ]
+    },
+    "78:45:58:2c:1c:02": {
+      "id": "78:45:58:2c:1c:02",
+      "mac": [
+        120,
+        69,
+        88,
+        44,
+        28,
+        2
+      ],
+      "ips": {
+        "192.168.99.11": {
+          "addr": "192.168.99.11",
+          "prefix": null,
+          "vlan": null,
+          "origins": [
+            "6p-192-168-99-1:arp"
+          ]
+        }
+      },
+      "hostnames": [],
+      "device": false,
+      "ports": {
+        "eth1.99": {
+          "a": {
+            "device": "78:45:58:2c:1c:02",
+            "port": "eth1.99",
+            "vif": null
+          },
+          "b": null,
+          "state": "unknown",
+          "origins": [
+            "6p-192-168-99-1:arp"
+          ]
+        }
+      },
+      "origins": [
+        "6p-192-168-99-1:arp"
+      ]
+    },
+    "84:b2:61:a1:4d:bf": {
+      "id": "84:b2:61:a1:4d:bf",
+      "mac": [
+        132,
+        178,
+        97,
+        161,
+        77,
+        191
+      ],
+      "ips": {
+        "172.92.135.1": {
+          "addr": "172.92.135.1",
+          "prefix": null,
+          "vlan": null,
+          "origins": [
+            "6p-192-168-99-1:arp"
+          ]
+        }
+      },
+      "hostnames": [],
+      "device": false,
+      "ports": {
+        "eth0": {
+          "a": {
+            "device": "84:b2:61:a1:4d:bf",
+            "port": "eth0",
+            "vif": null
+          },
+          "b": null,
+          "state": "unknown",
+          "origins": [
+            "6p-192-168-99-1:arp"
+          ]
+        }
+      },
+      "origins": [
+        "6p-192-168-99-1:arp"
+      ]
+    },
+    "8e:89:68:d4:d9:ee": {
+      "id": "8e:89:68:d4:d9:ee",
+      "mac": [
+        142,
+        137,
+        104,
+        212,
+        217,
+        238
+      ],
+      "ips": {
+        "192.168.40.74": {
+          "addr": "192.168.40.74",
+          "prefix": null,
+          "vlan": null,
+          "origins": [
+            "6p-192-168-99-1:arp"
+          ]
+        }
+      },
+      "hostnames": [],
+      "device": false,
+      "ports": {
+        "eth1.40": {
+          "a": {
+            "device": "8e:89:68:d4:d9:ee",
+            "port": "eth1.40",
+            "vif": null
+          },
+          "b": null,
+          "state": "unknown",
+          "origins": [
+            "6p-192-168-99-1:arp"
+          ]
+        }
+      },
+      "origins": [
+        "6p-192-168-99-1:arp"
+      ]
+    },
+    "98:46:0a:89:db:44": {
+      "id": "98:46:0a:89:db:44",
+      "mac": [
+        152,
+        70,
+        10,
+        137,
+        219,
+        68
+      ],
+      "ips": {
+        "192.168.10.67": {
+          "addr": "192.168.10.67",
+          "prefix": null,
+          "vlan": null,
+          "origins": [
+            "6p-192-168-99-1:arp"
+          ]
+        }
+      },
+      "hostnames": [],
+      "device": false,
+      "ports": {
+        "eth1.10": {
+          "a": {
+            "device": "98:46:0a:89:db:44",
+            "port": "eth1.10",
+            "vif": null
+          },
+          "b": null,
+          "state": "unknown",
+          "origins": [
+            "6p-192-168-99-1:arp"
+          ]
+        }
+      },
+      "origins": [
+        "6p-192-168-99-1:arp"
+      ]
+    },
+    "98:78:00:5e:f0:b3": {
+      "id": "98:78:00:5e:f0:b3",
+      "mac": [
+        152,
+        120,
+        0,
+        94,
+        240,
+        179
+      ],
+      "ips": {
+        "192.168.40.67": {
+          "addr": "192.168.40.67",
+          "prefix": null,
+          "vlan": null,
+          "origins": [
+            "6p-192-168-99-1:arp"
+          ]
+        }
+      },
+      "hostnames": [],
+      "device": false,
+      "ports": {
+        "eth1.40": {
+          "a": {
+            "device": "98:78:00:5e:f0:b3",
+            "port": "eth1.40",
+            "vif": null
+          },
+          "b": null,
+          "state": "unknown",
+          "origins": [
+            "6p-192-168-99-1:arp"
+          ]
+        }
+      },
+      "origins": [
+        "6p-192-168-99-1:arp"
+      ]
+    },
+    "98:a3:16:e7:73:f0": {
+      "id": "98:a3:16:e7:73:f0",
+      "mac": [
+        152,
+        163,
+        22,
+        231,
+        115,
+        240
+      ],
+      "ips": {
+        "192.168.10.76": {
+          "addr": "192.168.10.76",
+          "prefix": null,
+          "vlan": null,
+          "origins": [
+            "6p-192-168-99-1:arp"
+          ]
+        }
+      },
+      "hostnames": [],
+      "device": false,
+      "ports": {
+        "eth1.10": {
+          "a": {
+            "device": "98:a3:16:e7:73:f0",
+            "port": "eth1.10",
+            "vif": null
+          },
+          "b": null,
+          "state": "unknown",
+          "origins": [
+            "6p-192-168-99-1:arp"
+          ]
+        }
+      },
+      "origins": [
+        "6p-192-168-99-1:arp"
+      ]
+    },
+    "9c:ad:ef:21:ec:67": {
+      "id": "9c:ad:ef:21:ec:67",
+      "mac": [
+        156,
+        173,
+        239,
+        33,
+        236,
+        103
+      ],
+      "ips": {
+        "192.168.10.55": {
+          "addr": "192.168.10.55",
+          "prefix": null,
+          "vlan": null,
+          "origins": [
+            "6p-192-168-99-1:arp"
+          ]
+        }
+      },
+      "hostnames": [],
+      "device": false,
+      "ports": {
+        "eth1.10": {
+          "a": {
+            "device": "9c:ad:ef:21:ec:67",
+            "port": "eth1.10",
+            "vif": null
+          },
+          "b": null,
+          "state": "unknown",
+          "origins": [
+            "6p-192-168-99-1:arp"
+          ]
+        }
+      },
+      "origins": [
+        "6p-192-168-99-1:arp"
+      ]
+    },
+    "a0:60:32:05:00:ca": {
+      "id": "a0:60:32:05:00:ca",
+      "mac": [
+        160,
+        96,
+        50,
+        5,
+        0,
+        202
+      ],
+      "ips": {
+        "192.168.30.11": {
+          "addr": "192.168.30.11",
+          "prefix": null,
+          "vlan": null,
+          "origins": [
+            "6p-192-168-99-1:arp"
+          ]
+        }
+      },
+      "hostnames": [],
+      "device": false,
+      "ports": {
+        "eth1.30": {
+          "a": {
+            "device": "a0:60:32:05:00:ca",
+            "port": "eth1.30",
+            "vif": null
+          },
+          "b": null,
+          "state": "unknown",
+          "origins": [
+            "6p-192-168-99-1:arp"
+          ]
+        }
+      },
+      "origins": [
+        "6p-192-168-99-1:arp"
+      ]
+    },
+    "b4:b7:42:69:46:46": {
+      "id": "b4:b7:42:69:46:46",
+      "mac": [
+        180,
+        183,
+        66,
+        105,
+        70,
+        70
+      ],
+      "ips": {
+        "192.168.2.97": {
+          "addr": "192.168.2.97",
+          "prefix": null,
+          "vlan": null,
+          "origins": [
+            "6p-192-168-99-1:arp"
+          ]
+        }
+      },
+      "hostnames": [],
+      "device": false,
+      "ports": {
+        "eth2": {
+          "a": {
+            "device": "b4:b7:42:69:46:46",
+            "port": "eth2",
+            "vif": null
+          },
+          "b": null,
+          "state": "unknown",
+          "origins": [
+            "6p-192-168-99-1:arp"
+          ]
+        }
+      },
+      "origins": [
+        "6p-192-168-99-1:arp"
+      ]
+    },
+    "c0:ff:d4:a7:ec:c4": {
+      "id": "c0:ff:d4:a7:ec:c4",
+      "mac": [
+        192,
+        255,
+        212,
+        167,
+        236,
+        196
+      ],
+      "ips": {
+        "192.168.99.12": {
+          "addr": "192.168.99.12",
+          "prefix": null,
+          "vlan": null,
+          "origins": [
+            "6p-192-168-99-1:arp"
+          ]
+        }
+      },
+      "hostnames": [],
+      "device": false,
+      "ports": {
+        "eth1.99": {
+          "a": {
+            "device": "c0:ff:d4:a7:ec:c4",
+            "port": "eth1.99",
+            "vif": null
+          },
+          "b": null,
+          "state": "unknown",
+          "origins": [
+            "6p-192-168-99-1:arp"
+          ]
+        }
+      },
+      "origins": [
+        "6p-192-168-99-1:arp"
+      ]
+    },
+    "c2:d9:80:ba:f1:ee": {
+      "id": "c2:d9:80:ba:f1:ee",
+      "mac": [
+        194,
+        217,
+        128,
+        186,
+        241,
+        238
+      ],
+      "ips": {
+        "192.168.10.82": {
+          "addr": "192.168.10.82",
+          "prefix": null,
+          "vlan": null,
+          "origins": [
+            "6p-192-168-99-1:arp"
+          ]
+        }
+      },
+      "hostnames": [],
+      "device": false,
+      "ports": {
+        "eth1.10": {
+          "a": {
+            "device": "c2:d9:80:ba:f1:ee",
+            "port": "eth1.10",
+            "vif": null
+          },
+          "b": null,
+          "state": "unknown",
+          "origins": [
+            "6p-192-168-99-1:arp"
+          ]
+        }
+      },
+      "origins": [
+        "6p-192-168-99-1:arp"
+      ]
+    },
+    "dc:a6:32:fb:86:68": {
+      "id": "dc:a6:32:fb:86:68",
+      "mac": [
+        220,
+        166,
+        50,
+        251,
+        134,
+        104
+      ],
+      "ips": {
+        "192.168.10.74": {
+          "addr": "192.168.10.74",
+          "prefix": null,
+          "vlan": null,
+          "origins": [
+            "6p-192-168-99-1:arp"
+          ]
+        }
+      },
+      "hostnames": [],
+      "device": false,
+      "ports": {
+        "eth1.10": {
+          "a": {
+            "device": "dc:a6:32:fb:86:68",
+            "port": "eth1.10",
+            "vif": null
+          },
+          "b": null,
+          "state": "unknown",
+          "origins": [
+            "6p-192-168-99-1:arp"
+          ]
+        }
+      },
+      "origins": [
+        "6p-192-168-99-1:arp"
+      ]
+    },
+    "ec:b5:fa:13:4f:06": {
+      "id": "ec:b5:fa:13:4f:06",
+      "mac": [
+        236,
+        181,
+        250,
+        19,
+        79,
+        6
+      ],
+      "ips": {
+        "192.168.10.15": {
+          "addr": "192.168.10.15",
+          "prefix": null,
+          "vlan": null,
+          "origins": [
+            "6p-192-168-99-1:arp"
+          ]
+        }
+      },
+      "hostnames": [],
+      "device": false,
+      "ports": {
+        "eth1.10": {
+          "a": {
+            "device": "ec:b5:fa:13:4f:06",
+            "port": "eth1.10",
+            "vif": null
+          },
+          "b": null,
+          "state": "unknown",
+          "origins": [
+            "6p-192-168-99-1:arp"
+          ]
+        }
+      },
+      "origins": [
+        "6p-192-168-99-1:arp"
+      ]
+    }
+  },
+  "segments": {
+    "192.168.10.0/24": {
+      "id": "192.168.10.0/24",
+      "kind": "lan",
+      "vlan": null,
+      "subnet": [
+        "192.168.10.0",
+        24
+      ],
+      "gw": "192.168.10.1",
+      "domain_name": "1.1.1.1",
+      "origins": [
+        "6p-192-168-99-1:dhcp-config"
+      ]
+    },
+    "192.168.11.0/24": {
+      "id": "192.168.11.0/24",
+      "kind": "lan",
+      "vlan": null,
+      "subnet": [
+        "192.168.11.0",
+        24
+      ],
+      "gw": "192.168.11.1",
+      "domain_name": null,
+      "origins": [
+        "6p-192-168-99-1:dhcp-config"
+      ]
+    },
+    "192.168.20.0/24": {
+      "id": "192.168.20.0/24",
+      "kind": "lan",
+      "vlan": null,
+      "subnet": [
+        "192.168.20.0",
+        24
+      ],
+      "gw": "192.168.20.1",
+      "domain_name": "1.1.1.1",
+      "origins": [
+        "6p-192-168-99-1:dhcp-config"
+      ]
+    },
+    "192.168.30.0/24": {
+      "id": "192.168.30.0/24",
+      "kind": "lan",
+      "vlan": null,
+      "subnet": [
+        "192.168.30.0",
+        24
+      ],
+      "gw": "192.168.30.1",
+      "domain_name": null,
+      "origins": [
+        "6p-192-168-99-1:dhcp-config"
+      ]
+    },
+    "192.168.40.0/24": {
+      "id": "192.168.40.0/24",
+      "kind": "lan",
+      "vlan": null,
+      "subnet": [
+        "192.168.40.0",
+        24
+      ],
+      "gw": "192.168.40.1",
+      "domain_name": null,
+      "origins": [
+        "6p-192-168-99-1:dhcp-config"
+      ]
+    },
+    "192.168.99.0/24": {
+      "id": "192.168.99.0/24",
+      "kind": "lan",
+      "vlan": null,
+      "subnet": [
+        "192.168.99.0",
+        24
+      ],
+      "gw": "192.168.99.1",
+      "domain_name": "1.1.1.1",
+      "origins": [
+        "6p-192-168-99-1:dhcp-config"
+      ]
+    },
+    "vlan:10": {
+      "id": "vlan:10",
+      "kind": "vlan",
+      "vlan": 10,
+      "subnet": null,
+      "gw": null,
+      "domain_name": null,
+      "origins": [
+        "6p-192-168-99-1:config"
+      ]
+    },
+    "vlan:11": {
+      "id": "vlan:11",
+      "kind": "vlan",
+      "vlan": 11,
+      "subnet": null,
+      "gw": null,
+      "domain_name": null,
+      "origins": [
+        "6p-192-168-99-1:config"
+      ]
+    },
+    "vlan:20": {
+      "id": "vlan:20",
+      "kind": "vlan",
+      "vlan": 20,
+      "subnet": null,
+      "gw": null,
+      "domain_name": null,
+      "origins": [
+        "6p-192-168-99-1:config"
+      ]
+    },
+    "vlan:30": {
+      "id": "vlan:30",
+      "kind": "vlan",
+      "vlan": 30,
+      "subnet": null,
+      "gw": null,
+      "domain_name": null,
+      "origins": [
+        "6p-192-168-99-1:config"
+      ]
+    },
+    "vlan:40": {
+      "id": "vlan:40",
+      "kind": "vlan",
+      "vlan": 40,
+      "subnet": null,
+      "gw": null,
+      "domain_name": null,
+      "origins": [
+        "6p-192-168-99-1:config"
+      ]
+    },
+    "vlan:99": {
+      "id": "vlan:99",
+      "kind": "vlan",
+      "vlan": 99,
+      "subnet": null,
+      "gw": null,
+      "domain_name": null,
+      "origins": [
+        "6p-192-168-99-1:config"
+      ]
+    }
+  },
+  "leases": [],
+  "conflicts": [],
+  "updated_from": [
+    {
+      "device": "6p-192-168-99-1",
+      "source": "config"
+    },
+    {
+      "device": "6p-192-168-99-1",
+      "source": "config"
+    },
+    {
+      "device": "6p-192-168-99-1",
+      "source": "config"
+    },
+    {
+      "device": "6p-192-168-99-1",
+      "source": "config"
+    },
+    {
+      "device": "6p-192-168-99-1",
+      "source": "config"
+    },
+    {
+      "device": "6p-192-168-99-1",
+      "source": "config"
+    },
+    {
+      "device": "6p-192-168-99-1",
+      "source": "config"
+    },
+    {
+      "device": "6p-192-168-99-1",
+      "source": "config"
+    },
+    {
+      "device": "6p-192-168-99-1",
+      "source": "config"
+    },
+    {
+      "device": "6p-192-168-99-1",
+      "source": "config"
+    },
+    {
+      "device": "6p-192-168-99-1",
+      "source": "config"
+    },
+    {
+      "device": "6p-192-168-99-1",
+      "source": "config"
+    },
+    {
+      "device": "6p-192-168-99-1",
+      "source": "dhcp-config"
+    },
+    {
+      "device": "6p-192-168-99-1",
+      "source": "dhcp-config"
+    },
+    {
+      "device": "6p-192-168-99-1",
+      "source": "dhcp-config"
+    },
+    {
+      "device": "6p-192-168-99-1",
+      "source": "dhcp-config"
+    },
+    {
+      "device": "6p-192-168-99-1",
+      "source": "dhcp-config"
+    },
+    {
+      "device": "6p-192-168-99-1",
+      "source": "dhcp-config"
+    },
+    {
+      "device": "6p-192-168-99-1",
+      "source": "config"
+    },
+    {
+      "device": "6p-192-168-99-1",
+      "source": "config"
+    },
+    {
+      "device": "6p-192-168-99-1",
+      "source": "config"
+    },
+    {
+      "device": "6p-192-168-99-1",
+      "source": "config"
+    },
+    {
+      "device": "6p-192-168-99-1",
+      "source": "config"
+    },
+    {
+      "device": "6p-192-168-99-1",
+      "source": "config"
+    },
+    {
+      "device": "6p-192-168-99-1",
+      "source": "config"
+    },
+    {
+      "device": "6p-192-168-99-1",
+      "source": "config"
+    },
+    {
+      "device": "6p-192-168-99-1",
+      "source": "config"
+    },
+    {
+      "device": "6p-192-168-99-1",
+      "source": "config"
+    },
+    {
+      "device": "6p-192-168-99-1",
+      "source": "config"
+    },
+    {
+      "device": "6p-192-168-99-1",
+      "source": "config"
+    },
+    {
+      "device": "6p-192-168-99-1",
+      "source": "config"
+    },
+    {
+      "device": "6p-192-168-99-1",
+      "source": "config"
+    },
+    {
+      "device": "6p-192-168-99-1",
+      "source": "dhcp-config"
+    },
+    {
+      "device": "6p-192-168-99-1",
+      "source": "dhcp-config"
+    },
+    {
+      "device": "6p-192-168-99-1",
+      "source": "dhcp-config"
+    },
+    {
+      "device": "6p-192-168-99-1",
+      "source": "dhcp-config"
+    },
+    {
+      "device": "6p-192-168-99-1",
+      "source": "dhcp-config"
+    },
+    {
+      "device": "6p-192-168-99-1",
+      "source": "dhcp-config"
+    },
+    {
+      "device": "6p-192-168-99-1",
+      "source": "arp"
+    },
+    {
+      "device": "6p-192-168-99-1",
+      "source": "arp"
+    },
+    {
+      "device": "6p-192-168-99-1",
+      "source": "arp"
+    },
+    {
+      "device": "6p-192-168-99-1",
+      "source": "arp"
+    },
+    {
+      "device": "6p-192-168-99-1",
+      "source": "arp"
+    },
+    {
+      "device": "6p-192-168-99-1",
+      "source": "arp"
+    },
+    {
+      "device": "6p-192-168-99-1",
+      "source": "arp"
+    },
+    {
+      "device": "6p-192-168-99-1",
+      "source": "arp"
+    },
+    {
+      "device": "6p-192-168-99-1",
+      "source": "arp"
+    },
+    {
+      "device": "6p-192-168-99-1",
+      "source": "arp"
+    },
+    {
+      "device": "6p-192-168-99-1",
+      "source": "arp"
+    },
+    {
+      "device": "6p-192-168-99-1",
+      "source": "arp"
+    },
+    {
+      "device": "6p-192-168-99-1",
+      "source": "arp"
+    },
+    {
+      "device": "6p-192-168-99-1",
+      "source": "arp"
+    },
+    {
+      "device": "6p-192-168-99-1",
+      "source": "arp"
+    },
+    {
+      "device": "6p-192-168-99-1",
+      "source": "arp"
+    },
+    {
+      "device": "6p-192-168-99-1",
+      "source": "config"
+    },
+    {
+      "device": "6p-192-168-99-1",
+      "source": "config"
+    }
+  ]
+}

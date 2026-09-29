@@ -18,9 +18,21 @@ use std::net::IpAddr;
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MacAddress(pub [u8; 6]);
+
+impl Serialize for MacAddress {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        s.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for MacAddress {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        MacAddress::parse(&s).ok_or_else(|| serde::de::Error::custom(format!("bad mac `{s}`")))
+    }
+}
 
 impl MacAddress {
     pub fn parse(s: &str) -> Option<Self> {

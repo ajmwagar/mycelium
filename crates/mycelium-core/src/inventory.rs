@@ -52,6 +52,13 @@ pub trait Device: Send + Sync {
     fn id(&self) -> DeviceId {
         self.meta().id.clone()
     }
+
+    /// Topology facts as seen from this device. Default: contributes
+    /// nothing. Devices with real visibility (routers, switches) override;
+    /// second item is non-fatal scan warnings (degraded passes stay loud).
+    async fn observe(&self) -> Result<(Vec<crate::topology::Observation>, Vec<String>)> {
+        Ok((Vec::new(), Vec::new()))
+    }
 }
 
 /// Info about one capability as surfaced by `mycelium describe`.
@@ -105,6 +112,11 @@ impl Inventory {
     pub fn add(&self, device: Arc<dyn Device>) {
         let mut guard = self.devices.lock().expect("inventory mutex poisoned");
         guard.insert(device.id(), device);
+    }
+
+    pub fn remove(&self, id: &str) -> Option<Arc<dyn Device>> {
+        let mut guard = self.devices.lock().expect("inventory mutex poisoned");
+        guard.remove(&DeviceId::new(id))
     }
 
     pub fn get(&self, id: &str) -> Result<Arc<dyn Device>> {

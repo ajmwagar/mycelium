@@ -3,5 +3,21 @@ name = "myceliumd"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "mycelium control-plane daemon: inventory, drivers, scans, topology over a Unix socket"
+
+[lib]
+name = "myceliumd"
+path = "src/lib.rs"
+
+[[bin]]
+name = "myceliumd"
+path = "src/main.rs"
 
 [dependencies]
+mycelium-core.workspace = true
+mycelium-driver-edgeos.workspace = true
+mycelium-plugins-lua.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
