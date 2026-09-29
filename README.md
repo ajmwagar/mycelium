@@ -120,8 +120,25 @@ ownership, so boot prompts such as LUKS can be answered interactively. Press
 
 ## UniFi access points
 
-Controller-managed UniFi APs expose their local management surface over SSH.
-The driver reads identity, adoption status, radio/SSID state, and associated
+The controller driver owns site-wide WLAN, AP, and client state through the
+UniFi Network API. Controller credentials remain environment-backed:
+
+```sh
+mycelium add 192.168.20.12:8443 --driver unifi-controller \
+  --user "$UNIFI_CONTROLLER_USER" --password-env UNIFI_CONTROLLER_PASS
+mycelium call <controller-id> wlan.list-ssids
+mycelium call <controller-id> unifi.list-aps
+mycelium call <controller-id> unifi.list-clients
+mycelium call <controller-id> wlan.guest-enable \
+  --param 'ssid=Guest' --param enabled=true --write --dry-run
+```
+
+The API projection deliberately excludes WLAN passphrases and unrelated
+private controller fields. Guest-policy changes require `--write`; dry-run
+resolves and displays the exact site and WLAN object without applying it.
+
+Controller-managed UniFi APs also expose a local recovery surface over SSH.
+The AP driver reads identity, adoption status, radio/SSID state, and associated
 stations. Controller reassignment and reboot are mutations and require both
 `--write` and an optional dry run first:
 

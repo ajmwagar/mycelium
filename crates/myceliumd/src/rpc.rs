@@ -10,7 +10,7 @@ use mycelium_driver_edgeos::{EdgeOsDriver, SshSession};
 use mycelium_driver_linux::LinuxDriver;
 use mycelium_driver_redfish::RedfishDriver;
 use mycelium_driver_snmp::SnmpDriver;
-use mycelium_driver_unifi::UnifiDriver;
+use mycelium_driver_unifi::{UnifiControllerDriver, UnifiDriver};
 use mycelium_plugins_lua::{Connect, Plugin};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -74,6 +74,7 @@ impl Daemon {
             Arc::new(RedfishDriver::default()),
             Arc::new(SnmpDriver::default()),
             Arc::new(UnifiDriver::default()),
+            Arc::new(UnifiControllerDriver::default()),
         ];
         let pdir = crate::plugins_dir();
         if pdir.is_dir() {
