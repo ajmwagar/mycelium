@@ -44,6 +44,15 @@ pub enum Request {
     /// Pull observations from every open device and merge the topology.
     Scan,
     Topology,
+    /// Plan one local SSH forward through an inventory gateway. The daemon
+    /// returns only argv and an optional env-var name, never secret values.
+    TunnelPlan {
+        target: String,
+        remote_port: u16,
+        local_port: u16,
+        #[serde(default)]
+        via: Option<String>,
+    },
     /// Persist state and exit.
     Shutdown,
 }
@@ -62,7 +71,12 @@ pub struct Response {
 
 impl Response {
     pub fn ok(result: serde_json::Value) -> Self {
-        Self { ok: true, result: Some(result), error: None, kind: None }
+        Self {
+            ok: true,
+            result: Some(result),
+            error: None,
+            kind: None,
+        }
     }
 
     pub fn err(e: &MyceliumError) -> Self {
@@ -79,11 +93,21 @@ impl Response {
             MyceliumError::Unsupported { .. } => "unsupported",
             MyceliumError::Io(_) => "io",
         };
-        Self { ok: false, result: None, error: Some(e.to_string()), kind: Some(kind.into()) }
+        Self {
+            ok: false,
+            result: None,
+            error: Some(e.to_string()),
+            kind: Some(kind.into()),
+        }
     }
 
     pub fn fail(msg: impl Into<String>) -> Self {
-        Self { ok: false, result: None, error: Some(msg.into()), kind: Some("daemon".into()) }
+        Self {
+            ok: false,
+            result: None,
+            error: Some(msg.into()),
+            kind: Some("daemon".into()),
+        }
     }
 }
 

@@ -5,7 +5,7 @@
 //! explicit `--write`, and `--dry-run` always shows the plan instead of
 //! applying it.
 
-use mycelium_core::Topology;
+use mycelium_core::{BootReachability, NbdePlan, Topology};
 use myceliumd::client::{Client, ClientError};
 use myceliumd::protocol::Request;
 
@@ -30,7 +30,11 @@ fn main() {
         }
         Err(e) => {
             eprintln!("mycelium: {e}");
-            std::process::exit(if matches!(e, ClientError::Rpc { .. }) { 2 } else { 1 });
+            std::process::exit(if matches!(e, ClientError::Rpc { .. }) {
+                2
+            } else {
+                1
+            });
         }
     }
 }
@@ -59,6 +63,9 @@ usage:
   mycelium call <id> <capability> [--param k=v ...] [--write] [--dry-run]
   mycelium scan
   mycelium topology [--json]
+  mycelium boot-path <device> --target <IP-or-URL>... [--json]
+  mycelium nbde plan <device> --tang <IP-or-URL>... --threshold N [--json]
+  mycelium tunnel <target>:<port> [--via DEVICE] [--local-port N] [--write] [--json]
   mycelium remove <id>
 
 environment:
@@ -76,6 +83,11 @@ struct Flags {
     password_env: Option<String>,
     key: Option<String>,
     params: Vec<(String, String)>,
+    targets: Vec<String>,
+    tang: Vec<String>,
+    threshold: Option<usize>,
+    via: Option<String>,
+    local_port: Option<u16>,
     rest: Vec<String>,
 }
 
@@ -89,6 +101,11 @@ fn parse_flags(args: &[String]) -> Flags {
         password_env: None,
         key: None,
         params: Vec::new(),
+        targets: Vec::new(),
+        tang: Vec::new(),
+        threshold: None,
+        via: None,
+        local_port: None,
         rest: Vec::new(),
     };
     let mut i = 0;
@@ -123,6 +140,30 @@ fn parse_flags(args: &[String]) -> Flags {
                     }
                 }
             }
+            "--target" => {
+                i += 1;
+                if let Some(target) = args.get(i) {
+                    f.targets.push(target.clone());
+                }
+            }
+            "--tang" => {
+                i += 1;
+                if let Some(endpoint) = args.get(i) {
+                    f.tang.push(endpoint.clone());
+                }
+            }
+            "--threshold" => {
+                i += 1;
+                f.threshold = args.get(i).and_then(|value| value.parse().ok());
+            }
+            "--via" => {
+                i += 1;
+                f.via = args.get(i).cloned();
+            }
+            "--local-port" => {
+                i += 1;
+                f.local_port = args.get(i).and_then(|value| value.parse().ok());
+            }
             other => f.rest.push(other.to_owned()),
         }
         i += 1;
@@ -142,7 +183,12 @@ async fn run(cmd: &str, args: &[String]) -> Result<Vec<String>, ClientError> {
             }
             Ok(vec!["drivers:".into()]
                 .into_iter()
-                .chain(v.as_array().unwrap_or(&vec![]).iter().map(|d| format!("  {}", d.as_str().unwrap_or("?"))))
+                .chain(
+                    v.as_array()
+                        .unwrap_or(&vec![])
+                        .iter()
+                        .map(|d| format!("  {}", d.as_str().unwrap_or("?"))),
+                )
                 .collect())
         }
         "add" => {
@@ -216,10 +262,33 @@ async fn run(cmd: &str, args: &[String]) -> Result<Vec<String>, ClientError> {
             if f.json {
                 return Ok(vec![v.to_string()]);
             }
-            let topo: Topology =
-                serde_json::from_value(v).map_err(|e| err_usage(&format!("bad topology json: {e}")))?;
+            let topo: Topology = serde_json::from_value(v)
+                .map_err(|e| err_usage(&format!("bad topology json: {e}")))?;
             Ok(render_topology(&topo))
         }
+        "boot-path" => {
+            let f = parse_flags(args);
+            let device = f
+                .rest
+                .first()
+                .ok_or(err_usage("boot-path needs a device"))?;
+            if f.targets.is_empty() {
+                return Err(err_usage("boot-path needs at least one --target"));
+            }
+            let topo = fetch_topology().await?;
+            let path = topo
+                .boot_path(device, &f.targets)
+                .map_err(|error| err_usage(&error.to_string()))?;
+            if f.json {
+                Ok(vec![
+                    serde_json::to_string(&path).map_err(|e| err_usage(&e.to_string()))?
+                ])
+            } else {
+                Ok(render_boot_path(&path))
+            }
+        }
+        "nbde" => nbde(args).await,
+        "tunnel" => tunnel(args).await,
         "remove" => {
             let f = parse_flags(args);
             let id = f.rest.first().ok_or(err_usage("remove needs an id"))?;
@@ -227,7 +296,112 @@ async fn run(cmd: &str, args: &[String]) -> Result<Vec<String>, ClientError> {
             c.call(&Request::DeviceRemove { id: id.clone() }).await?;
             Ok(vec![format!("removed {id}")])
         }
-        other => Err(err_usage(&format!("unknown command `{other}` (see `mycelium`)"))),
+        other => Err(err_usage(&format!(
+            "unknown command `{other}` (see `mycelium`)"
+        ))),
+    }
+}
+
+async fn tunnel(args: &[String]) -> Result<Vec<String>, ClientError> {
+    let f = parse_flags(args);
+    let destination = f
+        .rest
+        .first()
+        .ok_or(err_usage("tunnel needs <target>:<port>"))?;
+    let (target, remote_port) = destination
+        .rsplit_once(':')
+        .and_then(|(host, port)| port.parse::<u16>().ok().map(|port| (host, port)))
+        .ok_or(err_usage("tunnel destination must be <IP>:<port>"))?;
+    let local_port = f.local_port.unwrap_or(remote_port);
+    let mut client = connect().await?;
+    let plan = client
+        .call(&Request::TunnelPlan {
+            target: target.to_owned(),
+            remote_port,
+            local_port,
+            via: f.via,
+        })
+        .await?;
+    if f.json {
+        return Ok(vec![plan.to_string()]);
+    }
+    if !f.write {
+        return Ok(render_tunnel_plan(&plan));
+    }
+    run_tunnel(&plan)?;
+    Ok(vec!["tunnel closed".into()])
+}
+
+fn run_tunnel(plan: &serde_json::Value) -> Result<(), ClientError> {
+    let args = plan["ssh_args"]
+        .as_array()
+        .ok_or(err_usage("daemon returned invalid tunnel argv"))?
+        .iter()
+        .map(|arg| {
+            arg.as_str()
+                .map(str::to_owned)
+                .ok_or(err_usage("invalid SSH argument"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let password_env = plan["hop"]["password_env"].as_str();
+    let mut command = if password_env.is_some() {
+        let mut command = std::process::Command::new("sshpass");
+        command.arg("-e").arg("ssh");
+        command
+    } else {
+        std::process::Command::new("ssh")
+    };
+    if let Some(name) = password_env {
+        let password = std::env::var(name).map_err(|_| {
+            err_usage(&format!(
+                "{name} is not exported; source the credential environment first"
+            ))
+        })?;
+        command.env("SSHPASS", password);
+    }
+    let status = command
+        .args(args)
+        .status()
+        .map_err(|error| err_usage(&format!("could not run SSH: {error}")))?;
+    if !status.success() {
+        return Err(err_usage(&format!("SSH tunnel exited with {status}")));
+    }
+    Ok(())
+}
+
+async fn fetch_topology() -> Result<Topology, ClientError> {
+    let mut client = connect().await?;
+    let value = client.call(&Request::Topology).await?;
+    serde_json::from_value(value).map_err(|error| err_usage(&format!("bad topology json: {error}")))
+}
+
+async fn nbde(args: &[String]) -> Result<Vec<String>, ClientError> {
+    let Some("plan") = args.first().map(String::as_str) else {
+        return Err(err_usage(
+            "usage: mycelium nbde plan <device> --tang URL... --threshold N",
+        ));
+    };
+    let f = parse_flags(&args[1..]);
+    let device = f
+        .rest
+        .first()
+        .ok_or(err_usage("nbde plan needs a device"))?;
+    if f.tang.is_empty() {
+        return Err(err_usage("nbde plan needs at least one --tang endpoint"));
+    }
+    let threshold = f
+        .threshold
+        .ok_or(err_usage("nbde plan needs --threshold N"))?;
+    let plan = fetch_topology()
+        .await?
+        .nbde_plan(device, &f.tang, threshold)
+        .map_err(|error| err_usage(&error.to_string()))?;
+    if f.json {
+        Ok(vec![
+            serde_json::to_string(&plan).map_err(|e| err_usage(&e.to_string()))?
+        ])
+    } else {
+        Ok(render_nbde_plan(&plan))
     }
 }
 
@@ -327,14 +501,20 @@ fn render_added(v: &serde_json::Value) -> Vec<String> {
 }
 
 fn render_devices(v: &serde_json::Value) -> Vec<String> {
-    let mut out = vec![format!("{:<28} {:<12} {:<22} {:<16} driver", "id", "kind", "model", "address")];
+    let mut out = vec![format!(
+        "{:<28} {:<12} {:<22} {:<16} driver",
+        "id", "kind", "model", "address"
+    )];
     if let Some(arr) = v.as_array() {
         for d in arr {
             out.push(format!(
                 "{:<28} {:<12} {:<22} {:<16} {}",
                 d["id"].as_str().unwrap_or("?"),
                 d["kind"].as_str().unwrap_or("?"),
-                d["model"].as_str().or(d["hostname"].as_str()).unwrap_or("-"),
+                d["model"]
+                    .as_str()
+                    .or(d["hostname"].as_str())
+                    .unwrap_or("-"),
                 d["address"].as_str().unwrap_or("?"),
                 d["driver"].as_str().unwrap_or("?"),
             ));
@@ -351,9 +531,17 @@ fn render_describe(id: &str, v: &serde_json::Value) -> Vec<String> {
             let desc = c["spec"]["description"].as_str().unwrap_or("");
             let mut params = String::new();
             for p in c["spec"]["params"].as_array().unwrap_or(&vec![]) {
-                params.push_str(&format!(" <{}:{}>", p["name"].as_str().unwrap_or("?"), p["ty"].as_str().unwrap_or("string")));
+                params.push_str(&format!(
+                    " <{}:{}>",
+                    p["name"].as_str().unwrap_or("?"),
+                    p["ty"].as_str().unwrap_or("string")
+                ));
             }
-            let m = if c["spec"]["mutation"].as_bool().unwrap_or(false) { " [write]" } else { "" };
+            let m = if c["spec"]["mutation"].as_bool().unwrap_or(false) {
+                " [write]"
+            } else {
+                ""
+            };
             out.push(format!("  {cid}{m}{params}  — {desc}"));
         }
     }
@@ -368,7 +556,10 @@ fn render_call(v: &serde_json::Value) -> Vec<String> {
     if dry {
         out.push("DRY RUN — planned commands (nothing applied):".into());
     } else if !ok {
-        out.push(format!("device error: {}", res["message"].as_str().unwrap_or("?")));
+        out.push(format!(
+            "device error: {}",
+            res["message"].as_str().unwrap_or("?")
+        ));
     }
     match &res["output"] {
         serde_json::Value::String(s) => {
@@ -407,7 +598,10 @@ fn render_scan(v: &serde_json::Value) -> Vec<String> {
     ));
     if let Some(c) = r["conflicts"].as_array() {
         for conflict in c {
-            out.push(format!("CONFLICT: {}", serde_json::to_string(conflict).unwrap_or_default()));
+            out.push(format!(
+                "CONFLICT: {}",
+                serde_json::to_string(conflict).unwrap_or_default()
+            ));
         }
     }
     if let Some(w) = v["warnings"].as_array() {
@@ -431,28 +625,61 @@ fn render_topology(topo: &Topology) -> Vec<String> {
             "  {:<18} {:<14}{subnet}{gw}  [{}]",
             seg.id,
             seg.domain_name.clone().unwrap_or_default(),
-            seg.origins.iter().map(|o| o.split(':').next().unwrap_or("?")).collect::<Vec<_>>().join(","),
+            seg.origins
+                .iter()
+                .map(|o| o.split(':').next().unwrap_or("?"))
+                .collect::<Vec<_>>()
+                .join(","),
         ));
     }
     out.push("appliances:".into());
     for node in topo.nodes.values().filter(|n| n.device) {
-        let ips = node.ips.keys().map(|i| i.to_string()).collect::<Vec<_>>().join(",");
-        out.push(format!("  {:<28} ports={} ips={}", node.id, node.ports.len(), ips));
+        let ips = node
+            .ips
+            .keys()
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        out.push(format!(
+            "  {:<28} ports={} ips={}",
+            node.id,
+            node.ports.len(),
+            ips
+        ));
     }
-    out.push(format!("hosts: {}", topo.nodes.values().filter(|n| !n.device).count()));
+    out.push(format!(
+        "hosts: {}",
+        topo.nodes.values().filter(|n| !n.device).count()
+    ));
     for node in topo.nodes.values().filter(|n| !n.device) {
         let names = if node.hostnames.is_empty() {
             "-".to_owned()
         } else {
             node.hostnames.iter().cloned().collect::<Vec<_>>().join(",")
         };
-        let ips = node.ips.keys().map(|i| i.to_string()).collect::<Vec<_>>().join(",");
-        out.push(format!("  {:<20} {:<20} {names}  [{ips}]", node.mac.map(|m| m.to_string()).unwrap_or_else(|| "no-mac".into()), node.id));
+        let ips = node
+            .ips
+            .keys()
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        out.push(format!(
+            "  {:<20} {:<20} {names}  [{ips}]",
+            node.mac
+                .map(|m| m.to_string())
+                .unwrap_or_else(|| "no-mac".into()),
+            node.id
+        ));
     }
     if !topo.leases.is_empty() {
         out.push("leases:".into());
         for l in &topo.leases {
-            out.push(format!("  {:<16} {:<20} {}", l.ip, l.mac, l.hostname.clone().unwrap_or_else(|| "-".into())));
+            out.push(format!(
+                "  {:<16} {:<20} {}",
+                l.ip,
+                l.mac,
+                l.hostname.clone().unwrap_or_else(|| "-".into())
+            ));
         }
     }
     if !topo.conflicts.is_empty() {
@@ -464,3 +691,58 @@ fn render_topology(topo: &Topology) -> Vec<String> {
     out
 }
 
+fn render_boot_path(path: &mycelium_core::BootPath) -> Vec<String> {
+    let mut out = vec![format!("boot paths for {}:", path.device)];
+    for target in &path.targets {
+        out.push(format!(
+            "  {:<10} {:<32} {}",
+            reachability_label(target.reachability),
+            target.endpoint,
+            target.reason
+        ));
+    }
+    out
+}
+
+fn render_nbde_plan(plan: &NbdePlan) -> Vec<String> {
+    let status = if plan.viable { "VIABLE" } else { "NOT VIABLE" };
+    let mut out = vec![format!(
+        "NBDE plan for {}: {status} — threshold {}, {} observed path(s)",
+        plan.device, plan.threshold, plan.reachable
+    )];
+    for target in &plan.endpoints {
+        out.push(format!(
+            "  {:<10} {}",
+            reachability_label(target.reachability),
+            target.endpoint
+        ));
+    }
+    for warning in &plan.warnings {
+        out.push(format!("warning: {warning}"));
+    }
+    out
+}
+
+fn reachability_label(reachability: BootReachability) -> &'static str {
+    match reachability {
+        BootReachability::Direct => "direct",
+        BootReachability::Routed => "routed",
+        BootReachability::Unverified => "unverified",
+    }
+}
+
+fn render_tunnel_plan(plan: &serde_json::Value) -> Vec<String> {
+    let hop = &plan["hop"];
+    vec![
+        format!(
+            "tunnel: http://127.0.0.1:{} -> {}:{} via {} ({}@{})",
+            plan["local_port"].as_u64().unwrap_or(0),
+            plan["target"].as_str().unwrap_or("?"),
+            plan["remote_port"].as_u64().unwrap_or(0),
+            hop["id"].as_str().unwrap_or("?"),
+            hop["username"].as_str().unwrap_or("?"),
+            hop["host"].as_str().unwrap_or("?"),
+        ),
+        "run with --write to open the foreground tunnel; Ctrl-C closes it".into(),
+    ]
+}

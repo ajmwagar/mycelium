@@ -10,6 +10,7 @@ use mycelium_driver_edgeos::{EdgeOsDriver, SshSession};
 use mycelium_driver_linux::LinuxDriver;
 use mycelium_driver_redfish::RedfishDriver;
 use mycelium_driver_snmp::SnmpDriver;
+use mycelium_driver_unifi::UnifiDriver;
 use mycelium_plugins_lua::{Connect, Plugin};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -46,12 +47,19 @@ impl Connect for SshConnect {
         let (host, port, jump) = match target {
             Target::Host { host, port, jump } => (host.clone(), port.unwrap_or(22), jump.clone()),
             Target::Subnet { .. } => {
-                return Err(MyceliumError::Validation("plugins connect to single hosts".into()))
+                return Err(MyceliumError::Validation(
+                    "plugins connect to single hosts".into(),
+                ))
             }
         };
-        let session =
-            SshSession::connect(&host, port, creds, std::time::Duration::from_secs(8), jump.as_deref())
-                .await?;
+        let session = SshSession::connect(
+            &host,
+            port,
+            creds,
+            std::time::Duration::from_secs(8),
+            jump.as_deref(),
+        )
+        .await?;
         Ok(Arc::new(session))
     }
 }
@@ -65,25 +73,22 @@ impl Daemon {
             Arc::new(LinuxDriver::default()),
             Arc::new(RedfishDriver::default()),
             Arc::new(SnmpDriver::default()),
+            Arc::new(UnifiDriver::default()),
         ];
         let pdir = crate::plugins_dir();
         if pdir.is_dir() {
             let mut entries: Vec<_> = std::fs::read_dir(&pdir)
                 .map_err(mycelium_core::MyceliumError::Io)?
                 .filter_map(|e| e.ok())
-                .filter(|e| {
-                    e.path().extension().map(|x| x == "lua").unwrap_or(false)
-                })
+                .filter(|e| e.path().extension().map(|x| x == "lua").unwrap_or(false))
                 .collect();
             entries.sort_by_key(|e| e.path());
             for entry in entries {
                 let source = std::fs::read_to_string(entry.path())
                     .map_err(mycelium_core::MyceliumError::Io)?;
-                let plugin = Arc::new(Plugin::load(source).map_err(|e| {
-                    MyceliumError::Plugin {
-                        plugin: entry.file_name().to_string_lossy().into_owned(),
-                        message: e.to_string(),
-                    }
+                let plugin = Arc::new(Plugin::load(source).map_err(|e| MyceliumError::Plugin {
+                    plugin: entry.file_name().to_string_lossy().into_owned(),
+                    message: e.to_string(),
                 })?);
                 drivers.push(Arc::new(plugin.driver(Arc::new(SshConnect))) as Arc<dyn Driver>);
             }
@@ -133,15 +138,20 @@ impl Daemon {
     }
 
     async fn persist(&self) -> Result<()> {
-        let saved: Vec<SavedDevice> =
-            self.saved.lock().await.values().cloned().collect();
-        std::fs::write(crate::devices_path(), serde_json::to_string_pretty(&saved).map_err(json_err)?)?;
+        let saved: Vec<SavedDevice> = self.saved.lock().await.values().cloned().collect();
+        std::fs::write(
+            crate::devices_path(),
+            serde_json::to_string_pretty(&saved).map_err(json_err)?,
+        )?;
         Ok(())
     }
 
     async fn persist_topology(&self) -> Result<()> {
         let topo = self.topology.lock().await;
-        std::fs::write(crate::topology_path(), serde_json::to_string_pretty(&*topo).map_err(json_err)?)?;
+        std::fs::write(
+            crate::topology_path(),
+            serde_json::to_string_pretty(&*topo).map_err(json_err)?,
+        )?;
         Ok(())
     }
 
@@ -162,11 +172,15 @@ impl Daemon {
                 "socket": crate::socket_path().display().to_string(),
             }))
             .map_err(json_err),
-            Request::Drivers => to_value(
-                self.drivers.iter().map(|d| d.name()).collect::<Vec<_>>(),
-            )
-            .map_err(json_err),
-            Request::DeviceAdd { target, driver, username, password_env, key_path } => {
+            Request::Drivers => to_value(self.drivers.iter().map(|d| d.name()).collect::<Vec<_>>())
+                .map_err(json_err),
+            Request::DeviceAdd {
+                target,
+                driver,
+                username,
+                password_env,
+                key_path,
+            } => {
                 let target_parsed = Target::parse(&target)?;
                 let creds = CredentialSet {
                     username,
@@ -214,16 +228,21 @@ impl Daemon {
                 if !recognized {
                     return Err(MyceliumError::Validation(format!(
                         "no driver recognized {target_parsed} (drivers: {})",
-                        self.drivers.iter().map(|d| d.name()).collect::<Vec<_>>().join(", ")
+                        self.drivers
+                            .iter()
+                            .map(|d| d.name())
+                            .collect::<Vec<_>>()
+                            .join(", ")
                     )));
                 }
                 self.persist().await?;
                 to_value(serde_json::json!({ "devices": opened })).map_err(json_err)
             }
             Request::DeviceRemove { id } => {
-                let dev = self.inventory.remove(&id).ok_or_else(|| {
-                    MyceliumError::UnknownDevice(id.clone())
-                })?;
+                let dev = self
+                    .inventory
+                    .remove(&id)
+                    .ok_or_else(|| MyceliumError::UnknownDevice(id.clone()))?;
                 self.saved.lock().await.remove(&dev.id());
                 let mut topo = self.topology.lock().await;
                 topo.nodes.remove(&id);
@@ -243,7 +262,13 @@ impl Daemon {
                 let caps = self.inventory.capabilities(&id)?;
                 to_value(&caps).map_err(json_err)
             }
-            Request::DeviceCall { id, capability, params, write, dry_run } => {
+            Request::DeviceCall {
+                id,
+                capability,
+                params,
+                write,
+                dry_run,
+            } => {
                 let dev = self.inventory.get(&id)?;
                 let mut p = mycelium_core::Params::new();
                 for (k, v) in params {
@@ -264,7 +289,8 @@ impl Daemon {
                     match dev.observe().await {
                         Ok((obs, warns)) => {
                             observations.extend(obs);
-                            warnings.extend(warns.into_iter().map(|w| format!("{}: {w}", dev.id())));
+                            warnings
+                                .extend(warns.into_iter().map(|w| format!("{}: {w}", dev.id())));
                         }
                         Err(e) => warnings.push(format!("{}: scan failed: {e}", dev.id())),
                     }
@@ -285,6 +311,80 @@ impl Daemon {
             Request::Topology => {
                 let topo = self.topology.lock().await;
                 to_value(&*topo).map_err(json_err)
+            }
+            Request::TunnelPlan {
+                target,
+                remote_port,
+                local_port,
+                via,
+            } => {
+                let target_ip = target.parse::<std::net::IpAddr>().map_err(|_| {
+                    MyceliumError::Validation(format!(
+                        "tunnel target `{target}` must be an IP address"
+                    ))
+                })?;
+                let saved = self.saved.lock().await;
+                let hop = if let Some(selector) = via {
+                    saved
+                        .values()
+                        .find(|device| {
+                            device.meta.id.to_string() == selector
+                                || device.meta.address == selector
+                        })
+                        .ok_or_else(|| MyceliumError::UnknownDevice(selector))?
+                } else {
+                    let topo = self.topology.lock().await;
+                    let gateway = topo
+                        .segments
+                        .values()
+                        .find(|segment| {
+                            segment.subnet.is_some_and(|(network, prefix)| {
+                                mycelium_core::ipv4_in_cidr(target_ip, network, prefix)
+                            })
+                        })
+                        .and_then(|segment| segment.gw)
+                        .ok_or_else(|| {
+                            MyceliumError::Validation(format!(
+                                "no observed gateway for tunnel target {target}"
+                            ))
+                        })?;
+                    saved
+                        .values()
+                        .find(|device| device.meta.address == gateway.to_string())
+                        .ok_or_else(|| {
+                            MyceliumError::Validation(format!(
+                                "gateway {gateway} is not an inventory device; add it first"
+                            ))
+                        })?
+                };
+                if hop.meta.driver != "edgeos" && hop.meta.driver != "linux" {
+                    return Err(MyceliumError::Validation(format!(
+                        "{} uses driver `{}`, which is not an SSH hop",
+                        hop.meta.id, hop.meta.driver
+                    )));
+                }
+                let username = hop.username.clone().ok_or_else(|| {
+                    MyceliumError::Validation(format!("{} has no SSH username", hop.meta.id))
+                })?;
+                to_value(serde_json::json!({
+                    "target": target,
+                    "remote_port": remote_port,
+                    "local_port": local_port,
+                    "hop": {
+                        "id": hop.meta.id,
+                        "host": hop.meta.address,
+                        "username": username,
+                        "password_env": hop.password_env,
+                        "key_path": hop.key_path,
+                    },
+                    "ssh_args": [
+                        "-N",
+                        "-o", "ExitOnForwardFailure=yes",
+                        "-L", format!("{local_port}:{target}:{remote_port}"),
+                        format!("{username}@{}", hop.meta.address),
+                    ],
+                }))
+                .map_err(json_err)
             }
             Request::Shutdown => {
                 self.persist().await?;
@@ -313,7 +413,11 @@ fn json_err(e: serde_json::Error) -> MyceliumError {
 
 /// CapResult on the wire: output uses the plain Value->JSON bridge, never
 /// the Rust enum tag form (`{"str": ...}`).
-pub fn cap_result_json(device: &str, capability: &str, r: &mycelium_core::CapResult) -> serde_json::Value {
+pub fn cap_result_json(
+    device: &str,
+    capability: &str,
+    r: &mycelium_core::CapResult,
+) -> serde_json::Value {
     serde_json::json!({
         "device": device,
         "capability": capability,
@@ -435,12 +539,7 @@ mod tests {
                 CapSpec::readonly("ping").returns("pong"),
             )])
         }
-        async fn exec(
-            &self,
-            _ctx: &ExecContext,
-            cap: &str,
-            _params: Params,
-        ) -> Result<CapResult> {
+        async fn exec(&self, _ctx: &ExecContext, cap: &str, _params: Params) -> Result<CapResult> {
             Ok(CapResult::ok(Value::Str(format!("pong:{cap}"))))
         }
         async fn observe(&self) -> Result<(Vec<mycelium_core::Observation>, Vec<String>)> {
@@ -524,7 +623,11 @@ mod tests {
         assert_eq!(list.as_array().unwrap().len(), 1);
         assert_eq!(list[0]["id"], "fake-1");
 
-        let resp = d.dispatch(Request::DeviceDescribe { id: "fake-1".into() }).await;
+        let resp = d
+            .dispatch(Request::DeviceDescribe {
+                id: "fake-1".into(),
+            })
+            .await;
         assert!(resp.ok);
 
         let resp = d
@@ -562,13 +665,18 @@ mod tests {
         let resp = d.dispatch(Request::Topology).await;
         let topo: Topology = serde_json::from_value(resp.result.unwrap()).unwrap();
         assert!(topo.nodes.contains_key("02:00:00:00:00:99"));
-        assert!(topo.nodes["02:00:00:00:00:99"].hostnames.contains("fakehost"));
+        assert!(topo.nodes["02:00:00:00:00:99"]
+            .hostnames
+            .contains("fakehost"));
 
         // devices.json persisted with no secret literals
         let saved = std::fs::read_to_string(home.join("devices.json")).unwrap();
         assert!(saved.contains("fakehost.local"));
 
-        d.dispatch(Request::DeviceRemove { id: "fake-1".into() }).await;
+        d.dispatch(Request::DeviceRemove {
+            id: "fake-1".into(),
+        })
+        .await;
         let saved = std::fs::read_to_string(home.join("devices.json")).unwrap();
         assert!(!saved.contains("fake-1"));
     }

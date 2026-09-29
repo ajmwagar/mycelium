@@ -10,6 +10,7 @@
 //! - Capability subtraits ([`capabilities`]) are typed facades over declared
 //!   capabilities; drivers may override them for native implementations.
 
+pub mod boot;
 pub mod capabilities;
 pub mod credentials;
 pub mod device;
@@ -21,9 +22,8 @@ pub mod spec;
 pub mod topology;
 pub mod value;
 
-pub use capabilities::{
-    DhcpManagement, DnsFiltering, Identity, Sensors, VlanManagement, Wireless,
-};
+pub use boot::{BootPath, BootPlanError, BootReachability, BootTarget, NbdePlan};
+pub use capabilities::{DhcpManagement, DnsFiltering, Identity, Sensors, VlanManagement, Wireless};
 pub use capabilities::{
     ID_CAPABILITIES, ID_DHCP_ADD_STATIC_LEASE, ID_DHCP_LIST_POOLS, ID_DNS_BLOCK,
     ID_DNS_LIST_ENTRIES, ID_IDENTIFY, ID_SENSOR_HISTORY, ID_SENSOR_READ, ID_VLAN_ASSIGN,
@@ -34,9 +34,7 @@ pub use device::{DeviceId, DeviceKind, DeviceMeta};
 pub use driver::{Driver, Target};
 pub use error::{MyceliumError, Result};
 pub use exec::{ExecContext, ExecOutcome, RecordingTransport, Transport};
-pub use inventory::{
-    result_from_outcome, CapabilityInfo, Device, Inventory, InvokeResult,
-};
+pub use inventory::{result_from_outcome, CapabilityInfo, Device, Inventory, InvokeResult};
 pub use spec::{CapResult, CapSpec, ParamSpec, ParamType};
 pub use topology::{
     ipv4_in_cidr, Conflict, IpRecord, LeaseRecord, Link, LinkState, MacAddress, Observation,

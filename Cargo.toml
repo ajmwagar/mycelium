@@ -14,6 +14,7 @@ mycelium-driver-edgeos = { path = "crates/mycelium-driver-edgeos" }
 mycelium-driver-redfish = { path = "crates/mycelium-driver-redfish" }
 mycelium-driver-linux = { path = "crates/mycelium-driver-linux" }
 mycelium-driver-snmp = { path = "crates/mycelium-driver-snmp" }
+mycelium-driver-unifi = { path = "crates/mycelium-driver-unifi" }
 mycelium-plugins-lua = { path = "crates/mycelium-plugins-lua" }
 myceliumd = { path = "crates/myceliumd" }
 async-trait = "0.1"
