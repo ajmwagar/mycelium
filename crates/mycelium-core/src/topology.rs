@@ -64,11 +64,20 @@ pub struct VlanId(pub u16);
 pub struct Origin {
     pub device: String,
     pub source: String,
+    /// Routing/identity domain. Identical RFC1918 addresses in different
+    /// sites are distinct facts, not conflicts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub site: Option<String>,
 }
 
 impl Origin {
     pub fn new(device: impl Into<String>, source: impl Into<String>) -> Self {
-        Self { device: device.into(), source: source.into() }
+        Self { device: device.into(), source: source.into(), site: None }
+    }
+
+    pub fn at_site(mut self, site: impl Into<String>) -> Self {
+        self.site = Some(site.into());
+        self
     }
 }
 
@@ -174,6 +183,8 @@ pub struct TopoNode {
     pub device: bool,
     pub ports: BTreeMap<String, Link>,
     pub origins: BTreeSet<String>,
+    #[serde(default)]
+    pub sites: BTreeSet<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -203,13 +214,19 @@ pub struct Topology {
 }
 
 fn origin_key(o: &Origin) -> String {
-    format!("{}:{}", o.device, o.source)
+    match &o.site {
+        Some(site) => format!("{site}/{}:{}", o.device, o.source),
+        None => format!("{}:{}", o.device, o.source),
+    }
 }
 
-fn node_key(mac: Option<MacAddress>, ip: IpAddr) -> String {
+fn node_key(mac: Option<MacAddress>, ip: IpAddr, site: Option<&str>) -> String {
     match mac {
         Some(m) => m.to_string(),
-        None => format!("ip:{ip}"),
+        None => match site {
+            Some(site) => format!("site:{site}:ip:{ip}"),
+            None => format!("ip:{ip}"),
+        },
     }
 }
 
@@ -236,7 +253,7 @@ impl Topology {
         let obs_origin = observation_origin(&obs);
         match obs {
             Observation::Neighbor { mac, ip, hostname, port, origin } => {
-                let key = node_key(mac, ip);
+                let key = node_key(mac, ip, origin.site.as_deref());
                 let node = self.nodes.entry(key.clone()).or_insert_with(|| {
                     report.new_nodes += 1;
                     TopoNode {
@@ -247,8 +264,12 @@ impl Topology {
                         device: false,
                         ports: BTreeMap::new(),
                         origins: BTreeSet::new(),
+                        sites: BTreeSet::new(),
                     }
                 });
+                if let Some(site) = &origin.site {
+                    node.sites.insert(site.clone());
+                }
                 let k = origin_key(&origin);
                 node.origins.insert(k);
                 if let Some(h) = hostname.filter(|h| !h.is_empty() && h != "Unknown") {
@@ -311,10 +332,11 @@ impl Topology {
             }
             Observation::VlanMember { device, vlan, members, origin } => {
                 let k = origin_key(&origin);
-                let seg = self.segments.entry(format!("vlan:{}", vlan.0)).or_insert_with(|| {
+                let id = scoped_id(origin.site.as_deref(), &format!("vlan:{}", vlan.0));
+                let seg = self.segments.entry(id.clone()).or_insert_with(|| {
                     report.merged_segments += 1;
                     Segment {
-                        id: format!("vlan:{}", vlan.0),
+                        id,
                         kind: SegmentKind::Vlan,
                         vlan: Some(vlan),
                         subnet: None,
@@ -334,6 +356,8 @@ impl Topology {
             }
             Observation::Segment { segment, origin } => {
                 let k = origin_key(&origin);
+                let mut segment = segment;
+                segment.id = scoped_id(origin.site.as_deref(), &segment.id);
                 if let Some(existing) = self.segments.get(&segment.id) {
                     let existing = existing.clone();
                     if let (Some(old), Some(new)) = (existing.gw, segment.gw) {
@@ -415,10 +439,14 @@ impl Topology {
             device: true,
             ports: BTreeMap::new(),
             origins: BTreeSet::new(),
+            sites: BTreeSet::new(),
         });
         node.device = true;
         if node.mac.is_none() {
             node.mac = mac;
+        }
+        if let Some(site) = &_origin.site {
+            node.sites.insert(site.clone());
         }
         node
     }
@@ -436,6 +464,11 @@ impl Topology {
             for (other_id, other) in &self.nodes {
                 if other_id == &node.id {
                     continue;
+                }
+                if let Some(site) = &origin.site {
+                    if !other.sites.contains(site) {
+                        continue;
+                    }
                 }
                 if other.mac.is_some_and(|m| m != new_mac) && other.ips.contains_key(&ip) {
                     report.conflicts_push(Conflict::SameIpDiffMac {
@@ -473,6 +506,13 @@ fn merge_state(cur: LinkState, new: LinkState) -> LinkState {
             LinkState::Up
         }
         (s, _) => s,
+    }
+}
+
+fn scoped_id(site: Option<&str>, id: &str) -> String {
+    match site {
+        Some(site) => format!("{site}/{id}"),
+        None => id.to_owned(),
     }
 }
 
@@ -577,6 +617,32 @@ mod tests {
             topo.conflicts.as_slice(),
             [Conflict::SegmentParamsDiff { field, .. }] if field == "gateway"
         ));
+    }
+
+    #[test]
+    fn overlapping_sites_do_not_collide() {
+        let mut topo = Topology::empty();
+        let neighbor = |site: &str, mac: &str| Observation::Neighbor {
+            mac: MacAddress::parse(mac),
+            ip: ip("192.168.1.1"),
+            hostname: None,
+            port: None,
+            origin: Origin::new(site, "ip-neigh").at_site(site),
+        };
+        topo.observe_all([
+            neighbor("pris", "02:00:00:00:00:01"),
+            neighbor("titan", "02:00:00:00:00:02"),
+        ]);
+        assert!(topo.conflicts.is_empty());
+
+        topo.observe_all([Observation::Neighbor {
+            mac: MacAddress::parse("02:00:00:00:00:03"),
+            ip: ip("192.168.1.1"),
+            hostname: None,
+            port: None,
+            origin: Origin::new("pris-second", "ip-neigh").at_site("pris"),
+        }]);
+        assert!(matches!(topo.conflicts.as_slice(), [Conflict::SameIpDiffMac { .. }]));
     }
 
     #[test]

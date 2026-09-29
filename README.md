@@ -43,9 +43,25 @@ Ubiquti APs.
 
 Pi-Hole?
 
+## SSH observation points
+
+Ordinary Linux hosts can contribute their interfaces, connected routes, and
+neighbor tables without becoming network appliances themselves:
+
+```sh
+mycelium add pris --driver linux --user ajmwagar
+mycelium add titan --driver linux --user avery
+mycelium scan
+```
+
+The Linux driver runs a fixed, read-only `iproute2` probe over SSH. It uses
+OpenSSH configuration and agent credentials when no password or key is given.
+Each observer hostname is also its site identity, so overlapping private
+networks are stored separately (`pris/192.168.1.0/24` and
+`titan/192.168.1.0/24`) instead of producing false address conflicts.
+
 # Initial Features
 
 DNS Management, DHCP Management, VLAN Management (rules, etc.)
 
 SEIM / Intrusion Management / Exfiltration monitoring.
-

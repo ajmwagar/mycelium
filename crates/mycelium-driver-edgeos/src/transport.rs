@@ -94,7 +94,8 @@ impl SshSession {
         // fails loudly with the list of tried methods.
         let password = creds.password.as_ref().and_then(Secret::resolve);
 
-        if let Some(jump) = jump.filter(|j| !j.is_empty()) {
+        let jump = jump.filter(|j| !j.is_empty());
+        if jump.is_some() || (creds.key_path.is_none() && password.is_none()) {
             let mut args = vec![
                 "-o".to_owned(),
                 "BatchMode=yes".to_owned(),
@@ -112,7 +113,7 @@ impl SshSession {
             return Ok(Self {
                 mode: Mode::OpenSsh(Arc::new(OpenSsh {
                     dest: format!("{user}@{host}"),
-                    jump: Some(jump.to_owned()),
+                    jump: jump.map(str::to_owned),
                     args,
                     password,
                 })),
@@ -305,7 +306,10 @@ impl Native {
 
 impl OpenSsh {
     async fn exec(&self, command: &str) -> Result<ExecOutcome> {
-        let mut argv: Vec<String> = vec!["-J".to_owned(), self.jump.clone().unwrap_or_default()];
+        let mut argv: Vec<String> = Vec::new();
+        if let Some(jump) = &self.jump {
+            argv.extend(["-J".to_owned(), jump.clone()]);
+        }
         argv.extend(self.args.iter().cloned());
         argv.push(self.dest.clone());
         argv.push(command.to_owned());

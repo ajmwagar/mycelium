@@ -11,6 +11,7 @@ repository = "https://github.com/ajmwagar/mycelium"
 [workspace.dependencies]
 mycelium-core = { path = "crates/mycelium-core" }
 mycelium-driver-edgeos = { path = "crates/mycelium-driver-edgeos" }
+mycelium-driver-linux = { path = "crates/mycelium-driver-linux" }
 mycelium-driver-snmp = { path = "crates/mycelium-driver-snmp" }
 mycelium-plugins-lua = { path = "crates/mycelium-plugins-lua" }
 myceliumd = { path = "crates/myceliumd" }

@@ -7,6 +7,7 @@ use mycelium_core::{
     Topology, Transport, Value,
 };
 use mycelium_driver_edgeos::{EdgeOsDriver, SshSession};
+use mycelium_driver_linux::LinuxDriver;
 use mycelium_driver_snmp::SnmpDriver;
 use mycelium_plugins_lua::{Connect, Plugin};
 use serde::{Deserialize, Serialize};
@@ -60,6 +61,7 @@ impl Daemon {
     pub async fn boot() -> Result<Self> {
         let mut drivers: Vec<Arc<dyn Driver>> = vec![
             Arc::new(EdgeOsDriver::default()),
+            Arc::new(LinuxDriver::default()),
             Arc::new(SnmpDriver::default()),
         ];
         let pdir = crate::plugins_dir();
