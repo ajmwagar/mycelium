@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 /// Identity of an appliance, inferred at probe time (tenet: infer, don't
 /// configure). Nothing here is hand-maintained config.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "kebab-case")]
 pub enum DeviceKind {
     Router,
     Switch,

@@ -10,8 +10,6 @@ repository = "https://github.com/ajmwagar/mycelium"
 
 [workspace.dependencies]
 mycelium-core = { path = "crates/mycelium-core" }
-mycelium-driver-edgeos = { path = "crates/mycelium-driver-edgeos" }
-mycelium-plugins-lua = { path = "crates/mycelium-plugins-lua" }
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

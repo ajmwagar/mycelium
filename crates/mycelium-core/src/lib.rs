@@ -33,7 +33,7 @@ pub use credentials::{CredentialSet, Secret};
 pub use device::{DeviceId, DeviceKind, DeviceMeta};
 pub use driver::{Driver, Target};
 pub use error::{MyceliumError, Result};
-pub use exec::{ExecContext, ExecOutcome};
+pub use exec::{ExecContext, ExecOutcome, RecordingTransport, Transport};
 pub use inventory::{
     result_from_outcome, CapabilityInfo, Device, Inventory, InvokeResult,
 };

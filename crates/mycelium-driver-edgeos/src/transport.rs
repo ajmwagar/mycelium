@@ -130,7 +130,7 @@ impl SshSession {
 
     /// Run one command, returning raw stdout/stderr/exit.
     pub async fn exec(&self, command: &str) -> Result<ExecOutcome> {
-        let mut guard = self.inner.lock().await;
+        let guard = self.inner.lock().await;
         let mut channel = guard
             .channel_open_session()
             .await

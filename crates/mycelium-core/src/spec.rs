@@ -33,6 +33,10 @@ impl CapResult {
 /// structured interfaces are *declared*, only `exec` is code).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CapSpec {
+    /// Capability id when declared by a plugin (`vlan.list`); empty for
+    /// hand-written Rust drivers which are keyed by map entry instead.
+    #[serde(default)]
+    pub id: String,
     /// One-line description shown by `mycelium describe`.
     pub description: String,
     /// Required parameters (name, type, docs).
@@ -52,6 +56,7 @@ pub struct CapSpec {
 impl CapSpec {
     pub fn readonly(description: impl Into<String>) -> Self {
         Self {
+            id: String::new(),
             description: description.into(),
             params: Vec::new(),
             optional: Vec::new(),
@@ -106,8 +111,9 @@ impl CapSpec {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "lowercase")]
 pub enum ParamType {
+    #[serde(alias = "string")]
     Str,
     Int,
     Bool,

@@ -44,3 +44,46 @@ impl ExecOutcome {
         self.exit_code == 0
     }
 }
+
+/// A transport that can run raw command strings against an appliance.
+/// Implemented by SSH sessions, ipmitool wrappers, HTTP clients — and the
+/// Lua plugin host, which never touches one directly: plugins *declare*
+/// commands, the host runs them (gates stay in Rust, tenet #7).
+#[async_trait::async_trait]
+pub trait Transport: Send + Sync {
+    async fn exec(&self, command: &str) -> crate::Result<ExecOutcome>;
+}
+
+/// Test/in-memory transport: canned answers keyed by exact command.
+#[derive(Default, Clone)]
+pub struct RecordingTransport {
+    pub answers: std::sync::Arc<std::sync::Mutex<std::collections::BTreeMap<String, ExecOutcome>>>,
+    pub calls: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl RecordingTransport {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn reply(&self, command: impl Into<String>, stdout: impl Into<String>) {
+        let mut guard = self.answers.lock().expect("recorder poisoned");
+        guard.insert(
+            command.into(),
+            ExecOutcome { exit_code: 0, stdout: stdout.into(), stderr: String::new() },
+        );
+    }
+}
+
+#[async_trait::async_trait]
+impl Transport for RecordingTransport {
+    async fn exec(&self, command: &str) -> crate::Result<ExecOutcome> {
+        self.calls.lock().expect("recorder poisoned").push(command.to_owned());
+        let guard = self.answers.lock().expect("recorder poisoned");
+        Ok(guard.get(command).cloned().unwrap_or(ExecOutcome {
+            exit_code: 127,
+            stdout: String::new(),
+            stderr: format!("no canned answer for: {command}"),
+        }))
+    }
+}

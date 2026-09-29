@@ -160,3 +160,64 @@ mod tests {
         assert_eq!(v, back);
     }
 }
+
+impl Value {
+    /// Convert to serde_json for JSON-RPC and Lua bridge boundaries.
+    /// Deliberately *not* the serde derive representation: plugins and the
+    /// daemon wire speak plain JSON objects, not Rust enum tagging.
+    pub fn to_json(&self) -> serde_json::Value {
+        match self {
+            Value::Null => serde_json::Value::Null,
+            Value::Bool(b) => serde_json::Value::Bool(*b),
+            Value::Int(i) => serde_json::Value::from(*i),
+            Value::Float(x) => serde_json::Number::from_f64(*x)
+                .map(serde_json::Value::Number)
+                .unwrap_or(serde_json::Value::Null),
+            Value::Str(s) => serde_json::Value::String(s.clone()),
+            Value::List(l) => serde_json::Value::Array(l.iter().map(Value::to_json).collect()),
+            Value::Map(m) => {
+                let mut o = serde_json::Map::new();
+                for (k, v) in m {
+                    o.insert(k.clone(), v.to_json());
+                }
+                serde_json::Value::Object(o)
+            }
+        }
+    }
+
+    pub fn from_json(v: &serde_json::Value) -> Value {
+        match v {
+            serde_json::Value::Null => Value::Null,
+            serde_json::Value::Bool(b) => Value::Bool(*b),
+            serde_json::Value::Number(n) => match n.as_i64() {
+                Some(i) => Value::Int(i),
+                None => Value::Float(n.as_f64().unwrap_or(0.0)),
+            },
+            serde_json::Value::String(s) => Value::Str(s.clone()),
+            serde_json::Value::Array(a) => Value::List(a.iter().map(Value::from_json).collect()),
+            serde_json::Value::Object(o) => {
+                let mut m = Params::new();
+                for (k, v) in o {
+                    m.insert(k.clone(), Value::from_json(v));
+                }
+                Value::Map(m)
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod json_tests {
+    use super::*;
+
+    #[test]
+    fn json_bridge_is_plain_not_tagged() {
+        let v = Value::Map(Params::from_iter([
+            ("name".to_owned(), Value::Str("LAB".into())),
+            ("id".to_owned(), Value::Int(35)),
+        ]));
+        let j = v.to_json();
+        assert_eq!(j["name"], serde_json::json!("LAB"));
+        assert_eq!(Value::from_json(&j), v);
+    }
+}
