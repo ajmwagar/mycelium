@@ -60,6 +60,22 @@ Each observer hostname is also its site identity, so overlapping private
 networks are stored separately (`pris/192.168.1.0/24` and
 `titan/192.168.1.0/24`) instead of producing false address conflicts.
 
+## Redfish servers
+
+Redfish management controllers expose identity, power state, and thermal
+telemetry. Power-on is write-gated and supports dry-run:
+
+```sh
+mycelium add 192.168.20.11 --driver redfish --user Administrator --password-env ILO4_PASS
+mycelium call ilo-mxq33702q8 server.power-state
+mycelium call ilo-mxq33702q8 server.thermal
+mycelium call ilo-mxq33702q8 server.power-on --write --dry-run
+```
+
+Controller passwords remain env-backed; inventory persists only the variable
+name. Self-signed controller certificates are accepted, but transport remains
+HTTPS-only.
+
 # Initial Features
 
 DNS Management, DHCP Management, VLAN Management (rules, etc.)

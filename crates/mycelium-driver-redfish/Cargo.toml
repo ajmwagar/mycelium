@@ -1,0 +1,12 @@
+[package]
+name = "mycelium-driver-redfish"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "mycelium Redfish driver for server management controllers"
+
+[dependencies]
+mycelium-core.workspace = true
+async-trait.workspace = true
+reqwest.workspace = true
+serde_json.workspace = true

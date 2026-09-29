@@ -11,6 +11,7 @@ repository = "https://github.com/ajmwagar/mycelium"
 [workspace.dependencies]
 mycelium-core = { path = "crates/mycelium-core" }
 mycelium-driver-edgeos = { path = "crates/mycelium-driver-edgeos" }
+mycelium-driver-redfish = { path = "crates/mycelium-driver-redfish" }
 mycelium-driver-linux = { path = "crates/mycelium-driver-linux" }
 mycelium-driver-snmp = { path = "crates/mycelium-driver-snmp" }
 mycelium-plugins-lua = { path = "crates/mycelium-plugins-lua" }
@@ -20,6 +21,7 @@ bytes = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 indexmap = { version = "2", features = ["serde"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "io-util", "net", "time", "process"] }
 
