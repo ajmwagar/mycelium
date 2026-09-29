@@ -6,14 +6,14 @@ use async_trait::async_trait;
 use mycelium_core::{
     CapResult, CapSpec, CredentialSet, Device, DeviceId, DeviceKind, DeviceMeta, Driver,
     ExecContext, Inventory, LinkState, MyceliumError, Observation, Origin, Params, PortRef, Result,
-    Segment, SegmentKind, Target, Value, ID_IDENTIFY,
+    Segment, SegmentKind, ServiceRecord, ServiceState, Target, Value, ID_IDENTIFY,
 };
 use mycelium_driver_edgeos::SshSession;
 
-use crate::parsers::{parse_interfaces, parse_neighbors, parse_routes};
+use crate::parsers::{parse_interfaces, parse_listeners, parse_neighbors, parse_routes};
 
 pub const DRIVER_NAME: &str = "linux";
-const OBSERVE_COMMAND: &str = "printf '__MYCELIUM_LINKS__\\n'; ip -o link show; printf '__MYCELIUM_ADDRS__\\n'; ip -o -4 addr show scope global; printf '__MYCELIUM_NEIGH__\\n'; ip neigh show; printf '__MYCELIUM_ROUTES__\\n'; ip -4 route show proto kernel scope link";
+const OBSERVE_COMMAND: &str = "printf '__MYCELIUM_LINKS__\\n'; ip -o link show; printf '__MYCELIUM_ADDRS__\\n'; ip -o -4 addr show scope global; printf '__MYCELIUM_NEIGH__\\n'; ip neigh show; printf '__MYCELIUM_ROUTES__\\n'; ip -4 route show proto kernel scope link; printf '__MYCELIUM_SERVICES__\\n'; ss -H -lntup";
 
 pub struct LinuxDriver {
     timeout: Duration,
@@ -195,11 +195,56 @@ impl Device for LinuxDevice {
                 origin: origin(&format!("ip-route:{}", route.iface)),
             });
         }
+        let observed_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        for listener in parse_listeners(sections[4]) {
+            out.push(Observation::Service {
+                device: self.meta.id.to_string(),
+                mac: None,
+                ip: None,
+                service: ServiceRecord {
+                    name: service_name(listener.port, listener.process.as_deref()),
+                    transport: listener.transport,
+                    port: listener.port,
+                    product: listener.process,
+                    state: ServiceState::Up,
+                    observed_at,
+                    origin: origin("ss-listen"),
+                },
+            });
+        }
         Ok((out, Vec::new()))
     }
 }
 
-fn split_sections(text: &str) -> Result<[&str; 4]> {
+fn service_name(port: u16, process: Option<&str>) -> String {
+    match port {
+        22 => "ssh".into(),
+        25 => "smtp".into(),
+        53 => "dns".into(),
+        111 => "rpcbind".into(),
+        631 => "ipp".into(),
+        2049 => "nfs".into(),
+        2222 => "ssh".into(),
+        3000 | 3001 | 3002 => "http".into(),
+        5432 | 5433 | 5435 => "postgres".into(),
+        5900 => "vnc".into(),
+        7878 => "radarr".into(),
+        8123 => "home-assistant".into(),
+        80 | 5000 | 8080 => "http".into(),
+        443 | 8443 | 8888 | 8971 => "https".into(),
+        8554 => "rtsp".into(),
+        8555 => "webrtc".into(),
+        8989 => "sonarr".into(),
+        11434 => "ollama".into(),
+        32400 => "plex".into(),
+        _ => process.unwrap_or("unknown").to_owned(),
+    }
+}
+
+fn split_sections(text: &str) -> Result<[&str; 5]> {
     let (_, after_links) = text
         .split_once("__MYCELIUM_LINKS__\n")
         .ok_or_else(|| MyceliumError::Parse("missing links marker".into()))?;
@@ -209,8 +254,11 @@ fn split_sections(text: &str) -> Result<[&str; 4]> {
     let (addrs, after_neigh) = after_addrs
         .split_once("__MYCELIUM_NEIGH__\n")
         .ok_or_else(|| MyceliumError::Parse("missing neighbors marker".into()))?;
-    let (neigh, routes) = after_neigh
+    let (neigh, after_routes) = after_neigh
         .split_once("__MYCELIUM_ROUTES__\n")
         .ok_or_else(|| MyceliumError::Parse("missing routes marker".into()))?;
-    Ok([links, addrs, neigh, routes])
+    let (routes, services) = after_routes
+        .split_once("__MYCELIUM_SERVICES__\n")
+        .ok_or_else(|| MyceliumError::Parse("missing services marker".into()))?;
+    Ok([links, addrs, neigh, routes, services])
 }

@@ -26,6 +26,13 @@ pub struct ConnectedRoute {
     pub source: Option<IpAddr>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Listener {
+    pub transport: String,
+    pub port: u16,
+    pub process: Option<String>,
+}
+
 pub fn parse_interfaces(links: &str, addresses: &str) -> Vec<Interface> {
     let mut out: BTreeMap<String, Interface> = BTreeMap::new();
     for line in links.lines() {
@@ -113,6 +120,30 @@ pub fn parse_routes(text: &str) -> Vec<ConnectedRoute> {
         .collect()
 }
 
+pub fn parse_listeners(text: &str) -> Vec<Listener> {
+    let mut listeners = text
+        .lines()
+        .filter_map(|line| {
+            let fields = line.split_whitespace().collect::<Vec<_>>();
+            let transport = fields.first()?.trim_end_matches('6').to_owned();
+            let port = fields.get(4)?.rsplit(':').next()?.parse().ok()?;
+            let process = line
+                .split("users:((\"")
+                .nth(1)
+                .and_then(|rest| rest.split('"').next())
+                .map(str::to_owned);
+            Some(Listener {
+                transport,
+                port,
+                process,
+            })
+        })
+        .collect::<Vec<_>>();
+    listeners.sort();
+    listeners.dedup();
+    listeners
+}
+
 fn parse_cidr(text: &str) -> Option<(IpAddr, u8)> {
     let (ip, prefix) = text.split_once('/')?;
     Some((ip.parse().ok()?, prefix.parse().ok()?))
@@ -140,5 +171,15 @@ mod tests {
         );
         assert_eq!(routes[0].prefix, 24);
         assert_eq!(routes[0].source.unwrap().to_string(), "192.168.1.9");
+    }
+
+    #[test]
+    fn parses_listening_sockets_and_processes() {
+        let rows = parse_listeners(
+            "tcp LISTEN 0 4096 0.0.0.0:8971 0.0.0.0:* users:((\"frigate\",pid=12,fd=4))\nudp UNCONN 0 0 0.0.0.0:5353 0.0.0.0:*",
+        );
+        assert_eq!(rows[0].process.as_deref(), Some("frigate"));
+        assert_eq!(rows[0].port, 8971);
+        assert_eq!(rows[1].transport, "udp");
     }
 }

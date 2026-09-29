@@ -707,6 +707,7 @@ fn render_topology(topo: &Topology) -> Vec<String> {
             node.ports.len(),
             ips
         ));
+        render_services(&mut out, node);
     }
     out.push(format!(
         "hosts: {}",
@@ -734,6 +735,7 @@ fn render_topology(topo: &Topology) -> Vec<String> {
         for link in node.ports.values().filter_map(|link| link.b.as_ref()) {
             out.push(format!("    └─ {}", link));
         }
+        render_services(&mut out, node);
     }
     if !topo.leases.is_empty() {
         out.push("leases:".into());
@@ -753,6 +755,32 @@ fn render_topology(topo: &Topology) -> Vec<String> {
         }
     }
     out
+}
+
+fn render_services(out: &mut Vec<String>, node: &mycelium_core::TopoNode) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    for service in node.services.values() {
+        if service.name == "unknown" {
+            continue;
+        }
+        let age = now.saturating_sub(service.observed_at);
+        let state = if age > 300 {
+            format!("STALE {}m", age / 60)
+        } else {
+            format!("{:?}", service.state).to_ascii_uppercase()
+        };
+        out.push(format!(
+            "    └─ {}:{}/{}  {}  {}",
+            service.name,
+            service.port,
+            service.transport,
+            state,
+            service.product.as_deref().unwrap_or("unidentified")
+        ));
+    }
 }
 
 fn render_boot_path(path: &mycelium_core::BootPath) -> Vec<String> {

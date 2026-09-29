@@ -160,6 +160,25 @@ pub struct LeaseRecord {
     pub origin: Origin,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceState {
+    Up,
+    Down,
+    Unknown,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServiceRecord {
+    pub name: String,
+    pub transport: String,
+    pub port: u16,
+    pub product: Option<String>,
+    pub state: ServiceState,
+    pub observed_at: u64,
+    pub origin: Origin,
+}
+
 /// One atomic piece of topology truth from one device.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Observation {
@@ -178,6 +197,14 @@ pub enum Observation {
         hostname: Option<String>,
         port: PortRef,
         origin: Origin,
+    },
+    /// A listening or remotely identified service. MAC is preferred for
+    /// identity, then an existing node with `ip`, then `device`.
+    Service {
+        device: String,
+        mac: Option<MacAddress>,
+        ip: Option<IpAddr>,
+        service: ServiceRecord,
     },
     /// A port of a device, with link state.
     DevicePort {
@@ -213,6 +240,8 @@ pub struct TopoNode {
     pub origins: BTreeSet<String>,
     #[serde(default)]
     pub sites: BTreeSet<String>,
+    #[serde(default)]
+    pub services: BTreeMap<String, ServiceRecord>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -312,6 +341,7 @@ impl Topology {
                         ports: BTreeMap::new(),
                         origins: BTreeSet::new(),
                         sites: BTreeSet::new(),
+                        services: BTreeMap::new(),
                     }
                 });
                 if let Some(site) = &origin.site {
@@ -394,6 +424,41 @@ impl Topology {
                         origins: BTreeSet::from_iter([origin]),
                     },
                 );
+                report.updated_nodes += 1;
+            }
+            Observation::Service {
+                device,
+                mac,
+                ip,
+                service,
+            } => {
+                let key = mac.map(|value| value.to_string()).or_else(|| {
+                    ip.and_then(|address| {
+                        self.nodes
+                            .iter()
+                            .find(|(_, node)| node.ips.contains_key(&address))
+                            .map(|(id, _)| id.clone())
+                    })
+                });
+                let key = key.unwrap_or_else(|| device.clone());
+                let node = self.nodes.entry(key.clone()).or_insert_with(|| TopoNode {
+                    id: key,
+                    mac,
+                    device: mac.is_none() && ip.is_none(),
+                    ..TopoNode::default()
+                });
+                if let Some(address) = ip {
+                    node.ips.entry(address).or_insert_with(|| IpRecord {
+                        addr: address,
+                        prefix: None,
+                        vlan: None,
+                        origins: BTreeSet::from_iter([origin_key(&service.origin)]),
+                    });
+                }
+                let service_key =
+                    format!("{}:{}/{}", service.transport, service.port, service.name);
+                node.origins.insert(origin_key(&service.origin));
+                node.services.insert(service_key, service);
                 report.updated_nodes += 1;
             }
             Observation::DevicePort {
@@ -558,6 +623,7 @@ impl Topology {
                 ports: BTreeMap::new(),
                 origins: BTreeSet::new(),
                 sites: BTreeSet::new(),
+                services: BTreeMap::new(),
             });
         node.device = true;
         if node.mac.is_none() {
@@ -613,6 +679,7 @@ fn observation_origin(o: &Observation) -> Origin {
         | Observation::VlanMember { origin, .. }
         | Observation::Segment { origin, .. }
         | Observation::Lease { origin, .. } => origin.clone(),
+        Observation::Service { service, .. } => service.origin.clone(),
     }
 }
 
@@ -811,6 +878,34 @@ mod tests {
         let node = &topo.nodes["02:00:00:00:00:05"];
         assert!(node.hostnames.contains("camera"));
         assert_eq!(node.ports["switch-1/g25"].b.as_ref().unwrap().port, "g25");
+    }
+
+    #[test]
+    fn service_merges_into_node_by_ip() {
+        let mut topo = Topology::empty();
+        topo.observe_all([Observation::Neighbor {
+            mac: MacAddress::parse("02:00:00:00:00:05"),
+            ip: ip("10.0.7.20"),
+            hostname: Some("nvr".into()),
+            port: None,
+            origin: Origin::new("router", "arp"),
+        }]);
+        topo.observe_all([Observation::Service {
+            device: "observer".into(),
+            mac: None,
+            ip: Some(ip("10.0.7.20")),
+            service: ServiceRecord {
+                name: "frigate".into(),
+                transport: "tcp".into(),
+                port: 8971,
+                product: Some("Frigate".into()),
+                state: ServiceState::Up,
+                observed_at: 1,
+                origin: Origin::new("observer", "probe"),
+            },
+        }]);
+        assert_eq!(topo.nodes.len(), 1);
+        assert_eq!(topo.nodes["02:00:00:00:00:05"].services.len(), 1);
     }
 
     #[test]

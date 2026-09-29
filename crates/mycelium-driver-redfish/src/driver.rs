@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use mycelium_core::{
     CapResult, CapSpec, CredentialSet, Device, DeviceId, DeviceKind, DeviceMeta, Driver,
     ExecContext, Inventory, MacAddress, MyceliumError, Observation, Origin, Params, Result, Secret,
-    Target, Value, ID_IDENTIFY,
+    ServiceRecord, ServiceState, Target, Value, ID_IDENTIFY,
 };
 use reqwest::{Client, StatusCode};
 use serde_json::Value as Json;
@@ -370,18 +370,41 @@ impl Device for RedfishDevice {
             return Ok((Vec::new(), vec!["iLO address is not an IP literal".into()]));
         };
         Ok((
-            vec![Observation::Neighbor {
-                mac: self.management_mac,
-                ip,
-                hostname: Some(format!(
-                    "ilo-{}",
-                    string(&system, "SerialNumber")
-                        .unwrap_or_else(|| "unknown".into())
-                        .to_lowercase()
-                )),
-                port: None,
-                origin: Origin::new(self.meta.id.to_string(), "redfish"),
-            }],
+            vec![
+                Observation::Neighbor {
+                    mac: self.management_mac,
+                    ip,
+                    hostname: Some(format!(
+                        "ilo-{}",
+                        string(&system, "SerialNumber")
+                            .unwrap_or_else(|| "unknown".into())
+                            .to_lowercase()
+                    )),
+                    port: None,
+                    origin: Origin::new(self.meta.id.to_string(), "redfish"),
+                },
+                Observation::Service {
+                    device: self.meta.id.to_string(),
+                    mac: self.management_mac,
+                    ip: Some(ip),
+                    service: ServiceRecord {
+                        name: "redfish".into(),
+                        transport: "tcp".into(),
+                        port: 443,
+                        product: self
+                            .meta
+                            .firmware
+                            .clone()
+                            .map(|version| format!("HPE iLO {version}")),
+                        state: ServiceState::Up,
+                        observed_at: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs(),
+                        origin: Origin::new(self.meta.id.to_string(), "redfish"),
+                    },
+                },
+            ],
             Vec::new(),
         ))
     }

@@ -6,7 +6,8 @@ use async_trait::async_trait;
 use mycelium_core::{
     CapResult, CapSpec, CredentialSet, Device, DeviceId, DeviceKind, DeviceMeta, Driver,
     ExecContext, Inventory, MacAddress, MyceliumError, Observation, Origin, ParamType, Params,
-    PortRef, Result, Secret, Target, Value, ID_IDENTIFY, ID_WLAN_GUEST_ENABLE, ID_WLAN_LIST_SSID,
+    PortRef, Result, Secret, ServiceRecord, ServiceState, Target, Value, ID_IDENTIFY,
+    ID_WLAN_GUEST_ENABLE, ID_WLAN_LIST_SSID,
 };
 use reqwest::header::{COOKIE, SET_COOKIE};
 use serde_json::{json, Map as JsonMap};
@@ -302,6 +303,24 @@ impl Device for ControllerDevice {
         let session = self.handle.login().await?;
         let mut observations = Vec::new();
         let mut warnings = Vec::new();
+        observations.push(Observation::Service {
+            device: self.meta.id.to_string(),
+            mac: None,
+            ip: None,
+            service: ServiceRecord {
+                name: "unifi-controller".into(),
+                transport: "tcp".into(),
+                port: 8443,
+                product: self
+                    .meta
+                    .firmware
+                    .clone()
+                    .map(|version| format!("UniFi Network {version}")),
+                state: ServiceState::Up,
+                observed_at: unix_time(),
+                origin: Origin::new(self.meta.id.to_string(), "controller-api"),
+            },
+        });
         for site in &self.sites {
             let path = format!("/api/s/{site}/stat/sta");
             match self.handle.get(&session, &path).await {
@@ -505,6 +524,13 @@ fn client_view(site: &str, item: &serde_json::Value) -> Option<Value> {
 
 fn http_error(error: reqwest::Error) -> MyceliumError {
     MyceliumError::Transport(error.to_string())
+}
+
+fn unix_time() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 #[cfg(test)]
