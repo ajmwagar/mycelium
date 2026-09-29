@@ -16,6 +16,7 @@ path = "src/main.rs"
 [dependencies]
 mycelium-core.workspace = true
 mycelium-driver-edgeos.workspace = true
+mycelium-driver-snmp.workspace = true
 mycelium-plugins-lua.workspace = true
 async-trait.workspace = true
 serde.workspace = true

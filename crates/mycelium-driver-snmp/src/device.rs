@@ -1,0 +1,546 @@
+use std::collections::{BTreeMap, HashMap};
+use std::net::IpAddr;
+use std::sync::OnceLock;
+
+use async_trait::async_trait;
+use mycelium_core::{
+    CapResult, CapSpec, Device, DeviceKind, DeviceMeta, ExecContext, Identity, IntoValue,
+    MacAddress, MyceliumError, Observation, Origin, ParamType, Params, PortRef, Result, Value,
+    ID_IDENTIFY,
+};
+
+use crate::client::SnmpHandle;
+
+pub const DEFAULT_SNMP_PORT: u16 = 161;
+
+// system
+const SYS_DESCR: &str = "1.3.6.1.2.1.1.1.0";
+const SYS_OBJECTID: &str = "1.3.6.1.2.1.1.2.0";
+const SYS_UPTIME: &str = "1.3.6.1.2.1.1.3.0";
+const SYS_NAME: &str = "1.3.6.1.2.1.1.5.0";
+// interfaces
+const IF_DESCR: &str = "1.3.6.1.2.1.2.2.1.2";
+const IF_PHYS: &str = "1.3.6.1.2.1.2.2.1.6";
+const IF_OPER: &str = "1.3.6.1.2.1.2.2.1.8";
+// arp
+const ARP_IFIDX: &str = "1.3.6.1.2.1.4.22.2.1.1";
+const ARP_IP: &str = "1.3.6.1.2.1.4.22.2.1.2";
+const ARP_MAC: &str = "1.3.6.1.2.1.4.22.2.1.4";
+
+pub const ID_SNMP_GET: &str = "snmp.get";
+pub const ID_SNMP_WALK: &str = "snmp.walk";
+pub const ID_SNMP_SET: &str = "snmp.set";
+pub const ID_NET_IFACES: &str = "net.ifaces";
+pub const ID_NET_ARP: &str = "net.arp";
+
+pub fn caps() -> &'static BTreeMap<String, CapSpec> {
+    static CAPS: OnceLock<BTreeMap<String, CapSpec>> = OnceLock::new();
+    CAPS.get_or_init(|| {
+        BTreeMap::from_iter([
+            (
+                ID_IDENTIFY.to_owned(),
+                CapSpec::readonly("sysDescr/sysName/sysObjectID/sysUpTime")
+                    .returns("map {vendor, model, firmware, hostname, uptime}"),
+            ),
+            (
+                ID_NET_IFACES.to_owned(),
+                CapSpec::readonly("interfaces from ifTable: descr, mac, oper status")
+                    .returns("list of {index, descr, mac, up}"),
+            ),
+            (
+                ID_NET_ARP.to_owned(),
+                CapSpec::readonly("arp/ipNetToMedia table").returns("list of {ip, mac, iface}"),
+            ),
+            (
+                ID_SNMP_GET.to_owned(),
+                CapSpec::readonly("raw SNMP GET of one dotted oid").param(
+                    "oid",
+                    ParamType::Str,
+                    "dotted oid, e.g. 1.3.6.1.2.1.1.1.0",
+                ),
+            ),
+            (
+                ID_SNMP_WALK.to_owned(),
+                CapSpec::readonly("raw SNMP WALK of a subtree")
+                    .param(
+                        "oid",
+                        ParamType::Str,
+                        "subtree root, e.g. 1.3.6.1.2.1.2.2.1.2",
+                    )
+                    .optional("limit", ParamType::Int, "max rows (default 4096)"),
+            ),
+            (
+                ID_SNMP_SET.to_owned(),
+                CapSpec::mutation("raw SNMP SET (requires write community)")
+                    .param("oid", ParamType::Str, "dotted oid")
+                    .param("value", ParamType::Str, "string, int, or hex:<bytes>"),
+            ),
+        ])
+    })
+}
+
+pub struct SnmpDevice {
+    handle: SnmpHandle,
+    meta: DeviceMeta,
+}
+
+impl SnmpDevice {
+    pub fn new(handle: SnmpHandle, meta: DeviceMeta) -> Self {
+        Self { handle, meta }
+    }
+
+    pub async fn probe(handle: &SnmpHandle) -> Result<SnmpInfo> {
+        let rows = handle
+            .get(&[
+                SYS_DESCR.into(),
+                SYS_OBJECTID.into(),
+                SYS_UPTIME.into(),
+                SYS_NAME.into(),
+            ])
+            .await?;
+        let mut info = SnmpInfo::default();
+        for (oid, v) in rows {
+            match oid.as_str() {
+                SYS_DESCR => info.sys_descr = v.as_str().unwrap_or_default().to_owned(),
+                SYS_OBJECTID => info.sys_objectid = v.as_str().unwrap_or_default().to_owned(),
+                SYS_UPTIME => info.uptime = v.as_i64().unwrap_or(0),
+                SYS_NAME => info.sys_name = v.as_str().unwrap_or_default().to_owned(),
+                _ => {}
+            }
+        }
+        Ok(info)
+    }
+
+    fn ifaces_map(
+        &self,
+        rows: Vec<(String, Value)>,
+    ) -> BTreeMap<u32, (String, Option<String>, Option<u32>)> {
+        // index -> (descr, mac, oper)
+        let mut out: BTreeMap<u32, (String, Option<String>, Option<u32>)> = BTreeMap::new();
+        for (oid, v) in rows {
+            let idx = row_index(&oid);
+            let slot = out
+                .entry(idx)
+                .or_insert_with(|| (String::new(), None, None));
+            if oid.starts_with(IF_DESCR) {
+                slot.0 = v.as_str().unwrap_or_default().to_owned();
+            } else if oid.starts_with(IF_PHYS) {
+                slot.1 = v.as_str().map(str::to_owned).filter(|s| !s.is_empty());
+            } else if oid.starts_with(IF_OPER) {
+                slot.2 = v.as_i64().map(|i| i as u32);
+            }
+        }
+        out
+    }
+
+    async fn iface_rows(&self) -> Result<BTreeMap<u32, (String, Option<String>, Option<u32>)>> {
+        let mut rows = Vec::new();
+        for root in [IF_DESCR, IF_PHYS, IF_OPER] {
+            rows.extend(self.handle.walk(root, 4096).await?);
+        }
+        let map = self.ifaces_map(rows);
+        Ok(map)
+    }
+
+    async fn ifaces(&self) -> Result<Value> {
+        let map = self.iface_rows().await?;
+        let list: Vec<Value> = map
+            .into_values()
+            .filter(|(d, _, _)| !d.is_empty())
+            .map(|(descr, mac, oper)| {
+                Value::Map(Params::from_iter([
+                    ("descr".into(), Value::Str(descr)),
+                    ("mac".into(), mac.map(Value::Str).unwrap_or(Value::Null)),
+                    ("up".into(), Value::Bool(oper == Some(1))),
+                ]))
+            })
+            .collect();
+        Ok(Value::List(list))
+    }
+
+    async fn arp(&self) -> Result<Vec<ArpRow>> {
+        let mut rows = Vec::new();
+        for root in [ARP_IFIDX, ARP_IP, ARP_MAC] {
+            rows.extend(self.handle.walk(root, 4096).await?);
+        }
+        let mut out: BTreeMap<u32, ArpRow> = BTreeMap::new();
+        for (oid, v) in rows {
+            // ipNetToMedia rows embed the IPv4 address as 4 arcs: the row key
+            // is their fold; `<col>` is the arc right before them.
+            let (col, rowkey) = split_column(&oid);
+            let e = out.entry(rowkey).or_default();
+            match col {
+                1 => e.ifindex = v.as_i64().map(|i| i as u32),
+                2 => e.ip = v.as_str().and_then(|s| s.parse().ok()),
+                4 => {
+                    if let Some(s) = v.as_str() {
+                        e.mac = MacAddress::parse(s);
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(out
+            .into_values()
+            .filter(|r| r.ip.is_some() && r.mac.is_some() && r.ifindex.is_some())
+            .collect())
+    }
+
+    fn ifindex_names(
+        &self,
+        map: &BTreeMap<u32, (String, Option<String>, Option<u32>)>,
+    ) -> HashMap<u32, String> {
+        map.iter()
+            .filter(|(_, (d, ..))| !d.is_empty())
+            .map(|(idx, (d, ..))| (*idx, d.clone()))
+            .collect()
+    }
+}
+
+#[derive(Default, Clone, Copy)]
+pub struct ArpRow {
+    pub ip: Option<IpAddr>,
+    pub mac: Option<MacAddress>,
+    pub ifindex: Option<u32>,
+}
+
+#[derive(Default, Clone, Debug)]
+pub struct SnmpInfo {
+    pub sys_descr: String,
+    pub sys_objectid: String,
+    pub sys_name: String,
+    pub uptime: i64,
+}
+
+fn row_index(oid: &str) -> u32 {
+    oid.rsplit('.')
+        .next()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0)
+}
+
+/// `<prefix>.<col>.<rowkey>` — rowkey is the last arc for ifTable, the
+/// ip part for ipNetToMedia (where the index is ifaddr + entry).
+fn split_column(oid: &str) -> (u32, u32) {
+    let arcs: Vec<&str> = oid.split('.').collect();
+    if arcs.len() < 2 {
+        return (0, 0);
+    }
+    let col: u32 = arcs[arcs.len() - 2].parse().unwrap_or(0);
+    // ipNetToMedia row key embeds the IPv4 address as 4 arcs before entry id
+    if arcs.len() >= 13 {
+        let ip_arc_start = arcs.len() - 5;
+        let key = arcs[ip_arc_start..ip_arc_start + 4]
+            .iter()
+            .map(|a| a.parse::<u32>().unwrap_or(0))
+            .fold(0u32, |acc, a| (acc << 8) | (a & 0xff));
+        (col, key)
+    } else {
+        (col, arcs[arcs.len() - 1].parse().unwrap_or(0))
+    }
+}
+
+pub fn classify(info: &SnmpInfo, host: &str) -> (DeviceKind, String, Option<String>) {
+    let d = info.sys_descr.to_lowercase();
+    let ent = enterprise_number(&info.sys_objectid).unwrap_or("");
+    let kind = match (d.as_str(), ent) {
+        (s, _) if s.contains("edgerouter") || s.contains("edgeos") || s.contains("vyos") => {
+            DeviceKind::Router
+        }
+        (s, _) if s.contains("uap") || s.contains("unifi") || s.contains("aircube") => {
+            DeviceKind::AccessPoint
+        }
+        (s, "4526") | (s, "14823") | (s, "11")
+            if s.contains("switch")
+                || s.contains("gs")
+                || s.contains("jgs")
+                || s.contains("aruba")
+                || s.contains("procurve") =>
+        {
+            DeviceKind::Switch
+        }
+        (_, "4526") => DeviceKind::Switch,
+        (s, "41112") if !s.contains("edgerouter") => DeviceKind::AccessPoint,
+        (s, _) if s.contains("procurve") || s.contains("aruba") || s.contains("hpe") => {
+            DeviceKind::Switch
+        }
+        _ => DeviceKind::Other,
+    };
+    let model = first_model_token(&info.sys_descr).unwrap_or_else(|| "snmp-device".into());
+    let host_part = host
+        .replace(|c: char| !(c.is_ascii_alphanumeric()), "-")
+        .trim_matches('-')
+        .to_owned();
+    (kind, format!("{model}-{host_part}"), Some(model))
+}
+
+fn first_model_token(descr: &str) -> Option<String> {
+    descr
+        .split_whitespace()
+        .find(|t| {
+            t.len() >= 3
+                && t.chars()
+                    .next()
+                    .map(|c| c.is_ascii_alphabetic())
+                    .unwrap_or(false)
+                && t.chars().any(|c| c.is_ascii_digit())
+        })
+        .map(|t| {
+            t.trim_end_matches(|c: char| !c.is_ascii_alphanumeric())
+                .to_lowercase()
+        })
+}
+
+#[async_trait]
+impl Device for SnmpDevice {
+    fn meta(&self) -> &DeviceMeta {
+        &self.meta
+    }
+
+    fn capabilities(&self) -> BTreeMap<String, CapSpec> {
+        caps().clone()
+    }
+
+    async fn exec(&self, _ctx: &ExecContext, cap: &str, params: Params) -> Result<CapResult> {
+        match cap {
+            ID_IDENTIFY => {
+                let info = SnmpDevice::probe(&self.handle).await?;
+                Ok(CapResult::ok(Value::Map(Params::from_iter([
+                    (
+                        "vendor".into(),
+                        enterprise_vendor(&info.sys_objectid).into_value(),
+                    ),
+                    (
+                        "model".into(),
+                        first_model_token(&info.sys_descr)
+                            .unwrap_or_default()
+                            .into_value(),
+                    ),
+                    ("firmware".into(), Value::Null),
+                    (
+                        "hostname".into(),
+                        (!info.sys_name.is_empty())
+                            .then_some(info.sys_name.clone())
+                            .into_value(),
+                    ),
+                    ("sysDescr".into(), info.sys_descr.into_value()),
+                    ("uptime_centisec".into(), Value::Int(info.uptime)),
+                ]))))
+            }
+            ID_NET_IFACES => Ok(CapResult::ok(self.ifaces().await?)),
+            ID_NET_ARP => {
+                let rows = self.arp().await?;
+                let names = self.ifindex_names(&self.iface_rows().await?);
+                Ok(CapResult::ok(Value::List(
+                    rows.iter()
+                        .map(|r| {
+                            Value::Map(Params::from_iter([
+                                ("ip".into(), r.ip.unwrap().to_string().into_value()),
+                                ("mac".into(), r.mac.unwrap().to_string().into_value()),
+                                ("ifindex".into(), Value::Int(r.ifindex.unwrap() as i64)),
+                                (
+                                    "iface".into(),
+                                    names
+                                        .get(&r.ifindex.unwrap())
+                                        .cloned()
+                                        .map(Value::Str)
+                                        .unwrap_or(Value::Null),
+                                ),
+                            ]))
+                        })
+                        .collect(),
+                )))
+            }
+            ID_SNMP_GET => {
+                let oid = oid_param(&params)?;
+                let rows = self.handle.get(&[oid.clone()]).await?;
+                Ok(CapResult::ok(Value::List(
+                    rows.into_iter()
+                        .map(|(oid, value)| {
+                            Value::Map(Params::from_iter([
+                                ("oid".into(), Value::Str(oid)),
+                                ("value".into(), value),
+                            ]))
+                        })
+                        .collect(),
+                )))
+            }
+            ID_SNMP_WALK => {
+                let oid = oid_param(&params)?;
+                let limit = params
+                    .get("limit")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(4096)
+                    .clamp(1, 65535) as usize;
+                let rows = self.handle.walk(&oid, limit).await?;
+                Ok(CapResult::ok(Value::List(
+                    rows.into_iter()
+                        .map(|(o, v)| {
+                            Value::Map(Params::from_iter([
+                                ("oid".into(), Value::Str(o)),
+                                ("value".into(), v),
+                            ]))
+                        })
+                        .collect(),
+                )))
+            }
+            ID_SNMP_SET => {
+                let oid = oid_param(&params)?;
+                let raw = params
+                    .get("value")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| MyceliumError::Validation("param `value` missing".into()))?;
+                let value = match raw {
+                    "true" => Value::Int(1),
+                    "false" => Value::Int(2),
+                    _ => raw
+                        .parse::<i64>()
+                        .map(Value::Int)
+                        .unwrap_or_else(|_| Value::Str(raw.to_owned())),
+                };
+                let (o, v) = self.handle.set(&oid, value).await?;
+                Ok(CapResult::ok(Value::Map(Params::from_iter([
+                    ("oid".into(), Value::Str(o)),
+                    ("echo".into(), v),
+                ]))))
+            }
+            other => Err(MyceliumError::Unsupported {
+                device: self.meta.id.to_string(),
+                capability: other.to_owned(),
+            }),
+        }
+    }
+
+    /// ARP + interfaces from the appliance itself: this is how a managed
+    /// switch makes the topology map even when nobody has SSH on it.
+    async fn observe(&self) -> Result<(Vec<Observation>, Vec<String>)> {
+        let mut obs = Vec::new();
+        let mut warnings = Vec::new();
+        let me = self.meta.id.to_string();
+
+        match self.ifaces().await {
+            Ok(Value::List(rows)) => {
+                for r in rows {
+                    let descr = r
+                        .get("descr")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_owned();
+                    let mac = r
+                        .get("mac")
+                        .and_then(|v| v.as_str())
+                        .and_then(MacAddress::parse);
+                    let up = r.get("up").and_then(|v| v.as_bool()).unwrap_or(false);
+                    obs.push(Observation::DevicePort {
+                        device: me.clone(),
+                        port: descr,
+                        mac,
+                        ips: Vec::new(),
+                        state: if up {
+                            mycelium_core::LinkState::Up
+                        } else {
+                            mycelium_core::LinkState::Down
+                        },
+                        origin: Origin::new(me.clone(), "snmp-ifTable"),
+                    });
+                }
+            }
+            Ok(_) => {}
+            Err(e) => warnings.push(format!("ifTable: {e}")),
+        }
+
+        match self.arp().await {
+            Ok(rows) => {
+                for r in rows {
+                    obs.push(Observation::Neighbor {
+                        mac: r.mac,
+                        ip: r.ip.unwrap(),
+                        hostname: None,
+                        port: Some(PortRef {
+                            device: me.clone(),
+                            port: format!("if{}", r.ifindex.unwrap()),
+                            vif: None,
+                        }),
+                        origin: Origin::new(me.clone(), "snmp-arp"),
+                    });
+                }
+            }
+            Err(e) => warnings.push(format!("ipNetToMedia: {e}")),
+        }
+
+        Ok((obs, warnings))
+    }
+}
+
+#[async_trait]
+impl Identity for SnmpDevice {}
+
+fn oid_param(params: &Params) -> Result<String> {
+    let oid = params
+        .get("oid")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| MyceliumError::Validation("param `oid` required".into()))?
+        .to_owned();
+    if oid.split('.').all(|a| a.parse::<u32>().is_ok()) && oid.starts_with("1.") {
+        Ok(oid)
+    } else {
+        Err(MyceliumError::Validation(format!(
+            "not a dotted numeric oid: {oid}"
+        )))
+    }
+}
+
+fn enterprise_vendor(objectid: &str) -> String {
+    match enterprise_number(objectid) {
+        Some("4526") => "NETGEAR".into(),
+        Some("41112") | Some("8072") | Some("28577") => "Ubiquiti".into(),
+        Some("11") => "HPE".into(),
+        Some("14823") => "Aruba".into(),
+        Some("2271") => "Ubiquiti".into(),
+        Some(e) => format!("enterprise:{e}"),
+        None => "generic".into(),
+    }
+}
+
+fn enterprise_number(objectid: &str) -> Option<&str> {
+    objectid.strip_prefix("1.3.6.1.4.1.")?.split('.').next()
+}
+
+/// Public form used when constructing metadata before a device is attached.
+pub(crate) fn enterprise_vendor_public(objectid: &str) -> String {
+    enterprise_vendor(objectid)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn info(descr: &str, objectid: &str) -> SnmpInfo {
+        SnmpInfo {
+            sys_descr: descr.into(),
+            sys_objectid: objectid.into(),
+            ..SnmpInfo::default()
+        }
+    }
+
+    #[test]
+    fn classifies_netgear_switch_from_enterprise_oid() {
+        let (kind, id, model) = classify(
+            &info(
+                "NETGEAR GS724Tv4 ProSafe 24-port switch",
+                "1.3.6.1.4.1.4526.100.4.6",
+            ),
+            "192.0.2.10",
+        );
+        assert_eq!(kind, DeviceKind::Switch);
+        assert_eq!(id, "gs724tv4-192-0-2-10");
+        assert_eq!(model.as_deref(), Some("gs724tv4"));
+        assert_eq!(enterprise_vendor("1.3.6.1.4.1.4526.100.4.6"), "NETGEAR");
+    }
+
+    #[test]
+    fn classifies_edge_router_before_ubiquiti_enterprise_fallback() {
+        let (kind, _, _) = classify(&info("EdgeRouter 6P", "1.3.6.1.4.1.41112.1.5"), "192.0.2.1");
+        assert_eq!(kind, DeviceKind::Router);
+    }
+}

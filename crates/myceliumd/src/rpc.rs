@@ -7,6 +7,7 @@ use mycelium_core::{
     Topology, Transport, Value,
 };
 use mycelium_driver_edgeos::{EdgeOsDriver, SshSession};
+use mycelium_driver_snmp::SnmpDriver;
 use mycelium_plugins_lua::{Connect, Plugin};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -57,7 +58,10 @@ impl Daemon {
     /// Builtin drivers + validated Lua plugins from $MYCELIUM_HOME/plugins.
     /// A plugin that fails to load aborts boot (fail loud at startup).
     pub async fn boot() -> Result<Self> {
-        let mut drivers: Vec<Arc<dyn Driver>> = vec![Arc::new(EdgeOsDriver::default())];
+        let mut drivers: Vec<Arc<dyn Driver>> = vec![
+            Arc::new(EdgeOsDriver::default()),
+            Arc::new(SnmpDriver::default()),
+        ];
         let pdir = crate::plugins_dir();
         if pdir.is_dir() {
             let mut entries: Vec<_> = std::fs::read_dir(&pdir)

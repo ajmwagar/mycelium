@@ -1,0 +1,16 @@
+[package]
+name = "mycelium-driver-snmp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "mycelium driver for SNMP appliances: switches, APs, cameras, UPSes (v2c, pure Rust)"
+
+[dependencies]
+mycelium-core.workspace = true
+async-snmp = "0.18"
+async-trait.workspace = true
+bytes.workspace = true
+futures = "0.3"
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
