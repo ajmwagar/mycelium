@@ -129,6 +129,15 @@ impl<T: IntoValue> IntoValue for Vec<T> {
     }
 }
 
+impl<T: IntoValue> IntoValue for Option<T> {
+    fn into_value(self) -> Value {
+        match self {
+            Some(v) => v.into_value(),
+            None => Value::Null,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

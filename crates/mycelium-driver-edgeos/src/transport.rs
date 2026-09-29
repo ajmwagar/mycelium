@@ -23,10 +23,7 @@ pub struct SshSession {
     inner: Arc<Mutex<Handle<Verifier>>>,
 }
 
-struct Verifier {
-    /// Filled on first failed auth with the server's advertised methods.
-    last_available: Option<Vec<String>>,
-}
+struct Verifier;
 
 impl client::Handler for Verifier {
     type Error = russh::Error;
@@ -42,6 +39,10 @@ impl client::Handler for Verifier {
 
 fn transport_err(e: russh::Error) -> MyceliumError {
     MyceliumError::Transport(e.to_string())
+}
+
+fn transport_str(msg: &str) -> MyceliumError {
+    MyceliumError::Transport(msg.to_owned())
 }
 
 fn auth_err(msg: impl Into<String>) -> MyceliumError {
@@ -67,12 +68,10 @@ impl SshSession {
         });
 
         let mut handle =
-            match tokio::time::timeout(timeout, client::connect(config, (host, port), Verifier {
-                last_available: None,
-            }))
+            match tokio::time::timeout(timeout, client::connect(config, (host, port), Verifier))
             .await
             {
-                Err(_) => return Err(transport_err("tcp/kex timed out")),
+                Err(_) => return Err(transport_str("tcp/kex timed out")),
                 Ok(Err(e)) => return Err(transport_err(e)),
                 Ok(Ok(h)) => h,
             };
@@ -161,14 +160,15 @@ impl SshSession {
         }
 
         out.exit_code = exited.ok_or_else(|| {
-            transport_err("channel closed without exit status")
+            transport_str("channel closed without exit status")
         })? as i32;
         Ok(out)
     }
 
     pub async fn disconnect(self) {
-        if let Ok(mut guard) = Arc::try_unwrap(self.inner).map(Mutex::into_inner) {
-            let _ = guard
+        if let Ok(arc) = Arc::try_unwrap(self.inner) {
+            let handle = arc.into_inner();
+            let _ = handle
                 .disconnect(Disconnect::ByApplication, "", "English")
                 .await;
         }
