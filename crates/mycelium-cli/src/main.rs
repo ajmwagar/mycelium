@@ -954,17 +954,21 @@ fn render_lans(topo: &Topology, node: &mycelium_core::TopoNode) -> String {
 fn render_overlays(out: &mut Vec<String>, node: &mycelium_core::TopoNode) {
     for overlay in node.overlays.values() {
         let state = if overlay.online { "ONLINE" } else { "OFFLINE" };
-        let path = overlay
-            .endpoint
-            .as_deref()
-            .map(|endpoint| format!("direct={endpoint}"))
-            .or_else(|| {
-                overlay
-                    .relay
-                    .as_deref()
-                    .map(|relay| format!("relay={relay}"))
-            })
-            .unwrap_or_else(|| "path=unknown".into());
+        let path = if overlay.self_node {
+            "path=self".into()
+        } else {
+            overlay
+                .endpoint
+                .as_deref()
+                .map(|endpoint| format!("direct={endpoint}"))
+                .or_else(|| {
+                    overlay
+                        .relay
+                        .as_deref()
+                        .map(|relay| format!("relay={relay}"))
+                })
+                .unwrap_or_else(|| "path=unknown".into())
+        };
         let routes = if overlay.routed_lans.is_empty() {
             String::new()
         } else {

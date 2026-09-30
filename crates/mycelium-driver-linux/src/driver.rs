@@ -420,8 +420,32 @@ impl Device for LinuxDevice {
             }
         };
         match parse_tailscale_status(sections[6]) {
-            Ok(peers) => {
-                for peer in peers {
+            Ok(status) => {
+                if let Some(peer) = status.self_node {
+                    out.push(Observation::OverlaySelf {
+                        device: self.meta.id.to_string(),
+                        ips: peer.ips.clone(),
+                        hostname: peer.hostname.clone(),
+                        record: OverlayPeerRecord {
+                            network: "tailscale".into(),
+                            protocol: MeshProtocol::Tailscale,
+                            control_plane: control_plane.clone(),
+                            self_node: true,
+                            tailnet: status.tailnet.clone(),
+                            dns_name: peer.dns_name.clone(),
+                            backend_state: status.backend_state.clone(),
+                            observer: self.meta.id.to_string(),
+                            online: peer.online,
+                            active: peer.active,
+                            relay: None,
+                            endpoint: None,
+                            routed_lans: peer.routed_lans.iter().cloned().collect(),
+                            observed_at,
+                            origin: origin("tailscale-status"),
+                        },
+                    });
+                }
+                for peer in status.peers {
                     for ip in peer.ips {
                         out.push(Observation::OverlayPeer {
                             ip,
@@ -430,6 +454,10 @@ impl Device for LinuxDevice {
                                 network: "tailscale".into(),
                                 protocol: MeshProtocol::Tailscale,
                                 control_plane: control_plane.clone(),
+                                self_node: false,
+                                tailnet: status.tailnet.clone(),
+                                dns_name: peer.dns_name.clone(),
+                                backend_state: status.backend_state.clone(),
                                 observer: self.meta.id.to_string(),
                                 online: peer.online,
                                 active: peer.active,

@@ -40,6 +40,7 @@ pub struct Listener {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TailscalePeer {
     pub hostname: String,
+    pub dns_name: Option<String>,
     pub ips: Vec<IpAddr>,
     pub online: bool,
     pub active: bool,
@@ -48,16 +49,38 @@ pub struct TailscalePeer {
     pub routed_lans: Vec<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TailscaleObservation {
+    pub backend_state: Option<String>,
+    pub tailnet: Option<String>,
+    pub self_node: Option<TailscalePeer>,
+    pub peers: Vec<TailscalePeer>,
+}
+
 #[derive(Deserialize)]
 struct TailscaleStatus {
+    #[serde(rename = "BackendState")]
+    backend_state: Option<String>,
+    #[serde(rename = "CurrentTailnet")]
+    current_tailnet: Option<TailscaleTailnetWire>,
+    #[serde(rename = "Self")]
+    self_node: Option<TailscalePeerWire>,
     #[serde(rename = "Peer", default)]
     peer: BTreeMap<String, TailscalePeerWire>,
+}
+
+#[derive(Deserialize)]
+struct TailscaleTailnetWire {
+    #[serde(rename = "Name")]
+    name: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct TailscalePeerWire {
     #[serde(rename = "HostName", default)]
     host_name: String,
+    #[serde(rename = "DNSName")]
+    dns_name: Option<String>,
     #[serde(rename = "TailscaleIPs", default)]
     tailscale_ips: Vec<IpAddr>,
     #[serde(rename = "Online", default)]
@@ -69,9 +92,9 @@ struct TailscalePeerWire {
     #[serde(rename = "CurAddr")]
     cur_addr: Option<String>,
     #[serde(rename = "AllowedIPs", default)]
-    allowed_ips: Vec<String>,
+    allowed_ips: Option<Vec<String>>,
     #[serde(rename = "PrimaryRoutes", default)]
-    primary_routes: Vec<String>,
+    primary_routes: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -235,34 +258,44 @@ pub fn parse_listeners(text: &str) -> Vec<Listener> {
     listeners
 }
 
-pub fn parse_tailscale_status(text: &str) -> Result<Vec<TailscalePeer>, serde_json::Error> {
+pub fn parse_tailscale_status(text: &str) -> Result<TailscaleObservation, serde_json::Error> {
     if text.trim().is_empty() {
-        return Ok(Vec::new());
+        return Ok(TailscaleObservation {
+            backend_state: None,
+            tailnet: None,
+            self_node: None,
+            peers: Vec::new(),
+        });
     }
     let status: TailscaleStatus = serde_json::from_str(text)?;
-    Ok(status
-        .peer
-        .into_values()
-        .map(|peer| {
-            let mut routed_lans = peer.primary_routes;
-            routed_lans.extend(
-                peer.allowed_ips
-                    .into_iter()
-                    .filter(|prefix| !prefix.ends_with("/32") && !prefix.ends_with("/128")),
-            );
-            routed_lans.sort();
-            routed_lans.dedup();
-            TailscalePeer {
-                hostname: peer.host_name,
-                ips: peer.tailscale_ips,
-                online: peer.online,
-                active: peer.active,
-                relay: peer.relay.filter(|relay| !relay.is_empty()),
-                endpoint: peer.cur_addr.filter(|endpoint| !endpoint.is_empty()),
-                routed_lans,
-            }
-        })
-        .collect())
+    Ok(TailscaleObservation {
+        backend_state: status.backend_state.filter(|state| !state.is_empty()),
+        tailnet: status.current_tailnet.and_then(|tailnet| tailnet.name),
+        self_node: status.self_node.map(tailscale_peer),
+        peers: status.peer.into_values().map(tailscale_peer).collect(),
+    })
+}
+
+fn tailscale_peer(peer: TailscalePeerWire) -> TailscalePeer {
+    let mut routed_lans = peer.primary_routes.unwrap_or_default();
+    routed_lans.extend(
+        peer.allowed_ips
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|prefix| !prefix.ends_with("/32") && !prefix.ends_with("/128")),
+    );
+    routed_lans.sort();
+    routed_lans.dedup();
+    TailscalePeer {
+        hostname: peer.host_name,
+        dns_name: peer.dns_name.filter(|name| !name.is_empty()),
+        ips: peer.tailscale_ips,
+        online: peer.online,
+        active: peer.active,
+        relay: peer.relay.filter(|relay| !relay.is_empty()),
+        endpoint: peer.cur_addr.filter(|endpoint| !endpoint.is_empty()),
+        routed_lans,
+    }
 }
 
 pub fn parse_tailscale_control_plane(text: &str) -> Result<MeshControlPlane, serde_json::Error> {
@@ -341,7 +374,7 @@ mod tests {
 
     #[test]
     fn parses_tailscale_peers_and_subnet_routes() {
-        let peers = parse_tailscale_status(
+        let status = parse_tailscale_status(
             r#"{
               "Peer": {
                 "node-key": {
@@ -357,10 +390,35 @@ mod tests {
             }"#,
         )
         .unwrap();
+        let peers = status.peers;
         assert_eq!(peers[0].hostname, "agora-one");
         assert_eq!(peers[0].ips[0].to_string(), "100.80.85.86");
         assert_eq!(peers[0].routed_lans, vec!["192.168.40.0/24"]);
         assert!(peers[0].online);
+    }
+
+    #[test]
+    fn parses_self_attachment_with_nullable_primary_routes() {
+        let status = parse_tailscale_status(
+            r#"{
+              "BackendState": "Running",
+              "CurrentTailnet": {"Name": "fpl"},
+              "Self": {
+                "HostName": "pris",
+                "DNSName": "pris.example.ts.net.",
+                "TailscaleIPs": ["100.64.0.1", "fd7a:115c:a1e0::1"],
+                "Online": true,
+                "PrimaryRoutes": null
+              }
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(status.backend_state.as_deref(), Some("Running"));
+        assert_eq!(status.tailnet.as_deref(), Some("fpl"));
+        let node = status.self_node.unwrap();
+        assert_eq!(node.hostname, "pris");
+        assert_eq!(node.ips.len(), 2);
+        assert!(node.routed_lans.is_empty());
     }
 
     #[test]

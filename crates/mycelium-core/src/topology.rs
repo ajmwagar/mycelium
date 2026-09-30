@@ -224,6 +224,14 @@ pub struct OverlayPeerRecord {
     pub protocol: MeshProtocol,
     #[serde(default)]
     pub control_plane: MeshControlPlane,
+    #[serde(default)]
+    pub self_node: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tailnet: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dns_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend_state: Option<String>,
     pub observer: String,
     pub online: bool,
     pub active: bool,
@@ -263,6 +271,15 @@ pub enum Observation {
     },
     OverlayPeer {
         ip: IpAddr,
+        hostname: String,
+        record: OverlayPeerRecord,
+    },
+    /// This observer's own attachment to an overlay. Unlike a peer report,
+    /// identity is anchored to the known device rather than inferred from an
+    /// address or hostname.
+    OverlaySelf {
+        device: String,
+        ips: Vec<IpAddr>,
         hostname: String,
         record: OverlayPeerRecord,
     },
@@ -569,6 +586,29 @@ impl Topology {
                     .insert(format!("{}/{}", record.network, record.observer), record);
                 report.updated_nodes += 1;
             }
+            Observation::OverlaySelf {
+                device,
+                ips,
+                hostname,
+                record,
+            } => {
+                let origin = record.origin.clone();
+                let node = self.device_node(&device, None, &origin);
+                let origin_key = origin_key(&origin);
+                node.hostnames.insert(hostname.to_lowercase());
+                node.origins.insert(origin_key.clone());
+                for ip in ips {
+                    node.ips.entry(ip).or_insert_with(|| IpRecord {
+                        addr: ip,
+                        prefix: None,
+                        vlan: None,
+                        origins: BTreeSet::from_iter([origin_key.clone()]),
+                    });
+                }
+                node.overlays
+                    .insert(format!("{}/{}", record.network, record.observer), record);
+                report.updated_nodes += 1;
+            }
             Observation::DevicePort {
                 device,
                 port,
@@ -805,7 +845,9 @@ fn observation_origin(o: &Observation) -> Origin {
         | Observation::Segment { origin, .. }
         | Observation::Lease { origin, .. } => origin.clone(),
         Observation::Service { service, .. } => service.origin.clone(),
-        Observation::OverlayPeer { record, .. } => record.origin.clone(),
+        Observation::OverlayPeer { record, .. } | Observation::OverlaySelf { record, .. } => {
+            record.origin.clone()
+        }
     }
 }
 
@@ -1047,6 +1089,10 @@ mod tests {
                     coordinator: MeshCoordinator::TailscaleCloud,
                     url: Some("https://controlplane.tailscale.com".into()),
                 },
+                self_node: false,
+                tailnet: None,
+                dns_name: None,
+                backend_state: None,
                 observer: "linux-titan".into(),
                 online: true,
                 active: false,
@@ -1060,6 +1106,52 @@ mod tests {
         topology.observe_all([peer("100.80.85.86"), peer("fd7a:115c:a1e0::901:55d1")]);
         assert_eq!(topology.nodes.len(), 1);
         assert_eq!(topology.nodes.values().next().unwrap().ips.len(), 2);
+    }
+
+    #[test]
+    fn overlay_self_attaches_addresses_to_the_observing_device() {
+        let mut topology = Topology::empty();
+        topology.observe_all([Observation::DevicePort {
+            device: "linux-pris".into(),
+            port: "enp1s0".into(),
+            mac: None,
+            ips: vec![ip("192.168.1.9")],
+            state: LinkState::Up,
+            medium: Some(LinkMedium::Ethernet),
+            speed_mbps: Some(1_000),
+            duplex: Some(LinkDuplex::Full),
+            origin: Origin::new("linux-pris", "interfaces"),
+        }]);
+        topology.observe_all([Observation::OverlaySelf {
+            device: "linux-pris".into(),
+            ips: vec![ip("100.74.130.83"), ip("fd7a:115c:a1e0::f034:8254")],
+            hostname: "pris".into(),
+            record: OverlayPeerRecord {
+                network: "tailscale".into(),
+                protocol: MeshProtocol::Tailscale,
+                control_plane: MeshControlPlane {
+                    coordinator: MeshCoordinator::TailscaleCloud,
+                    url: Some("https://controlplane.tailscale.com".into()),
+                },
+                self_node: true,
+                tailnet: Some("fpl".into()),
+                dns_name: Some("pris.example.ts.net.".into()),
+                backend_state: Some("Running".into()),
+                observer: "linux-pris".into(),
+                online: true,
+                active: false,
+                relay: None,
+                endpoint: None,
+                routed_lans: BTreeSet::new(),
+                observed_at: 1,
+                origin: Origin::new("linux-pris", "tailscale-status"),
+            },
+        }]);
+
+        let node = &topology.nodes["linux-pris"];
+        assert_eq!(node.ips.len(), 3);
+        assert!(node.hostnames.contains("pris"));
+        assert!(node.overlays["tailscale/linux-pris"].self_node);
     }
 
     #[test]
