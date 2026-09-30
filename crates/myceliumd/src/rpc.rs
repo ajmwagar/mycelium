@@ -40,6 +40,7 @@ pub struct Daemon {
     discovery_scopes: Mutex<BTreeMap<String, DiscoveryScope>>,
     allocations: Mutex<BTreeMap<String, AllocationReceipt>>,
     networks: Mutex<BTreeMap<String, LogicalNetwork>>,
+    pub mesh: Arc<crate::peer::Mesh>,
 }
 
 /// SSH connector handed to Lua plugin drivers: vyos-family plugins reuse
@@ -140,6 +141,8 @@ impl Daemon {
             Err(error) => return Err(MyceliumError::Io(error)),
         };
 
+        let mesh = crate::peer::Mesh::boot()
+            .map_err(|error| MyceliumError::Validation(format!("peer mesh: {error}")))?;
         let me = Self {
             inventory: Inventory::new(),
             drivers,
@@ -148,6 +151,7 @@ impl Daemon {
             discovery_scopes: Mutex::new(discovery_scopes),
             allocations: Mutex::new(allocations),
             networks: Mutex::new(networks),
+            mesh,
         };
         // Reconnect saved devices; failures are recorded but keep the entry
         // (the appliance may simply be asleep).
@@ -703,6 +707,7 @@ impl Daemon {
                     .collect::<Vec<_>>();
                 to_value(reports).map_err(json_err)
             }
+            Request::PeerList => to_value(self.mesh.views().await).map_err(json_err),
             Request::TopologyAnnotate {
                 selector,
                 name,
@@ -1263,6 +1268,11 @@ pub async fn serve() -> std::io::Result<()> {
             .await
             .map_err(|e| std::io::Error::other(format!("boot failed: {e}")))?,
     );
+    daemon
+        .mesh
+        .start()
+        .await
+        .map_err(|error| std::io::Error::other(format!("peer mesh failed: {error}")))?;
     eprintln!(
         "myceliumd {} listening on {}",
         crate::VERSION,
@@ -1397,6 +1407,7 @@ mod tests {
             discovery_scopes: Mutex::new(BTreeMap::new()),
             allocations: Mutex::new(BTreeMap::new()),
             networks: Mutex::new(BTreeMap::new()),
+            mesh: crate::peer::Mesh::ephemeral_for_test(),
         }
     }
 

@@ -76,6 +76,7 @@ usage:
   mycelium networks list [--json]
   mycelium networks adopt NAME --site SITE --vlan ID --subnet CIDR --write [--dry-run]
   mycelium networks drift [NAME] [--json]
+  mycelium peers [--json]
   mycelium map [--json]
   mycelium annotate <node> [--name NAME] [--kind KIND] --write [--dry-run]
   mycelium boot-path <device> --target <IP-or-URL>... [--json]
@@ -338,6 +339,16 @@ async fn run(cmd: &str, args: &[String]) -> Result<Vec<String>, ClientError> {
         "discovery" => discovery(args).await,
         "allocations" => allocations(args).await,
         "networks" => networks(args).await,
+        "peers" => {
+            let flags = parse_flags(args);
+            let mut client = connect().await?;
+            let value = client.call(&Request::PeerList).await?;
+            if flags.json {
+                Ok(vec![value.to_string()])
+            } else {
+                Ok(render_peers(&value))
+            }
+        }
         "annotate" => {
             let f = parse_flags(args);
             let selector = f
@@ -402,6 +413,39 @@ async fn run(cmd: &str, args: &[String]) -> Result<Vec<String>, ClientError> {
             "unknown command `{other}` (see `mycelium`)"
         ))),
     }
+}
+
+fn render_peers(value: &serde_json::Value) -> Vec<String> {
+    let mut lines = vec!["peers:".into()];
+    for peer in value.as_array().into_iter().flatten() {
+        let hello = &peer["hello"];
+        let health = &peer["health"];
+        let hostname = hello["hostname"].as_str().unwrap_or("unknown");
+        let site = hello["site"].as_str().unwrap_or("unknown");
+        let platform = hello["platform"].as_str().unwrap_or("unknown");
+        let age = unix_now().saturating_sub(peer["last_seen"].as_u64().unwrap_or(0));
+        let load = health["load_average"]
+            .as_array()
+            .and_then(|values| values.first())
+            .and_then(|value| value.as_f64())
+            .map(|value| format!("{value:.2}"))
+            .unwrap_or_else(|| "-".into());
+        let ssh = health["ssh_listening"]
+            .as_bool()
+            .map(|up| if up { "up" } else { "down" })
+            .unwrap_or("-");
+        lines.push(format!(
+            "  {hostname} site={site} platform={platform} age={age}s load={load} ssh={ssh}"
+        ));
+    }
+    lines
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 async fn console(args: &[String]) -> Result<Vec<String>, ClientError> {

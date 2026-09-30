@@ -1,0 +1,11 @@
+[package]
+name = "mycelium-peer-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Transport-neutral signed gossip protocol shared by Mycelium peers"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+ed25519-dalek.workspace = true

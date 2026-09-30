@@ -3,3 +3,5 @@ Cargo.lock
 .env
 *.pid
 ~/.mycelium
+.mycelium/peer.key
+.mycelium/peer-observations.json

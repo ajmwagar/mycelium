@@ -21,6 +21,7 @@ mycelium-driver-darwin = { path = "crates/mycelium-driver-darwin" }
 mycelium-driver-snmp = { path = "crates/mycelium-driver-snmp" }
 mycelium-driver-unifi = { path = "crates/mycelium-driver-unifi" }
 mycelium-plugins-lua = { path = "crates/mycelium-plugins-lua" }
+mycelium-peer-protocol = { path = "crates/mycelium-peer-protocol" }
 myceliumd = { path = "crates/myceliumd" }
 async-trait = "0.1"
 bytes = "1"
@@ -31,6 +32,11 @@ memchr = "2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "io-util", "net", "time", "process"] }
+tokio-rustls = "0.26"
+rustls = "0.23"
+rustls-pemfile = "2"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
 
 [profile.release]
 lto = "thin"

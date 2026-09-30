@@ -79,6 +79,35 @@ Ubiquti APs.
 
 Pi-Hole?
 
+## Peer mesh
+
+Every `myceliumd` is a symmetric peer. It collects local Linux or Darwin
+health, signs observations with a persistent Ed25519 identity in
+`$MYCELIUM_HOME/peer.key`, and answers `mycelium peers` from its locally
+converged view. There is no required controller.
+
+Direct peer links are optional and mutually authenticated. Configure any node
+as a listener, a dialer, or both:
+
+```sh
+export MYCELIUM_PEER_LISTEN=0.0.0.0:7443       # optional
+export MYCELIUM_PEERS=pris.example:7443,neo.example:7443  # optional seeds
+export MYCELIUM_PEER_CA=/etc/mycelium/ca.pem
+export MYCELIUM_PEER_CERT=/etc/mycelium/node.pem
+export MYCELIUM_PEER_KEY=/etc/mycelium/node-key.pem
+# Optional comma-separated Ed25519 node IDs allowed as observation origins.
+export MYCELIUM_PEER_ALLOW=0123abcd...,4567efab...
+mycelium daemon start
+mycelium peers
+```
+
+The TLS CA authorizes direct peers. Signed observation envelopes preserve
+their originating node identity when relayed, use monotonic sequence numbers,
+and deterministically retain the newest event per origin. Back up `peer.key`:
+it is the node identity and is created with owner-only permissions. A future
+Unibus carrier can exchange the same envelopes without changing their trust or
+merge semantics.
+
 ## SSH observation points
 
 Ordinary Linux hosts can contribute their interfaces, connected routes, and

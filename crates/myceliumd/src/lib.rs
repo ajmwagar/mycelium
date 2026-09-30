@@ -17,6 +17,7 @@
 //! `devices.json` stores variable names, not values.
 
 pub mod client;
+pub mod peer;
 pub mod protocol;
 pub mod rpc;
 
@@ -62,6 +63,14 @@ pub fn allocations_path() -> PathBuf {
 
 pub fn networks_path() -> PathBuf {
     home_dir().join("networks.json")
+}
+
+pub fn peer_key_path() -> PathBuf {
+    home_dir().join("peer.key")
+}
+
+pub fn peer_observations_path() -> PathBuf {
+    home_dir().join("peer-observations.json")
 }
 
 pub fn plugins_dir() -> PathBuf {

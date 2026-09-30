@@ -84,6 +84,8 @@ pub enum Request {
         #[serde(default)]
         name: Option<String>,
     },
+    /// Return the locally converged view of signed peer observations.
+    PeerList,
     /// Set durable human knowledge on exactly one discovered node.
     TopologyAnnotate {
         selector: String,
