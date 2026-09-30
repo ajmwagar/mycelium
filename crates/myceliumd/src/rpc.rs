@@ -4,8 +4,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use mycelium_core::{
     AllocationReceipt, AllocationValue, CredentialSet, DeviceId, DeviceMeta, DiscoveryRequest,
-    DiscoveryScope, Driver, Inventory, MyceliumError, Result, Secret, Target, Topology, Transport,
-    Value,
+    DiscoveryScope, Driver, Inventory, LogicalNetwork, MyceliumError, NetworkDriftReport,
+    NetworkDriftState, Result, Secret, Target, Topology, Transport, Value,
 };
 use mycelium_driver_darwin::DarwinDriver;
 use mycelium_driver_edgeos::{EdgeOsDriver, SshSession};
@@ -39,6 +39,7 @@ pub struct Daemon {
     saved: Mutex<BTreeMap<DeviceId, SavedDevice>>,
     discovery_scopes: Mutex<BTreeMap<String, DiscoveryScope>>,
     allocations: Mutex<BTreeMap<String, AllocationReceipt>>,
+    networks: Mutex<BTreeMap<String, LogicalNetwork>>,
 }
 
 /// SSH connector handed to Lua plugin drivers: vyos-family plugins reuse
@@ -129,6 +130,15 @@ impl Daemon {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
             Err(error) => return Err(MyceliumError::Io(error)),
         };
+        let networks = match std::fs::read_to_string(crate::networks_path()) {
+            Ok(text) => serde_json::from_str::<Vec<LogicalNetwork>>(&text)
+                .map_err(|error| MyceliumError::Parse(format!("networks.json: {error}")))?
+                .into_iter()
+                .map(|network| (network.identity.clone(), network))
+                .collect(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
+            Err(error) => return Err(MyceliumError::Io(error)),
+        };
 
         let me = Self {
             inventory: Inventory::new(),
@@ -137,6 +147,7 @@ impl Daemon {
             saved: Mutex::new(saved_map),
             discovery_scopes: Mutex::new(discovery_scopes),
             allocations: Mutex::new(allocations),
+            networks: Mutex::new(networks),
         };
         // Reconnect saved devices; failures are recorded but keep the entry
         // (the appliance may simply be asleep).
@@ -209,6 +220,24 @@ impl Daemon {
         std::fs::write(
             &temporary,
             serde_json::to_string_pretty(&receipts).map_err(json_err)?,
+        )?;
+        std::fs::rename(temporary, path)?;
+        Ok(())
+    }
+
+    async fn persist_networks(&self) -> Result<()> {
+        let networks = self
+            .networks
+            .lock()
+            .await
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        let path = crate::networks_path();
+        let temporary = path.with_extension(format!("json.tmp-{}", std::process::id()));
+        std::fs::write(
+            &temporary,
+            serde_json::to_string_pretty(&networks).map_err(json_err)?,
         )?;
         std::fs::rename(temporary, path)?;
         Ok(())
@@ -558,6 +587,122 @@ impl Daemon {
                 }))
                 .map_err(json_err)
             }
+            Request::NetworkList => {
+                let networks = self
+                    .networks
+                    .lock()
+                    .await
+                    .values()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                to_value(networks).map_err(json_err)
+            }
+            Request::NetworkAdopt {
+                name,
+                site,
+                vlan,
+                subnet,
+                write,
+                dry_run,
+            } => {
+                validate_site_name(&site)?;
+                validate_network_name(&name)?;
+                let (network_address, prefix) = parse_cidr(&subnet)?;
+                let allocations = self.allocations.lock().await;
+                let vlan_receipt = allocations
+                    .values()
+                    .find(|receipt| {
+                        receipt.site == site
+                            && receipt.allocation
+                                == AllocationValue::Vlan {
+                                    id: mycelium_core::VlanId(vlan),
+                                }
+                    })
+                    .ok_or_else(|| {
+                        MyceliumError::Validation(format!(
+                            "no allocation receipt for site `{site}` VLAN {vlan}"
+                        ))
+                    })?;
+                let subnet_receipt = allocations
+                    .values()
+                    .find(|receipt| {
+                        receipt.site == site
+                            && matches!(
+                                receipt.allocation,
+                                AllocationValue::Subnet { network, prefix: observed, .. }
+                                    if network == network_address && observed == prefix
+                            )
+                    })
+                    .ok_or_else(|| {
+                        MyceliumError::Validation(format!(
+                            "no allocation receipt for site `{site}` subnet {network_address}/{prefix}"
+                        ))
+                    })?;
+                let receipt_ids = std::collections::BTreeSet::from([
+                    vlan_receipt.identity.clone(),
+                    subnet_receipt.identity.clone(),
+                ]);
+                drop(allocations);
+                let candidate = LogicalNetwork::adopted(&site, &name, receipt_ids.clone());
+                let networks = self.networks.lock().await;
+                if let Some(conflict) = networks.values().find(|network| {
+                    network.identity != candidate.identity
+                        && !network.receipt_ids.is_disjoint(&receipt_ids)
+                }) {
+                    return Err(MyceliumError::Validation(format!(
+                        "allocation receipt already owned by network `{}`",
+                        conflict.name
+                    )));
+                }
+                if let Some(existing) = networks.get(&candidate.identity) {
+                    if existing != &candidate {
+                        return Err(MyceliumError::Validation(format!(
+                            "network `{name}` already exists with different allocations"
+                        )));
+                    }
+                }
+                drop(networks);
+                if dry_run {
+                    return to_value(serde_json::json!({
+                        "dry_run": true,
+                        "network": candidate,
+                    }))
+                    .map_err(json_err);
+                }
+                if !write {
+                    return Err(MyceliumError::WritesNotPermitted(
+                        "network adoption requires --write".into(),
+                    ));
+                }
+                self.networks
+                    .lock()
+                    .await
+                    .insert(candidate.identity.clone(), candidate.clone());
+                self.persist_networks().await?;
+                to_value(candidate).map_err(json_err)
+            }
+            Request::NetworkDrift { name } => {
+                let networks = self.networks.lock().await;
+                let selected = networks
+                    .values()
+                    .filter(|network| name.as_ref().is_none_or(|name| &network.name == name))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if name.is_some() && selected.is_empty() {
+                    return Err(MyceliumError::Validation(format!(
+                        "unknown logical network `{}`",
+                        name.unwrap_or_default()
+                    )));
+                }
+                drop(networks);
+                let allocations = self.allocations.lock().await;
+                let topology = self.topology.lock().await;
+                let reports = selected
+                    .into_iter()
+                    .map(|network| network_drift_report(network, &allocations, &topology))
+                    .collect::<Vec<_>>();
+                to_value(reports).map_err(json_err)
+            }
             Request::TopologyAnnotate {
                 selector,
                 name,
@@ -811,6 +956,131 @@ fn validate_site_name(site: &str) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+fn validate_network_name(name: &str) -> Result<()> {
+    if name.is_empty()
+        || name.len() > 64
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    {
+        return Err(MyceliumError::Validation(
+            "network name must be 1-64 lowercase letters, digits, or hyphens".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn parse_cidr(value: &str) -> Result<(std::net::IpAddr, u8)> {
+    let (address, prefix) = value
+        .split_once('/')
+        .ok_or_else(|| MyceliumError::Validation("subnet must be CIDR notation".into()))?;
+    let address = address
+        .parse::<std::net::IpAddr>()
+        .map_err(|_| MyceliumError::Validation(format!("invalid subnet `{value}`")))?;
+    let prefix = prefix
+        .parse::<u8>()
+        .map_err(|_| MyceliumError::Validation(format!("invalid subnet `{value}`")))?;
+    let valid = match address {
+        std::net::IpAddr::V4(_) => prefix <= 32,
+        std::net::IpAddr::V6(_) => prefix <= 128,
+    };
+    if !valid {
+        return Err(MyceliumError::Validation(format!(
+            "invalid subnet `{value}`"
+        )));
+    }
+    Ok((address, prefix))
+}
+
+fn network_drift_report(
+    network: LogicalNetwork,
+    allocations: &BTreeMap<String, AllocationReceipt>,
+    topology: &Topology,
+) -> NetworkDriftReport {
+    let mut missing_receipts = std::collections::BTreeSet::new();
+    let mut missing_allocations = std::collections::BTreeSet::new();
+    let mut gateway_mismatches = std::collections::BTreeSet::new();
+    let mut known_members = std::collections::BTreeSet::new();
+    let mut evidence_sources = std::collections::BTreeSet::new();
+    for receipt_id in &network.receipt_ids {
+        let Some(receipt) = allocations.get(receipt_id) else {
+            missing_receipts.insert(receipt_id.clone());
+            continue;
+        };
+        evidence_sources.extend(receipt.basis.sources.iter().cloned());
+        match receipt.allocation {
+            AllocationValue::Vlan { id } => {
+                if !topology
+                    .segments
+                    .values()
+                    .any(|segment| segment.vlan == Some(id))
+                {
+                    missing_allocations.insert(receipt.allocation.canonical());
+                }
+            }
+            AllocationValue::Subnet {
+                network: subnet,
+                prefix,
+                gateway,
+            } => {
+                let observed = topology
+                    .segments
+                    .values()
+                    .find(|segment| segment.subnet == Some((subnet, prefix)));
+                match observed {
+                    None => {
+                        missing_allocations.insert(receipt.allocation.canonical());
+                    }
+                    Some(segment) => {
+                        evidence_sources.extend(segment.origins.iter().cloned());
+                        if gateway.is_some() && gateway != segment.gw {
+                            gateway_mismatches.insert(format!(
+                                "{} expected={} observed={}",
+                                receipt.allocation.canonical(),
+                                gateway.map(|value| value.to_string()).unwrap_or_default(),
+                                segment
+                                    .gw
+                                    .map(|value| value.to_string())
+                                    .unwrap_or_else(|| "none".into())
+                            ));
+                        }
+                    }
+                }
+                for node in topology.nodes.values().filter(|node| {
+                    node.ips
+                        .keys()
+                        .any(|address| mycelium_core::ipv4_in_cidr(*address, subnet, prefix))
+                }) {
+                    let label = node
+                        .annotation
+                        .name
+                        .clone()
+                        .or_else(|| node.hostnames.iter().next().cloned())
+                        .unwrap_or_else(|| node.id.clone());
+                    known_members.insert(label);
+                }
+            }
+        }
+    }
+    let state = if missing_receipts.is_empty()
+        && missing_allocations.is_empty()
+        && gateway_mismatches.is_empty()
+    {
+        NetworkDriftState::InSync
+    } else {
+        NetworkDriftState::Drifted
+    };
+    NetworkDriftReport {
+        network,
+        state,
+        missing_receipts,
+        missing_allocations,
+        gateway_mismatches,
+        known_members,
+        evidence_sources,
+    }
 }
 
 fn import_allocation_receipts(topology: &Topology, site: &str) -> Vec<AllocationReceipt> {
@@ -1126,6 +1396,7 @@ mod tests {
             saved: Mutex::new(BTreeMap::new()),
             discovery_scopes: Mutex::new(BTreeMap::new()),
             allocations: Mutex::new(BTreeMap::new()),
+            networks: Mutex::new(BTreeMap::new()),
         }
     }
 

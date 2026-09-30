@@ -56,6 +56,54 @@ pub struct AllocationReceipt {
     pub generation: u64,
 }
 
+/// Stable logical ownership of one or more allocation receipts. Placement and
+/// vendor configuration are intentionally absent and re-derived elsewhere.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogicalNetwork {
+    pub identity: String,
+    pub name: String,
+    pub site: String,
+    pub receipt_ids: BTreeSet<String>,
+    pub generation: u64,
+}
+
+impl LogicalNetwork {
+    pub fn adopted(
+        site: impl Into<String>,
+        name: impl Into<String>,
+        receipt_ids: BTreeSet<String>,
+    ) -> Self {
+        let site = site.into();
+        let name = name.into();
+        Self {
+            identity: stable_identity(&format!("network|{site}|{name}"))
+                .replacen("alloc-", "net-", 1),
+            name,
+            site,
+            receipt_ids,
+            generation: 1,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkDriftState {
+    InSync,
+    Drifted,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetworkDriftReport {
+    pub network: LogicalNetwork,
+    pub state: NetworkDriftState,
+    pub missing_receipts: BTreeSet<String>,
+    pub missing_allocations: BTreeSet<String>,
+    pub gateway_mismatches: BTreeSet<String>,
+    pub known_members: BTreeSet<String>,
+    pub evidence_sources: BTreeSet<String>,
+}
+
 impl AllocationReceipt {
     pub fn imported(
         site: impl Into<String>,
@@ -103,5 +151,20 @@ mod tests {
         assert_eq!(first.identity, second.identity);
         assert_ne!(first.identity, elsewhere.identity);
         assert_eq!(first.generation, 1);
+    }
+
+    #[test]
+    fn adopted_network_identity_survives_receipt_order() {
+        let first = LogicalNetwork::adopted(
+            "home",
+            "cctv",
+            BTreeSet::from(["alloc-b".into(), "alloc-a".into()]),
+        );
+        let second = LogicalNetwork::adopted(
+            "home",
+            "cctv",
+            BTreeSet::from(["alloc-a".into(), "alloc-b".into()]),
+        );
+        assert_eq!(first.identity, second.identity);
     }
 }

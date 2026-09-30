@@ -6,8 +6,8 @@
 //! applying it.
 
 use mycelium_core::{
-    ActionPlan, ActionRisk, AllocationReceipt, BootReachability, DiscoveryProtocol, NbdePlan,
-    Topology, ID_SWITCH_OBSERVE,
+    ActionPlan, ActionRisk, AllocationReceipt, BootReachability, DiscoveryProtocol, LogicalNetwork,
+    NbdePlan, NetworkDriftReport, Topology, ID_SWITCH_OBSERVE,
 };
 use mycelium_driver_netgear_fastpath::{FastpathConfig, FastpathIntent, SnmpSwitchState};
 use myceliumd::client::{Client, ClientError};
@@ -73,6 +73,9 @@ usage:
   mycelium discovery scope remove <observer> --write [--dry-run]
   mycelium allocations list [--json]
   mycelium allocations import --site SITE --write [--dry-run] [--json]
+  mycelium networks list [--json]
+  mycelium networks adopt NAME --site SITE --vlan ID --subnet CIDR --write [--dry-run]
+  mycelium networks drift [NAME] [--json]
   mycelium map [--json]
   mycelium annotate <node> [--name NAME] [--kind KIND] --write [--dry-run]
   mycelium boot-path <device> --target <IP-or-URL>... [--json]
@@ -107,6 +110,8 @@ struct Flags {
     protocols: Vec<String>,
     segments: Vec<String>,
     site: Option<String>,
+    vlan: Option<u16>,
+    subnet: Option<String>,
     rest: Vec<String>,
 }
 
@@ -131,6 +136,8 @@ fn parse_flags(args: &[String]) -> Flags {
         protocols: Vec::new(),
         segments: Vec::new(),
         site: None,
+        vlan: None,
+        subnet: None,
         rest: Vec::new(),
     };
     let mut i = 0;
@@ -216,6 +223,14 @@ fn parse_flags(args: &[String]) -> Flags {
             "--site" => {
                 i += 1;
                 f.site = args.get(i).cloned();
+            }
+            "--vlan" => {
+                i += 1;
+                f.vlan = args.get(i).and_then(|value| value.parse().ok());
+            }
+            "--subnet" => {
+                i += 1;
+                f.subnet = args.get(i).cloned();
             }
             other => f.rest.push(other.to_owned()),
         }
@@ -322,6 +337,7 @@ async fn run(cmd: &str, args: &[String]) -> Result<Vec<String>, ClientError> {
         }
         "discovery" => discovery(args).await,
         "allocations" => allocations(args).await,
+        "networks" => networks(args).await,
         "annotate" => {
             let f = parse_flags(args);
             let selector = f
@@ -639,6 +655,93 @@ async fn allocations(args: &[String]) -> Result<Vec<String>, ClientError> {
             }
         }
         _ => Err(err_usage("usage: mycelium allocations list|import ...")),
+    }
+}
+
+async fn networks(args: &[String]) -> Result<Vec<String>, ClientError> {
+    let flags = parse_flags(&args[1..]);
+    match args.first().map(String::as_str) {
+        Some("list") => {
+            let mut client = connect().await?;
+            let value = client.call(&Request::NetworkList).await?;
+            if flags.json {
+                return Ok(vec![value.to_string()]);
+            }
+            let networks: Vec<LogicalNetwork> = serde_json::from_value(value)
+                .map_err(|error| err_usage(&format!("bad logical networks: {error}")))?;
+            let mut output = vec![format!("networks: {}", networks.len())];
+            for network in networks {
+                output.push(format!(
+                    "  {} {} site={} receipts={} generation={}",
+                    network.identity,
+                    network.name,
+                    network.site,
+                    network.receipt_ids.len(),
+                    network.generation
+                ));
+            }
+            Ok(output)
+        }
+        Some("adopt") => {
+            let name = flags
+                .rest
+                .first()
+                .ok_or(err_usage("networks adopt needs NAME"))?;
+            let site = flags.site.ok_or(err_usage("networks adopt needs --site"))?;
+            let vlan = flags.vlan.ok_or(err_usage("networks adopt needs --vlan"))?;
+            let subnet = flags
+                .subnet
+                .ok_or(err_usage("networks adopt needs --subnet"))?;
+            let mut client = connect().await?;
+            let value = client
+                .call(&Request::NetworkAdopt {
+                    name: name.clone(),
+                    site,
+                    vlan,
+                    subnet,
+                    write: flags.write,
+                    dry_run: flags.dry_run,
+                })
+                .await?;
+            Ok(vec![value.to_string()])
+        }
+        Some("drift") => {
+            let name = flags.rest.first().cloned();
+            let mut client = connect().await?;
+            let value = client.call(&Request::NetworkDrift { name }).await?;
+            if flags.json {
+                return Ok(vec![value.to_string()]);
+            }
+            let reports: Vec<NetworkDriftReport> = serde_json::from_value(value)
+                .map_err(|error| err_usage(&format!("bad network drift report: {error}")))?;
+            let mut output = Vec::new();
+            for report in reports {
+                output.push(format!(
+                    "{}: {:?} members={}",
+                    report.network.name,
+                    report.state,
+                    report.known_members.len()
+                ));
+                if !report.known_members.is_empty() {
+                    output.push(format!(
+                        "  members: {}",
+                        report
+                            .known_members
+                            .into_iter()
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
+                }
+                for missing in report.missing_allocations {
+                    output.push(format!("  missing allocation: {missing}"));
+                }
+                for mismatch in report.gateway_mismatches {
+                    output.push(format!("  gateway mismatch: {mismatch}"));
+                }
+            }
+            Ok(output)
+        }
+        _ => Err(err_usage("usage: mycelium networks list|adopt|drift ...")),
     }
 }
 

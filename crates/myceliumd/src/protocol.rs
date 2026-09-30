@@ -69,6 +69,21 @@ pub enum Request {
         #[serde(default)]
         dry_run: bool,
     },
+    NetworkList,
+    NetworkAdopt {
+        name: String,
+        site: String,
+        vlan: u16,
+        subnet: String,
+        #[serde(default)]
+        write: bool,
+        #[serde(default)]
+        dry_run: bool,
+    },
+    NetworkDrift {
+        #[serde(default)]
+        name: Option<String>,
+    },
     /// Set durable human knowledge on exactly one discovered node.
     TopologyAnnotate {
         selector: String,
