@@ -16,11 +16,14 @@ use crate::FastpathIntent;
 pub const SNMP_SWITCH_STATE_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SnmpCoverage {
     pub vlan_inventory: bool,
     pub vlan_names: bool,
     pub interface_pvids: bool,
     pub interface_membership: bool,
+    pub management_vlan: bool,
+    pub lag_membership: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -33,6 +36,10 @@ pub struct SnmpVlanState {
 pub struct SnmpInterfaceState {
     pub name: String,
     pub pvid: Option<u16>,
+    #[serde(default)]
+    pub included_vlans: std::collections::BTreeSet<u16>,
+    #[serde(default)]
+    pub tagged_vlans: std::collections::BTreeSet<u16>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -136,9 +143,45 @@ impl SnmpSwitchState {
                     ));
                 }
             }
-            if !self.coverage.interface_membership
-                && (!desired_interface.included_vlans.is_empty()
-                    || !desired_interface.tagged_vlans.is_empty())
+            if self.coverage.interface_membership {
+                if let Some(observed) = self.interfaces.get(name) {
+                    for vlan in desired_interface
+                        .included_vlans
+                        .difference(&observed.included_vlans)
+                    {
+                        let tagged = desired_interface.tagged_vlans.contains(vlan);
+                        let duplicates_pvid_action = !tagged
+                            && desired_interface.pvid == Some(*vlan)
+                            && observed.pvid != Some(*vlan);
+                        if !duplicates_pvid_action {
+                            plan.actions.push(action(
+                                device,
+                                ID_VLAN_ASSIGN,
+                                Params::from_iter([
+                                    ("port".into(), Value::Str(name.clone())),
+                                    ("vlan".into(), Value::Int(*vlan as i64)),
+                                    ("tagged".into(), Value::Bool(tagged)),
+                                ]),
+                                None,
+                                interface_membership_value(name, *vlan, tagged),
+                            ));
+                        }
+                    }
+                    let extras = observed
+                        .included_vlans
+                        .difference(&desired_interface.included_vlans)
+                        .copied()
+                        .collect::<Vec<_>>();
+                    if !extras.is_empty() {
+                        plan.blockers.push(blocker(
+                            "interface_membership_removal_unsupported",
+                            format!("removing VLAN memberships {extras:?} is not yet modeled"),
+                            Some(name.clone()),
+                        ));
+                    }
+                }
+            } else if !desired_interface.included_vlans.is_empty()
+                || !desired_interface.tagged_vlans.is_empty()
             {
                 plan.blockers.push(blocker(
                     "interface_membership_unobserved",
@@ -146,6 +189,14 @@ impl SnmpSwitchState {
                     Some(name.clone()),
                 ));
             }
+        }
+
+        if desired.management_vlan.is_some() && !self.coverage.management_vlan {
+            plan.blockers.push(blocker(
+                "management_vlan_unobserved",
+                "the standard Q-BRIDGE snapshot cannot prove the management VLAN".into(),
+                None,
+            ));
         }
 
         if !desired.lags.is_empty()
@@ -204,6 +255,14 @@ fn vlan_value(vlan: &SnmpVlanState) -> Value {
     ]))
 }
 
+fn interface_membership_value(name: &str, vlan: u16, tagged: bool) -> Value {
+    Value::Map(Params::from_iter([
+        ("name".into(), Value::Str(name.into())),
+        ("vlan".into(), Value::Int(vlan as i64)),
+        ("tagged".into(), Value::Bool(tagged)),
+    ]))
+}
+
 fn blocker(code: &str, message: String, resource: Option<String>) -> PlanBlocker {
     PlanBlocker {
         code: code.into(),
@@ -243,6 +302,8 @@ mod tests {
                 vlan_names: true,
                 interface_pvids: true,
                 interface_membership: false,
+                management_vlan: false,
+                lag_membership: false,
             },
             vlans: BTreeMap::new(),
             interfaces: BTreeMap::new(),
