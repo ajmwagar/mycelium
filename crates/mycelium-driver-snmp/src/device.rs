@@ -32,6 +32,8 @@ const FDB_PORT: &str = "1.3.6.1.2.1.17.4.3.1.2";
 const Q_FDB_PORT: &str = "1.3.6.1.2.1.17.7.1.2.2.1.2";
 // Q-BRIDGE-MIB: VLAN names and per-bridge-port default VLAN IDs.
 const Q_VLAN_STATIC_NAME: &str = "1.3.6.1.2.1.17.7.1.4.3.1.1";
+const Q_VLAN_STATIC_EGRESS: &str = "1.3.6.1.2.1.17.7.1.4.3.1.2";
+const Q_VLAN_STATIC_UNTAGGED: &str = "1.3.6.1.2.1.17.7.1.4.3.1.4";
 const Q_PVID: &str = "1.3.6.1.2.1.17.7.1.4.5.1.1";
 
 pub const ID_SNMP_GET: &str = "snmp.get";
@@ -236,17 +238,23 @@ impl SnmpDevice {
     }
 
     async fn switch_state(&self) -> Result<Value> {
-        let info = Self::probe(&self.handle).await?;
-        let vlan_rows = self.handle.walk(Q_VLAN_STATIC_NAME, 4096).await?;
-        let pvid_rows = self.handle.walk(Q_PVID, 4096).await?;
-        let bridge_rows = self.handle.walk(BRIDGE_PORT_IFINDEX, 4096).await?;
-        let ifaces = self.iface_rows().await?;
+        let (info, vlan_rows, pvid_rows, bridge_rows, egress_rows, untagged_rows, ifaces) = tokio::try_join!(
+            Self::probe(&self.handle),
+            self.handle.walk(Q_VLAN_STATIC_NAME, 4096),
+            self.handle.walk(Q_PVID, 4096),
+            self.handle.walk(BRIDGE_PORT_IFINDEX, 4096),
+            self.handle.walk(Q_VLAN_STATIC_EGRESS, 4096),
+            self.handle.walk(Q_VLAN_STATIC_UNTAGGED, 4096),
+            self.iface_rows(),
+        )?;
         Ok(switch_state_value(
             self.meta.model.clone(),
             &info,
             vlan_rows,
             pvid_rows,
             bridge_rows,
+            egress_rows,
+            untagged_rows,
             &ifaces,
         ))
     }
@@ -327,6 +335,8 @@ fn switch_state_value(
     vlan_rows: Vec<(String, Value)>,
     pvid_rows: Vec<(String, Value)>,
     bridge_rows: Vec<(String, Value)>,
+    egress_rows: Vec<(String, Value)>,
+    untagged_rows: Vec<(String, Value)>,
     ifaces: &BTreeMap<u32, (String, Option<String>, Option<u32>)>,
 ) -> Value {
     let vlan_inventory_covered = !vlan_rows.is_empty();
@@ -355,12 +365,12 @@ fn switch_state_value(
         .into_iter()
         .filter_map(|(oid, value)| Some((row_index(&oid), value.as_i64()? as u32)))
         .collect::<HashMap<_, _>>();
-    let interfaces = pvid_rows
+    let mut interfaces = pvid_rows
         .into_iter()
         .filter_map(|(oid, value)| {
             let bridge_port = row_index(&oid);
             let ifindex = bridge_to_ifindex.get(&bridge_port)?;
-            let name = ifaces.get(ifindex)?.0.clone();
+            let name = fastpath_interface_name(&ifaces.get(ifindex)?.0);
             let pvid = value.as_i64()?;
             Some((
                 name.clone(),
@@ -372,6 +382,38 @@ fn switch_state_value(
         })
         .collect::<Params>();
     let interface_pvids_covered = pvid_row_count > 0 && interfaces.len() == pvid_row_count;
+    let egress = vlan_port_sets(egress_rows);
+    let untagged = vlan_port_sets(untagged_rows);
+    let membership_covered = matches!((&egress, &untagged), (Some(egress), Some(untagged))
+        if !egress.is_empty()
+            && egress.keys().eq(untagged.keys())
+            && egress.keys().all(|id| vlans.contains_key(&id.to_string())));
+    if membership_covered {
+        let egress = egress
+            .as_ref()
+            .expect("coverage proves decoded egress rows");
+        let untagged = untagged
+            .as_ref()
+            .expect("coverage proves decoded untagged rows");
+        for (vlan, ports) in egress {
+            let untagged_ports = &untagged[vlan];
+            for bridge_port in ports {
+                let Some(ifindex) = bridge_to_ifindex.get(bridge_port) else {
+                    continue;
+                };
+                let Some(name) = ifaces.get(ifindex).map(|row| row.0.as_str()) else {
+                    continue;
+                };
+                let Some(Value::Map(interface)) = interfaces.get_mut(name) else {
+                    continue;
+                };
+                push_int(interface, "included_vlans", *vlan as i64);
+                if !untagged_ports.contains(bridge_port) {
+                    push_int(interface, "tagged_vlans", *vlan as i64);
+                }
+            }
+        }
+    }
 
     Value::Map(Params::from_iter([
         ("schema_version".into(), Value::Int(1)),
@@ -392,12 +434,92 @@ fn switch_state_value(
                     "interface_pvids".into(),
                     Value::Bool(interface_pvids_covered),
                 ),
-                ("interface_membership".into(), Value::Bool(false)),
+                (
+                    "interface_membership".into(),
+                    Value::Bool(membership_covered),
+                ),
+                ("management_vlan".into(), Value::Bool(false)),
+                ("lag_membership".into(), Value::Bool(false)),
             ])),
         ),
         ("vlans".into(), Value::Map(vlans)),
         ("interfaces".into(), Value::Map(interfaces)),
     ]))
+}
+
+fn vlan_port_sets(rows: Vec<(String, Value)>) -> Option<BTreeMap<u16, Vec<u32>>> {
+    let count = rows.len();
+    let decoded = rows
+        .into_iter()
+        .filter_map(|(oid, value)| {
+            let vlan = u16::try_from(row_index(&oid)).ok()?;
+            Some((vlan, port_bitmap(value.as_str()?)?))
+        })
+        .collect::<BTreeMap<_, _>>();
+    (count > 0 && decoded.len() == count).then_some(decoded)
+}
+
+fn port_bitmap(value: &str) -> Option<Vec<u32>> {
+    let bytes = if let Some(hex) = value.strip_prefix("0x") {
+        if hex.len() % 2 != 0 {
+            return None;
+        }
+        (0..hex.len())
+            .step_by(2)
+            .map(|offset| u8::from_str_radix(&hex[offset..offset + 2], 16).ok())
+            .collect::<Option<Vec<_>>>()?
+    } else if value.len() == 17 && value.as_bytes().get(2) == Some(&b':') {
+        value
+            .split(':')
+            .map(|octet| u8::from_str_radix(octet, 16).ok())
+            .collect::<Option<Vec<_>>>()?
+    } else {
+        value.as_bytes().to_vec()
+    };
+    Some(
+        bytes
+            .into_iter()
+            .enumerate()
+            .flat_map(|(byte_index, byte)| {
+                (0..8).filter_map(move |bit| {
+                    (byte & (0x80 >> bit) != 0).then_some((byte_index * 8 + bit + 1) as u32)
+                })
+            })
+            .collect(),
+    )
+}
+
+fn push_int(map: &mut Params, key: &str, value: i64) {
+    match map
+        .entry(key.into())
+        .or_insert_with(|| Value::List(Vec::new()))
+    {
+        Value::List(values) => values.push(Value::Int(value)),
+        _ => unreachable!("switch observation owns this field"),
+    }
+}
+
+fn fastpath_interface_name(description: &str) -> String {
+    let trimmed = description.trim();
+    if let Some(id) = trimmed.strip_prefix("Link Aggregate ") {
+        return format!("lag {}", id.trim());
+    }
+    if let Some(rest) = trimmed.strip_prefix("unit ") {
+        if let Some((unit, port_description)) = rest.split_once(" port ") {
+            if let Some(port) = port_description
+                .split_whitespace()
+                .next()
+                .and_then(|value| value.parse::<u16>().ok())
+            {
+                return if port <= 48 {
+                    format!("{unit}/g{port}")
+                } else {
+                    format!("{unit}/xg{}", port - 48)
+                };
+            }
+        }
+    }
+    trimmed.to_owned()
 }
 
 pub fn classify(info: &SnmpInfo, host: &str) -> (DeviceKind, String, Option<String>) {
@@ -811,6 +933,14 @@ mod tests {
             )],
             vec![(format!("{Q_PVID}.3"), Value::Int(20))],
             vec![(format!("{BRIDGE_PORT_IFINDEX}.3"), Value::Int(7))],
+            vec![(
+                format!("{Q_VLAN_STATIC_EGRESS}.20"),
+                Value::Str("0x20".into()),
+            )],
+            vec![(
+                format!("{Q_VLAN_STATIC_UNTAGGED}.20"),
+                Value::Str("0x20".into()),
+            )],
             &ifaces,
         );
 
@@ -828,5 +958,31 @@ mod tests {
                 .and_then(|interface| interface.get("pvid")),
             Some(&Value::Int(20))
         );
+        assert_eq!(
+            value
+                .get("interfaces")
+                .and_then(|interfaces| interfaces.get("1/g7"))
+                .and_then(|interface| interface.get("included_vlans")),
+            Some(&Value::List(vec![Value::Int(20)]))
+        );
+    }
+
+    #[test]
+    fn q_bridge_port_bitmaps_are_most_significant_bit_first() {
+        assert_eq!(port_bitmap("0x8101"), Some(vec![1, 8, 16]));
+        assert_eq!(port_bitmap("80:00:00:00:00:01"), Some(vec![1, 48]));
+    }
+
+    #[test]
+    fn netgear_if_mib_descriptions_match_fastpath_interface_names() {
+        assert_eq!(
+            fastpath_interface_name("unit 1 port 7 Gigabit - Level"),
+            "1/g7"
+        );
+        assert_eq!(
+            fastpath_interface_name("unit 1 port 49 Gigabit - Level"),
+            "1/xg1"
+        );
+        assert_eq!(fastpath_interface_name(" Link Aggregate 3"), "lag 3");
     }
 }
