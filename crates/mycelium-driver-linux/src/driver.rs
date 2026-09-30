@@ -16,11 +16,11 @@ use crate::parsers::{
     parse_interfaces, parse_link_properties, parse_listeners, parse_neighbors, parse_routes,
 };
 use mycelium_dnssd::parse_avahi;
-use mycelium_ssdp::parse_responses as parse_ssdp_responses;
+use mycelium_ssdp::parse_probes as parse_ssdp_probes;
 use mycelium_tailscale::{parse_control_plane, parse_status, topology_observations};
 
 pub const DRIVER_NAME: &str = "linux";
-const OBSERVE_COMMAND: &str = "printf '__MYCELIUM_LINKS__\\n'; ip -o link show; printf '__MYCELIUM_LINK_META__\\n'; for p in /sys/class/net/*; do n=${p##*/}; if [ \"$n\" = lo ]; then m=loopback; elif [ -d \"$p/wireless\" ]; then m=wifi; elif [ -e \"$p/device\" ]; then m=ethernet; else m=virtual; fi; printf '%s\\t%s\\t%s\\t%s\\n' \"$n\" \"$m\" \"$(cat \"$p/speed\" 2>/dev/null || true)\" \"$(cat \"$p/duplex\" 2>/dev/null || true)\"; done; printf '__MYCELIUM_ADDRS__\\n'; ip -o -4 addr show scope global; printf '__MYCELIUM_NEIGH__\\n'; ip neigh show; printf '__MYCELIUM_ROUTES__\\n'; ip -4 route show proto kernel scope link; printf '__MYCELIUM_SERVICES__\\n'; ss -H -lntup; printf '__MYCELIUM_TAILSCALE__\\n'; tailscale status --json 2>/dev/null || true; printf '\\n__MYCELIUM_TAILSCALE_PREFS__\\n'; tailscale debug prefs 2>/dev/null || true; printf '\\n__MYCELIUM_MDNS__\\n'; command -v avahi-browse >/dev/null 2>&1 && avahi-browse --all --resolve --parsable --terminate 2>/dev/null || true; printf '\\n__MYCELIUM_SSDP__\\n'; command -v nc >/dev/null 2>&1 && printf 'M-SEARCH * HTTP/1.1\\r\\nHOST: 239.255.255.250:1900\\r\\nMAN: \"ssdp:discover\"\\r\\nMX: 2\\r\\nST: ssdp:all\\r\\n\\r\\n' | nc -4 -u -w 3 239.255.255.250 1900 2>/dev/null || true";
+const OBSERVE_COMMAND: &str = "printf '__MYCELIUM_LINKS__\\n'; ip -o link show; printf '__MYCELIUM_LINK_META__\\n'; for p in /sys/class/net/*; do n=${p##*/}; if [ \"$n\" = lo ]; then m=loopback; elif [ -d \"$p/wireless\" ]; then m=wifi; elif [ -e \"$p/device\" ]; then m=ethernet; else m=virtual; fi; printf '%s\\t%s\\t%s\\t%s\\n' \"$n\" \"$m\" \"$(cat \"$p/speed\" 2>/dev/null || true)\" \"$(cat \"$p/duplex\" 2>/dev/null || true)\"; done; printf '__MYCELIUM_ADDRS__\\n'; ip -o -4 addr show scope global; printf '__MYCELIUM_NEIGH__\\n'; ip neigh show; printf '__MYCELIUM_ROUTES__\\n'; ip -4 route show proto kernel scope link; printf '__MYCELIUM_SERVICES__\\n'; ss -H -lntup; printf '__MYCELIUM_TAILSCALE__\\n'; tailscale status --json 2>/dev/null || true; printf '\\n__MYCELIUM_TAILSCALE_PREFS__\\n'; tailscale debug prefs 2>/dev/null || true; printf '\\n__MYCELIUM_MDNS__\\n'; command -v avahi-browse >/dev/null 2>&1 && avahi-browse --all --resolve --parsable --terminate 2>/dev/null || true; printf '\\n__MYCELIUM_SSDP__\\n'; if command -v nc >/dev/null 2>&1; then ip -o -4 route show proto kernel scope link | awk '{ dev=\"\"; src=\"\"; for (i=1; i<=NF; i++) { if ($i == \"dev\") dev=$(i+1); if ($i == \"src\") src=$(i+1) } if (dev != \"\" && src != \"\") print dev, src }' | sort -u | while read -r iface addr; do case \"$iface\" in lo|docker*|br-*|veth*|tailscale*|sh-*|sv*) continue ;; esac; printf '__MYCELIUM_SSDP_PROBE__\\t%s\\t%s\\n' \"$iface\" \"$addr\"; printf 'M-SEARCH * HTTP/1.1\\r\\nHOST: 239.255.255.250:1900\\r\\nMAN: \"ssdp:discover\"\\r\\nMX: 2\\r\\nST: ssdp:all\\r\\n\\r\\n' | nc -4 -u -s \"$addr\" -w 3 239.255.255.250 1900 2>/dev/null || true; done; fi";
 
 pub struct LinuxDriver {
     timeout: Duration,
@@ -441,7 +441,7 @@ impl Device for LinuxDevice {
                 }),
         );
         out.extend(
-            parse_ssdp_responses(sections[9], observed_at)
+            parse_ssdp_probes(sections[9], observed_at)
                 .into_iter()
                 .map(|advertisement| Observation::ServiceAdvertisement {
                     advertisement,

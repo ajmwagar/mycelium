@@ -12,6 +12,34 @@ pub fn parse_responses(input: &str, observed_at: u64) -> Vec<ServiceAdvertisemen
         .collect()
 }
 
+/// Parse responses grouped by an observer-emitted interface marker. This
+/// preserves the LAN vantage point without coupling the protocol parser to a
+/// particular operating system's interface inventory format.
+pub fn parse_probes(input: &str, observed_at: u64) -> Vec<ServiceAdvertisement> {
+    const MARKER: &str = "__MYCELIUM_SSDP_PROBE__\t";
+    if !input.contains(MARKER) {
+        return parse_responses(input, observed_at);
+    }
+    input
+        .split(MARKER)
+        .skip(1)
+        .flat_map(|probe| {
+            let (header, responses) = probe.split_once('\n').unwrap_or((probe, ""));
+            let mut fields = header.split('\t');
+            let interface = fields
+                .next()
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned);
+            parse_responses(responses, observed_at)
+                .into_iter()
+                .map(move |mut advertisement| {
+                    advertisement.interface = interface.clone();
+                    advertisement
+                })
+        })
+        .collect()
+}
+
 fn split_responses(input: &str) -> impl Iterator<Item = &str> {
     input
         .split("HTTP/1.1")
@@ -118,5 +146,12 @@ mod tests {
         let record = parse_responses(input, 42).pop().unwrap();
         assert!(record.addresses.contains(&"fe80::1".parse().unwrap()));
         assert_eq!(record.port, Some(8080));
+    }
+
+    #[test]
+    fn probe_markers_preserve_interface_provenance() {
+        let input = "__MYCELIUM_SSDP_PROBE__\ten1\t192.168.10.84\nHTTP/1.1 200 OK\r\nLOCATION: http://192.168.10.97:8008/root.xml\r\nST: upnp:rootdevice\r\nUSN: uuid:fire-tv\r\n\r\n";
+        let record = parse_probes(input, 42).pop().unwrap();
+        assert_eq!(record.interface.as_deref(), Some("en1"));
     }
 }
