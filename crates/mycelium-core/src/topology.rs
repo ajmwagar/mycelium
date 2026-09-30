@@ -593,6 +593,23 @@ impl Topology {
                 record,
             } => {
                 let origin = record.origin.clone();
+                let aliases = self
+                    .nodes
+                    .iter()
+                    .filter(|(id, node)| {
+                        id.as_str() != device
+                            && !node.device
+                            && node.mac.is_none()
+                            && ips.iter().any(|ip| node.ips.contains_key(ip))
+                    })
+                    .map(|(id, _)| id.clone())
+                    .collect::<Vec<_>>();
+                for alias in aliases {
+                    if let Some(source) = self.nodes.remove(&alias) {
+                        let target = self.device_node(&device, None, &origin);
+                        merge_node(target, source);
+                    }
+                }
                 let node = self.device_node(&device, None, &origin);
                 let origin_key = origin_key(&origin);
                 node.hostnames.insert(hostname.to_lowercase());
@@ -863,6 +880,40 @@ fn merge_state(cur: LinkState, new: LinkState) -> LinkState {
     }
 }
 
+fn merge_node(target: &mut TopoNode, source: TopoNode) {
+    if target.mac.is_none() {
+        target.mac = source.mac;
+    }
+    target.hostnames.extend(source.hostnames);
+    target.origins.extend(source.origins);
+    target.sites.extend(source.sites);
+    for (ip, record) in source.ips {
+        match target.ips.entry(ip) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(record);
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                entry.get_mut().origins.extend(record.origins);
+            }
+        }
+    }
+    for (key, link) in source.ports {
+        target.ports.entry(key).or_insert(link);
+    }
+    for (key, service) in source.services {
+        target.services.entry(key).or_insert(service);
+    }
+    for (key, overlay) in source.overlays {
+        target.overlays.entry(key).or_insert(overlay);
+    }
+    if target.annotation.name.is_none() {
+        target.annotation.name = source.annotation.name;
+    }
+    if target.annotation.kind.is_none() {
+        target.annotation.kind = source.annotation.kind;
+    }
+}
+
 fn scoped_id(site: Option<&str>, id: &str) -> String {
     match site {
         Some(site) => format!("{site}/{id}"),
@@ -1122,6 +1173,31 @@ mod tests {
             duplex: Some(LinkDuplex::Full),
             origin: Origin::new("linux-pris", "interfaces"),
         }]);
+        topology.observe_all([Observation::OverlayPeer {
+            ip: ip("100.74.130.83"),
+            hostname: "pris".into(),
+            record: OverlayPeerRecord {
+                network: "tailscale".into(),
+                protocol: MeshProtocol::Tailscale,
+                control_plane: MeshControlPlane {
+                    coordinator: MeshCoordinator::TailscaleCloud,
+                    url: Some("https://controlplane.tailscale.com".into()),
+                },
+                self_node: false,
+                tailnet: Some("fpl".into()),
+                dns_name: Some("pris.example.ts.net.".into()),
+                backend_state: Some("Running".into()),
+                observer: "linux-titan".into(),
+                online: true,
+                active: false,
+                relay: Some("sea".into()),
+                endpoint: None,
+                routed_lans: BTreeSet::new(),
+                observed_at: 1,
+                origin: Origin::new("linux-titan", "tailscale-status"),
+            },
+        }]);
+        assert_eq!(topology.nodes.len(), 2);
         topology.observe_all([Observation::OverlaySelf {
             device: "linux-pris".into(),
             ips: vec![ip("100.74.130.83"), ip("fd7a:115c:a1e0::f034:8254")],
@@ -1149,9 +1225,11 @@ mod tests {
         }]);
 
         let node = &topology.nodes["linux-pris"];
+        assert_eq!(topology.nodes.len(), 1);
         assert_eq!(node.ips.len(), 3);
         assert!(node.hostnames.contains("pris"));
         assert!(node.overlays["tailscale/linux-pris"].self_node);
+        assert!(node.overlays.contains_key("tailscale/linux-titan"));
     }
 
     #[test]
