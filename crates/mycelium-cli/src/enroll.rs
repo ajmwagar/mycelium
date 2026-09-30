@@ -248,8 +248,14 @@ fn validate_peer(peer: &str) -> Result<(), ClientError> {
 
 fn copy_mode(from: &Path, to: &Path, mode: u32) -> Result<(), ClientError> {
     use std::os::unix::fs::PermissionsExt;
-    std::fs::copy(from, to).map_err(ClientError::Io)?;
-    std::fs::set_permissions(to, std::fs::Permissions::from_mode(mode)).map_err(ClientError::Io)
+    let staged = to.with_extension(format!("install-{}", std::process::id()));
+    if staged.exists() {
+        std::fs::remove_file(&staged).map_err(ClientError::Io)?;
+    }
+    std::fs::copy(from, &staged).map_err(ClientError::Io)?;
+    std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(mode))
+        .map_err(ClientError::Io)?;
+    std::fs::rename(staged, to).map_err(ClientError::Io)
 }
 
 fn user_home() -> Result<PathBuf, ClientError> {
@@ -344,6 +350,7 @@ pub fn default_ca() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn enrollment_names_and_addresses_are_shell_independent() {
@@ -351,5 +358,28 @@ mod tests {
         assert!(validate_label("name", "x;reboot").is_err());
         assert!(validate_address("home-pi.tail.example").is_ok());
         assert!(validate_address("x $(reboot)").is_err());
+    }
+
+    #[test]
+    fn install_copy_atomically_replaces_existing_file() {
+        let root =
+            std::env::temp_dir().join(format!("mycelium-enroll-copy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join("source");
+        let destination = root.join("destination");
+        std::fs::write(&source, b"new").unwrap();
+        std::fs::write(&destination, b"old").unwrap();
+        copy_mode(&source, &destination, 0o600).unwrap();
+        assert_eq!(std::fs::read(&destination).unwrap(), b"new");
+        assert_eq!(
+            std::fs::metadata(&destination)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
