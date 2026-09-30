@@ -289,6 +289,9 @@ impl EdgeOsDevice {
                 mac: None,
                 ips: vec![*addr],
                 state: LinkState::Unknown,
+                medium: None,
+                speed_mbps: None,
+                duplex: None,
                 origin: Origin::new(me.clone(), "config"),
             });
         }

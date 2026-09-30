@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::net::IpAddr;
 
-use mycelium_core::MacAddress;
+use mycelium_core::{LinkDuplex, LinkMedium, MacAddress};
 use serde::Deserialize;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -10,6 +10,9 @@ pub struct Interface {
     pub mac: Option<MacAddress>,
     pub addresses: Vec<(IpAddr, u8)>,
     pub up: bool,
+    pub medium: LinkMedium,
+    pub speed_mbps: Option<u32>,
+    pub duplex: Option<LinkDuplex>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -96,6 +99,9 @@ pub fn parse_interfaces(links: &str, addresses: &str) -> Vec<Interface> {
                 mac,
                 addresses: Vec::new(),
                 up: line.contains("state UP") || line.contains(",UP,"),
+                medium: LinkMedium::Unknown,
+                speed_mbps: None,
+                duplex: None,
             },
         );
     }
@@ -116,11 +122,52 @@ pub fn parse_interfaces(links: &str, addresses: &str) -> Vec<Interface> {
                 mac: None,
                 addresses: Vec::new(),
                 up: true,
+                medium: LinkMedium::Unknown,
+                speed_mbps: None,
+                duplex: None,
             })
             .addresses
             .push((ip, prefix));
     }
     out.into_values().collect()
+}
+
+pub fn parse_link_properties(text: &str, interfaces: &mut [Interface]) {
+    for line in text.lines() {
+        let mut fields = line.split('\t');
+        let Some(name) = fields.next() else { continue };
+        let medium = match fields.next().unwrap_or_default() {
+            "ethernet" => LinkMedium::Ethernet,
+            "wifi" => LinkMedium::Wifi,
+            "virtual" => LinkMedium::Virtual,
+            "loopback" => LinkMedium::Loopback,
+            "cellular" => LinkMedium::Cellular,
+            _ => LinkMedium::Unknown,
+        };
+        let speed_mbps = fields
+            .next()
+            .and_then(|value| value.parse::<i64>().ok())
+            .and_then(|value| u32::try_from(value).ok())
+            .filter(|value| *value > 0);
+        let duplex = match fields
+            .next()
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "full" => Some(LinkDuplex::Full),
+            "half" => Some(LinkDuplex::Half),
+            _ => None,
+        };
+        if let Some(interface) = interfaces
+            .iter_mut()
+            .find(|interface| interface.name == name)
+        {
+            interface.medium = medium;
+            interface.speed_mbps = speed_mbps;
+            interface.duplex = duplex;
+        }
+    }
 }
 
 pub fn parse_neighbors(text: &str) -> Vec<Neighbor> {
@@ -226,9 +273,13 @@ mod tests {
         let links = "2: enp4s0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP mode DEFAULT group default qlen 1000 link/ether 06:7c:16:77:ea:c0 brd ff:ff:ff:ff:ff:ff";
         let addrs =
             "2: enp4s0    inet 192.168.1.9/24 brd 192.168.1.255 scope global dynamic enp4s0";
-        let interfaces = parse_interfaces(links, addrs);
+        let mut interfaces = parse_interfaces(links, addrs);
+        parse_link_properties("enp4s0\tethernet\t100\tfull\n", &mut interfaces);
         assert_eq!(interfaces[0].name, "enp4s0");
         assert_eq!(interfaces[0].addresses[0].0.to_string(), "192.168.1.9");
+        assert_eq!(interfaces[0].medium, LinkMedium::Ethernet);
+        assert_eq!(interfaces[0].speed_mbps, Some(100));
+        assert_eq!(interfaces[0].duplex, Some(LinkDuplex::Full));
 
         let neighbors = parse_neighbors("192.168.1.1 dev enp4s0 lladdr 94:18:65:19:e9:bb REACHABLE\n192.168.1.2 dev enp4s0 FAILED");
         assert_eq!(neighbors.len(), 1);

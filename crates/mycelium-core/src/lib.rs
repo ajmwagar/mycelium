@@ -43,8 +43,8 @@ pub use reconcile::{
 };
 pub use spec::{CapResult, CapSpec, ParamSpec, ParamType};
 pub use topology::{
-    ipv4_in_cidr, Conflict, IpRecord, LeaseRecord, Link, LinkState, MacAddress, NodeAnnotation,
-    Observation, Origin, OverlayPeerRecord, PortRef, Segment, SegmentKind, ServiceRecord,
-    ServiceState, TopoNode, Topology, TopologyReport, VlanId,
+    ipv4_in_cidr, Conflict, IpRecord, LeaseRecord, Link, LinkDuplex, LinkMedium, LinkState,
+    MacAddress, NodeAnnotation, Observation, Origin, OverlayPeerRecord, PortRef, Segment,
+    SegmentKind, ServiceRecord, ServiceState, TopoNode, Topology, TopologyReport, VlanId,
 };
 pub use value::{IntoValue, Params, Value};

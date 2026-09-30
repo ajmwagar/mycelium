@@ -810,6 +810,7 @@ fn render_topology(topo: &Topology) -> Vec<String> {
             ips,
             format_args!("{kind}{}", render_lans(topo, node))
         ));
+        render_device_links(&mut out, node);
         render_services(&mut out, node);
         render_overlays(&mut out, node);
     }
@@ -869,6 +870,27 @@ fn render_topology(topo: &Topology) -> Vec<String> {
         }
     }
     out
+}
+
+fn render_device_links(out: &mut Vec<String>, node: &mycelium_core::TopoNode) {
+    for (name, link) in &node.ports {
+        let medium = link
+            .medium
+            .map(|medium| format!("{medium:?}").to_ascii_lowercase())
+            .unwrap_or_else(|| "unknown".into());
+        let speed = link
+            .speed_mbps
+            .map(|speed| format!("{speed} Mbps"))
+            .unwrap_or_else(|| "unknown speed".into());
+        let duplex = link
+            .duplex
+            .map(|duplex| format!(" {duplex:?}").to_ascii_lowercase())
+            .unwrap_or_default();
+        out.push(format!(
+            "    ├─ {name}: {medium}, {speed}{duplex}, {:?}",
+            link.state
+        ));
+    }
 }
 
 fn render_services(out: &mut Vec<String>, node: &mycelium_core::TopoNode) {

@@ -16,6 +16,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::net::IpAddr;
 
+pub use mycelium_network_types::{LinkDuplex, LinkMedium};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -125,6 +126,12 @@ pub struct Link {
     pub a: PortRef,
     pub b: Option<PortRef>,
     pub state: LinkState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub medium: Option<LinkMedium>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speed_mbps: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duplex: Option<LinkDuplex>,
     pub origins: BTreeSet<String>,
 }
 
@@ -237,6 +244,9 @@ pub enum Observation {
         mac: Option<MacAddress>,
         ips: Vec<IpAddr>,
         state: LinkState,
+        medium: Option<LinkMedium>,
+        speed_mbps: Option<u32>,
+        duplex: Option<LinkDuplex>,
         origin: Origin,
     },
     /// VLAN membership: device trunk/access port carrying a VLAN.
@@ -407,6 +417,9 @@ impl Topology {
                         },
                         b: None,
                         state: LinkState::Unknown,
+                        medium: None,
+                        speed_mbps: None,
+                        duplex: None,
                         origins: BTreeSet::new(),
                     });
                     entry.origins.insert(origin_key(&origin));
@@ -451,6 +464,9 @@ impl Topology {
                         },
                         b: Some(port),
                         state: LinkState::Up,
+                        medium: None,
+                        speed_mbps: None,
+                        duplex: None,
                         origins: BTreeSet::from_iter([origin]),
                     },
                 );
@@ -530,6 +546,9 @@ impl Topology {
                 mac,
                 ips,
                 state,
+                medium,
+                speed_mbps,
+                duplex,
                 origin,
             } => {
                 let node = self.device_node(&device, mac, &origin);
@@ -555,9 +574,21 @@ impl Topology {
                     },
                     b: None,
                     state: LinkState::Unknown,
+                    medium: None,
+                    speed_mbps: None,
+                    duplex: None,
                     origins: BTreeSet::new(),
                 });
                 entry.state = merge_state(entry.state, state);
+                if medium.is_some() {
+                    entry.medium = medium;
+                }
+                if speed_mbps.is_some() {
+                    entry.speed_mbps = speed_mbps;
+                }
+                if duplex.is_some() {
+                    entry.duplex = duplex;
+                }
                 entry.origins.insert(k);
                 report.updated_nodes += 1;
             }
@@ -1006,6 +1037,9 @@ mod tests {
             mac: MacAddress::parse("00:11:22:33:44:55"),
             ips: vec![Ipv4Addr::new(10, 0, 7, 1).into()],
             state: LinkState::Up,
+            medium: Some(LinkMedium::Ethernet),
+            speed_mbps: Some(1000),
+            duplex: Some(LinkDuplex::Full),
             origin: Origin::new("er-1", "interfaces"),
         }]);
         let json = serde_json::to_string(&topo).unwrap();

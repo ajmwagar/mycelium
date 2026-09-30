@@ -10,6 +10,7 @@ async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 indexmap.workspace = true
+mycelium-network-types = { workspace = true, features = ["serde"] }
 thiserror.workspace = true
 
 [dev-dependencies]

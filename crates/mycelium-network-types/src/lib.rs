@@ -61,6 +61,30 @@ pub enum LinkState {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+pub enum LinkMedium {
+    Ethernet = 1,
+    Wifi = 2,
+    Fiber = 3,
+    Virtual = 4,
+    Loopback = 5,
+    Cellular = 6,
+    Unknown = 255,
+}
+
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+pub enum LinkDuplex {
+    Half = 1,
+    Full = 2,
+    Unknown = 255,
+}
+
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum VlanTagging {
     Untagged = 1,
     Tagged = 2,

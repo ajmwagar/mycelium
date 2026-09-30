@@ -759,6 +759,9 @@ impl Device for SnmpDevice {
                         } else {
                             mycelium_core::LinkState::Down
                         },
+                        medium: None,
+                        speed_mbps: None,
+                        duplex: None,
                         origin: Origin::new(me.clone(), "snmp-ifTable"),
                     });
                 }

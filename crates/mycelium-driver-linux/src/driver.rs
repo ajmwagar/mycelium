@@ -14,11 +14,12 @@ use mycelium_driver_edgeos::SshSession;
 use mycelium_network_types::{Ipv4Prefix, PortForward, TransportProtocol};
 
 use crate::parsers::{
-    parse_interfaces, parse_listeners, parse_neighbors, parse_routes, parse_tailscale_status,
+    parse_interfaces, parse_link_properties, parse_listeners, parse_neighbors, parse_routes,
+    parse_tailscale_status,
 };
 
 pub const DRIVER_NAME: &str = "linux";
-const OBSERVE_COMMAND: &str = "printf '__MYCELIUM_LINKS__\\n'; ip -o link show; printf '__MYCELIUM_ADDRS__\\n'; ip -o -4 addr show scope global; printf '__MYCELIUM_NEIGH__\\n'; ip neigh show; printf '__MYCELIUM_ROUTES__\\n'; ip -4 route show proto kernel scope link; printf '__MYCELIUM_SERVICES__\\n'; ss -H -lntup; printf '__MYCELIUM_TAILSCALE__\\n'; tailscale status --json 2>/dev/null || true";
+const OBSERVE_COMMAND: &str = "printf '__MYCELIUM_LINKS__\\n'; ip -o link show; printf '__MYCELIUM_LINK_META__\\n'; for p in /sys/class/net/*; do n=${p##*/}; if [ \"$n\" = lo ]; then m=loopback; elif [ -d \"$p/wireless\" ]; then m=wifi; elif [ -e \"$p/device\" ]; then m=ethernet; else m=virtual; fi; printf '%s\\t%s\\t%s\\t%s\\n' \"$n\" \"$m\" \"$(cat \"$p/speed\" 2>/dev/null || true)\" \"$(cat \"$p/duplex\" 2>/dev/null || true)\"; done; printf '__MYCELIUM_ADDRS__\\n'; ip -o -4 addr show scope global; printf '__MYCELIUM_NEIGH__\\n'; ip neigh show; printf '__MYCELIUM_ROUTES__\\n'; ip -4 route show proto kernel scope link; printf '__MYCELIUM_SERVICES__\\n'; ss -H -lntup; printf '__MYCELIUM_TAILSCALE__\\n'; tailscale status --json 2>/dev/null || true";
 
 pub struct LinuxDriver {
     timeout: Duration,
@@ -326,7 +327,8 @@ impl Device for LinuxDevice {
             });
         }
         let sections = split_sections(&raw.stdout)?;
-        let interfaces = parse_interfaces(sections[0], sections[1]);
+        let mut interfaces = parse_interfaces(sections[0], sections[2]);
+        parse_link_properties(sections[1], &mut interfaces);
         let primary_mac = interfaces
             .iter()
             .find(|interface| {
@@ -356,10 +358,13 @@ impl Device for LinuxDevice {
                 } else {
                     LinkState::Down
                 },
+                medium: Some(iface.medium),
+                speed_mbps: iface.speed_mbps,
+                duplex: iface.duplex,
                 origin: origin("ip-link"),
             });
         }
-        for neighbor in parse_neighbors(sections[2]) {
+        for neighbor in parse_neighbors(sections[3]) {
             out.push(Observation::Neighbor {
                 mac: Some(neighbor.mac),
                 ip: neighbor.ip,
@@ -372,7 +377,7 @@ impl Device for LinuxDevice {
                 origin: origin("ip-neigh"),
             });
         }
-        for route in parse_routes(sections[3]) {
+        for route in parse_routes(sections[4]) {
             out.push(Observation::Segment {
                 segment: Segment {
                     id: format!("{}/{}", route.network, route.prefix),
@@ -390,7 +395,7 @@ impl Device for LinuxDevice {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        for listener in parse_listeners(sections[4]) {
+        for listener in parse_listeners(sections[5]) {
             out.push(Observation::Service {
                 device: self.meta.id.to_string(),
                 mac: None,
@@ -407,7 +412,7 @@ impl Device for LinuxDevice {
             });
         }
         let mut warnings = Vec::new();
-        match parse_tailscale_status(sections[5]) {
+        match parse_tailscale_status(sections[6]) {
             Ok(peers) => {
                 for peer in peers {
                     for ip in peer.ips {
@@ -464,11 +469,14 @@ fn service_name(port: u16, process: Option<&str>) -> String {
     }
 }
 
-fn split_sections(text: &str) -> Result<[&str; 6]> {
+fn split_sections(text: &str) -> Result<[&str; 7]> {
     let (_, after_links) = text
         .split_once("__MYCELIUM_LINKS__\n")
         .ok_or_else(|| MyceliumError::Parse("missing links marker".into()))?;
-    let (links, after_addrs) = after_links
+    let (links, after_meta) = after_links
+        .split_once("__MYCELIUM_LINK_META__\n")
+        .ok_or_else(|| MyceliumError::Parse("missing link metadata marker".into()))?;
+    let (link_meta, after_addrs) = after_meta
         .split_once("__MYCELIUM_ADDRS__\n")
         .ok_or_else(|| MyceliumError::Parse("missing addresses marker".into()))?;
     let (addrs, after_neigh) = after_addrs
@@ -483,7 +491,7 @@ fn split_sections(text: &str) -> Result<[&str; 6]> {
     let (services, tailscale) = after_services
         .split_once("__MYCELIUM_TAILSCALE__\n")
         .ok_or_else(|| MyceliumError::Parse("missing tailscale marker".into()))?;
-    Ok([links, addrs, neigh, routes, services, tailscale])
+    Ok([links, link_meta, addrs, neigh, routes, services, tailscale])
 }
 
 #[cfg(test)]
