@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 pub const PROTOCOL_VERSION: u16 = 1;
 
@@ -65,6 +66,81 @@ pub struct HostHealth {
 pub enum PeerEvent {
     Hello(PeerHello),
     Health(HostHealth),
+    Release(ReleaseManifest),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReleaseManifest {
+    pub version: String,
+    pub channel: String,
+    pub target: String,
+    pub protocol_version: u16,
+    pub artifact_digest: String,
+    pub artifact_size: u64,
+    pub signer: String,
+    pub signature: String,
+}
+
+#[derive(Serialize)]
+struct UnsignedRelease<'a> {
+    version: &'a str,
+    channel: &'a str,
+    target: &'a str,
+    protocol_version: u16,
+    artifact_digest: &'a str,
+    artifact_size: u64,
+    signer: &'a str,
+}
+
+impl ReleaseManifest {
+    pub fn sign(
+        key: &SigningKey,
+        version: String,
+        channel: String,
+        target: String,
+        artifact: &[u8],
+    ) -> Result<Self, serde_json::Error> {
+        let signer = encode_hex(key.verifying_key().as_bytes());
+        let artifact_digest = sha256_hex(artifact);
+        let artifact_size = artifact.len() as u64;
+        let bytes = serde_json::to_vec(&UnsignedRelease {
+            version: &version,
+            channel: &channel,
+            target: &target,
+            protocol_version: PROTOCOL_VERSION,
+            artifact_digest: &artifact_digest,
+            artifact_size,
+            signer: &signer,
+        })?;
+        Ok(Self {
+            version,
+            channel,
+            target,
+            protocol_version: PROTOCOL_VERSION,
+            artifact_digest,
+            artifact_size,
+            signer,
+            signature: encode_hex(&key.sign(&bytes).to_bytes()),
+        })
+    }
+
+    pub fn verify(&self) -> Result<(), String> {
+        let key = VerifyingKey::from_bytes(&decode_array::<32>(&self.signer)?)
+            .map_err(|error| error.to_string())?;
+        let signature = Signature::from_bytes(&decode_array::<64>(&self.signature)?);
+        let bytes = serde_json::to_vec(&UnsignedRelease {
+            version: &self.version,
+            channel: &self.channel,
+            target: &self.target,
+            protocol_version: self.protocol_version,
+            artifact_digest: &self.artifact_digest,
+            artifact_size: self.artifact_size,
+            signer: &self.signer,
+        })
+        .map_err(|error| error.to_string())?;
+        key.verify(&bytes, &signature)
+            .map_err(|error| error.to_string())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -130,7 +206,36 @@ pub enum PeerMessage {
     Hello(PeerHello),
     Digest(BTreeMap<String, u64>),
     Observations(Vec<SignedEnvelope>),
-    Ping { sent_at: u64 },
+    Ping {
+        sent_at: u64,
+    },
+    ArtifactRequest {
+        digest: String,
+        offset: u64,
+        length: u32,
+    },
+    ArtifactChunk {
+        digest: String,
+        offset: u64,
+        data: String,
+        complete: bool,
+    },
+}
+
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    encode_hex(&Sha256::digest(bytes))
+}
+
+pub fn decode_hex(text: &str) -> Result<Vec<u8>, String> {
+    if text.len() % 2 != 0 {
+        return Err("hex value must contain pairs of characters".into());
+    }
+    (0..text.len())
+        .step_by(2)
+        .map(|index| {
+            u8::from_str_radix(&text[index..index + 2], 16).map_err(|_| "invalid hex".to_owned())
+        })
+        .collect()
 }
 
 pub fn encode_hex(bytes: &[u8]) -> String {
@@ -176,5 +281,21 @@ mod tests {
         envelope.verify().unwrap();
         envelope.sequence = 3;
         assert!(envelope.verify().is_err());
+    }
+
+    #[test]
+    fn release_signature_authorizes_exact_artifact() {
+        let key = SigningKey::from_bytes(&[9; 32]);
+        let mut release = ReleaseManifest::sign(
+            &key,
+            "1.2.3".into(),
+            "canary".into(),
+            "aarch64-apple-darwin".into(),
+            b"binary",
+        )
+        .unwrap();
+        release.verify().unwrap();
+        release.artifact_size += 1;
+        assert!(release.verify().is_err());
     }
 }

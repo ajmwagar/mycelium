@@ -108,6 +108,37 @@ it is the node identity and is created with owner-only permissions. A future
 Unibus carrier can exchange the same envelopes without changing their trust or
 merge semantics.
 
+### Signed peer updates
+
+Release authorization is separate from peer transport identity. Generate an
+offline release key, configure its returned public key on peers, then publish a
+binary for one target and rollout channel:
+
+```sh
+mycelium releases keygen --path /secure/mycelium-release.key --write
+export MYCELIUM_RELEASE_KEYS=<public-key-from-keygen>
+mycelium releases publish \
+  --binary ./target/release/mycelium \
+  --signing-key /secure/mycelium-release.key \
+  --version 0.2.0 --channel canary \
+  --target aarch64-apple-darwin --write
+```
+
+Peers exchange only anti-entropy metadata until an authorized release is
+missing locally. They then fetch bounded chunks from any connected peer,
+resume by offset, and promote the artifact only after verifying its signed
+size and SHA-256 digest.
+
+```sh
+mycelium update status --channel canary
+mycelium update apply --channel canary --write
+```
+
+Activation preserves the prior executable, starts the candidate as a daemon,
+and requires the local peer RPC to become healthy within ten seconds. Failure
+automatically restores and starts the previous executable. Distribution peers
+never possess or imply release authority.
+
 ## SSH observation points
 
 Ordinary Linux hosts can contribute their interfaces, connected routes, and

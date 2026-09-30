@@ -86,6 +86,24 @@ pub enum Request {
     },
     /// Return the locally converged view of signed peer observations.
     PeerList,
+    ReleaseList,
+    ReleaseKeygen {
+        path: String,
+        #[serde(default)]
+        write: bool,
+    },
+    ReleasePublish {
+        binary: String,
+        signing_key: String,
+        version: String,
+        channel: String,
+        #[serde(default)]
+        target: Option<String>,
+        #[serde(default)]
+        write: bool,
+        #[serde(default)]
+        dry_run: bool,
+    },
     /// Set durable human knowledge on exactly one discovered node.
     TopologyAnnotate {
         selector: String,

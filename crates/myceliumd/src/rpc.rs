@@ -708,6 +708,55 @@ impl Daemon {
                 to_value(reports).map_err(json_err)
             }
             Request::PeerList => to_value(self.mesh.views().await).map_err(json_err),
+            Request::ReleaseList => to_value(self.mesh.releases().await).map_err(json_err),
+            Request::ReleaseKeygen { path, write } => {
+                if !write {
+                    return Err(MyceliumError::WritesNotPermitted(
+                        "release key generation requires --write".into(),
+                    ));
+                }
+                let signer = crate::peer::Mesh::generate_release_key(std::path::Path::new(&path))
+                    .map_err(|error| MyceliumError::Validation(error.to_string()))?;
+                to_value(serde_json::json!({ "path": path, "signer": signer })).map_err(json_err)
+            }
+            Request::ReleasePublish {
+                binary,
+                signing_key,
+                version,
+                channel,
+                target,
+                write,
+                dry_run,
+            } => {
+                if dry_run {
+                    return to_value(serde_json::json!({
+                        "dry_run": true,
+                        "binary": binary,
+                        "signing_key": signing_key,
+                        "version": version,
+                        "channel": channel,
+                        "target": target,
+                    }))
+                    .map_err(json_err);
+                }
+                if !write {
+                    return Err(MyceliumError::WritesNotPermitted(
+                        "release publication requires --write".into(),
+                    ));
+                }
+                let release = self
+                    .mesh
+                    .publish_artifact(
+                        std::path::Path::new(&binary),
+                        std::path::Path::new(&signing_key),
+                        version,
+                        channel,
+                        target,
+                    )
+                    .await
+                    .map_err(|error| MyceliumError::Validation(error.to_string()))?;
+                to_value(release).map_err(json_err)
+            }
             Request::TopologyAnnotate {
                 selector,
                 name,

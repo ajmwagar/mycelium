@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::io::BufReader as StdBufReader;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::IpAddr;
 use std::path::Path;
 use std::process::Command;
@@ -10,8 +11,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ed25519_dalek::SigningKey;
 use mycelium_peer_protocol::{
-    encode_hex, FilesystemHealth, HostHealth, PeerEvent, PeerHello, PeerMessage, Platform,
-    ProcessHealth, SignedEnvelope, PROTOCOL_VERSION,
+    decode_hex, encode_hex, sha256_hex, FilesystemHealth, HostHealth, PeerEvent, PeerHello,
+    PeerMessage, Platform, ProcessHealth, ReleaseManifest, SignedEnvelope, PROTOCOL_VERSION,
 };
 use rand_core::OsRng;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
@@ -39,6 +40,7 @@ pub struct Mesh {
     sequence: AtomicU64,
     observations: Mutex<BTreeMap<String, SignedEnvelope>>,
     allowed_origins: Option<BTreeSet<String>>,
+    trusted_release_keys: BTreeSet<String>,
 }
 
 impl Mesh {
@@ -61,6 +63,7 @@ impl Mesh {
             sequence: AtomicU64::new(0),
             observations: Mutex::new(BTreeMap::new()),
             allowed_origins: None,
+            trusted_release_keys: BTreeSet::new(),
         })
     }
 
@@ -87,11 +90,20 @@ impl Mesh {
                 .map(str::to_owned)
                 .collect::<BTreeSet<_>>()
         });
+        let trusted_release_keys = csv_set("MYCELIUM_RELEASE_KEYS");
         let observations = match std::fs::read_to_string(crate::peer_observations_path()) {
             Ok(text) => serde_json::from_str::<Vec<SignedEnvelope>>(&text)?
                 .into_iter()
                 .filter(|envelope| {
-                    envelope.verify().is_ok()
+                    let release_allowed = match &envelope.event {
+                        PeerEvent::Release(release) => {
+                            trusted_release_keys.contains(&release.signer)
+                                && release.verify().is_ok()
+                        }
+                        _ => true,
+                    };
+                    release_allowed
+                        && envelope.verify().is_ok()
                         && (envelope.origin == hello.node_id
                             || allowed_origins
                                 .as_ref()
@@ -114,6 +126,7 @@ impl Mesh {
             sequence: AtomicU64::new(sequence),
             observations: Mutex::new(observations),
             allowed_origins,
+            trusted_release_keys,
         }))
     }
 
@@ -170,9 +183,78 @@ impl Mesh {
             match &envelope.event {
                 PeerEvent::Hello(hello) => view.hello = Some(hello.clone()),
                 PeerEvent::Health(health) => view.health = Some(health.clone()),
+                PeerEvent::Release(_) => {}
             }
         }
         views.into_values().collect()
+    }
+
+    pub async fn releases(&self) -> Vec<ReleaseManifest> {
+        self.observations
+            .lock()
+            .await
+            .values()
+            .filter_map(|envelope| match &envelope.event {
+                PeerEvent::Release(release) => Some(release.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub async fn publish_release(&self, release: ReleaseManifest) -> Result<(), AnyError> {
+        if !self.trusted_release_keys.contains(&release.signer) {
+            return Err("release signer is not in MYCELIUM_RELEASE_KEYS".into());
+        }
+        release
+            .verify()
+            .map_err(|error| format!("release signature: {error}"))?;
+        self.publish(PeerEvent::Release(release)).await
+    }
+
+    pub async fn publish_artifact(
+        &self,
+        binary: &Path,
+        signing_key: &Path,
+        version: String,
+        channel: String,
+        target: Option<String>,
+    ) -> Result<ReleaseManifest, AnyError> {
+        validate_release_label("version", &version)?;
+        validate_release_label("channel", &channel)?;
+        let target = target.unwrap_or_else(local_target);
+        validate_release_label("target", &target)?;
+        let bytes = std::fs::read(binary)?;
+        let key_bytes = std::fs::read(signing_key)?;
+        let key = SigningKey::from_bytes(
+            key_bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| "release signing key must be exactly 32 bytes")?,
+        );
+        let release = ReleaseManifest::sign(&key, version, channel, target, &bytes)?;
+        std::fs::create_dir_all(crate::artifacts_dir())?;
+        let final_path = artifact_path(&release.artifact_digest)?;
+        if !final_path.is_file() {
+            let temp = final_path.with_extension("tmp");
+            std::fs::write(&temp, &bytes)?;
+            std::fs::rename(temp, &final_path)?;
+        }
+        self.publish_release(release.clone()).await?;
+        Ok(release)
+    }
+
+    pub fn generate_release_key(path: &Path) -> Result<String, AnyError> {
+        if path.exists() {
+            return Err("release signing key already exists".into());
+        }
+        let key = SigningKey::generate(&mut OsRng);
+        std::fs::write(path, key.to_bytes())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        }
+        Ok(encode_hex(key.verifying_key().as_bytes()))
     }
 
     async fn publish(&self, event: PeerEvent) -> Result<(), AnyError> {
@@ -190,7 +272,17 @@ impl Mesh {
                     .allowed_origins
                     .as_ref()
                     .is_none_or(|allowed| allowed.contains(&envelope.origin));
-            if !authorized || envelope.verify().is_err() || !event_origin_matches(&envelope) {
+            let event_authorized = match &envelope.event {
+                PeerEvent::Release(release) => {
+                    self.trusted_release_keys.contains(&release.signer) && release.verify().is_ok()
+                }
+                _ => true,
+            };
+            if !authorized
+                || !event_authorized
+                || envelope.verify().is_err()
+                || !event_origin_matches(&envelope)
+            {
                 continue;
             }
             let key = event_key(&envelope);
@@ -286,6 +378,20 @@ impl Mesh {
                         PeerMessage::Hello(hello) if hello.protocol_version != PROTOCOL_VERSION => {
                             return Err(format!("protocol {} is unsupported", hello.protocol_version).into());
                         }
+                        PeerMessage::ArtifactRequest { digest, offset, length } => {
+                            if let Some(chunk) = artifact_chunk(&digest, offset, length)? {
+                                send(&mut writer, &chunk).await?;
+                            }
+                        }
+                        PeerMessage::ArtifactChunk { digest, offset, data, complete } => {
+                            accept_artifact_chunk(
+                                &digest,
+                                offset,
+                                &data,
+                                complete,
+                                &self.releases().await,
+                            )?;
+                        }
                         PeerMessage::Hello(_) | PeerMessage::Ping { .. } => {}
                     }
                 }
@@ -298,9 +404,41 @@ impl Mesh {
                         .map(|(key, envelope)| (key.clone(), envelope.sequence))
                         .collect();
                     send(&mut writer, &PeerMessage::Digest(digest)).await?;
+                    if let Some(request) = self.next_artifact_request().await? {
+                        send(&mut writer, &request).await?;
+                    }
                 }
             }
         }
+    }
+
+    async fn next_artifact_request(&self) -> Result<Option<PeerMessage>, AnyError> {
+        let target = local_target();
+        let channel = std::env::var("MYCELIUM_UPDATE_CHANNEL").unwrap_or_else(|_| "canary".into());
+        let release = self
+            .releases()
+            .await
+            .into_iter()
+            .filter(|release| release.target == target && release.channel == channel)
+            .max_by(|left, right| left.version.cmp(&right.version));
+        let Some(release) = release else {
+            return Ok(None);
+        };
+        if artifact_path(&release.artifact_digest)?.is_file() {
+            return Ok(None);
+        }
+        let partial = partial_artifact_path(&release.artifact_digest)?;
+        let offset = std::fs::metadata(partial)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        if offset > release.artifact_size {
+            return Err("partial artifact exceeds signed size".into());
+        }
+        Ok(Some(PeerMessage::ArtifactRequest {
+            digest: release.artifact_digest,
+            offset,
+            length: 65_536,
+        }))
     }
 }
 
@@ -371,18 +509,131 @@ async fn send<W: tokio::io::AsyncWrite + Unpin>(
 }
 
 fn event_key(envelope: &SignedEnvelope) -> String {
-    let kind = match envelope.event {
-        PeerEvent::Hello(_) => "hello",
-        PeerEvent::Health(_) => "health",
-    };
-    format!("{}:{kind}", envelope.origin)
+    match &envelope.event {
+        PeerEvent::Hello(_) => format!("{}:hello", envelope.origin),
+        PeerEvent::Health(_) => format!("{}:health", envelope.origin),
+        PeerEvent::Release(release) => format!(
+            "{}:release:{}:{}",
+            envelope.origin, release.channel, release.target
+        ),
+    }
 }
 
 fn event_origin_matches(envelope: &SignedEnvelope) -> bool {
     match &envelope.event {
         PeerEvent::Hello(hello) => hello.node_id == envelope.origin,
-        PeerEvent::Health(_) => true,
+        PeerEvent::Health(_) | PeerEvent::Release(_) => true,
     }
+}
+
+fn csv_set(name: &str) -> BTreeSet<String> {
+    std::env::var(name)
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+fn local_target() -> String {
+    #[cfg(target_os = "macos")]
+    let os = "apple-darwin";
+    #[cfg(target_os = "linux")]
+    let os = "unknown-linux-gnu";
+    format!("{}-{os}", std::env::consts::ARCH)
+}
+
+fn validate_digest(digest: &str) -> Result<(), AnyError> {
+    if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("artifact digest must be 64 hexadecimal characters".into());
+    }
+    Ok(())
+}
+
+fn validate_release_label(name: &str, value: &str) -> Result<(), AnyError> {
+    if value.is_empty()
+        || value.len() > 128
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._+-".contains(&byte))
+    {
+        return Err(format!("{name} must contain 1-128 safe ASCII characters").into());
+    }
+    Ok(())
+}
+
+fn artifact_path(digest: &str) -> Result<std::path::PathBuf, AnyError> {
+    validate_digest(digest)?;
+    Ok(crate::artifacts_dir().join(digest))
+}
+
+fn partial_artifact_path(digest: &str) -> Result<std::path::PathBuf, AnyError> {
+    validate_digest(digest)?;
+    Ok(crate::artifacts_dir().join(format!("{digest}.part")))
+}
+
+fn artifact_chunk(digest: &str, offset: u64, length: u32) -> Result<Option<PeerMessage>, AnyError> {
+    if length == 0 || length > 65_536 {
+        return Err("artifact request length must be 1 through 65536".into());
+    }
+    let path = artifact_path(digest)?;
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return Ok(None);
+    };
+    let size = file.metadata()?.len();
+    if offset > size {
+        return Err("artifact request offset exceeds file size".into());
+    }
+    file.seek(SeekFrom::Start(offset))?;
+    let mut data = vec![0; length as usize];
+    let count = file.read(&mut data)?;
+    data.truncate(count);
+    Ok(Some(PeerMessage::ArtifactChunk {
+        digest: digest.into(),
+        offset,
+        data: encode_hex(&data),
+        complete: offset + count as u64 == size,
+    }))
+}
+
+fn accept_artifact_chunk(
+    digest: &str,
+    offset: u64,
+    encoded: &str,
+    complete: bool,
+    releases: &[ReleaseManifest],
+) -> Result<(), AnyError> {
+    let release = releases
+        .iter()
+        .find(|release| release.artifact_digest == digest)
+        .ok_or("artifact has no trusted release manifest")?;
+    let data = decode_hex(encoded).map_err(|error| format!("artifact chunk: {error}"))?;
+    if data.len() > 65_536 || offset + data.len() as u64 > release.artifact_size {
+        return Err("artifact chunk exceeds signed bounds".into());
+    }
+    std::fs::create_dir_all(crate::artifacts_dir())?;
+    let partial = partial_artifact_path(digest)?;
+    let current = std::fs::metadata(&partial)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    if current != offset {
+        return Ok(());
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&partial)?;
+    file.write_all(&data)?;
+    file.sync_data()?;
+    if complete {
+        let bytes = std::fs::read(&partial)?;
+        if bytes.len() as u64 != release.artifact_size || sha256_hex(&bytes) != digest {
+            return Err("completed artifact does not match signed size and digest".into());
+        }
+        std::fs::rename(partial, artifact_path(digest)?)?;
+    }
+    Ok(())
 }
 
 fn persist_observations(values: &[SignedEnvelope]) -> Result<(), AnyError> {

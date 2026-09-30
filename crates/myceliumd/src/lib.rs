@@ -73,6 +73,10 @@ pub fn peer_observations_path() -> PathBuf {
     home_dir().join("peer-observations.json")
 }
 
+pub fn artifacts_dir() -> PathBuf {
+    home_dir().join("artifacts")
+}
+
 pub fn plugins_dir() -> PathBuf {
     home_dir().join("plugins")
 }

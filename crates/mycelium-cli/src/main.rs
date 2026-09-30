@@ -23,6 +23,11 @@ fn main() {
                 .map(|_| Vec::new())
                 .map_err(ClientError::Io)
         }
+        Some("_self-check") => Ok(vec![format!(
+            "mycelium {} protocol {}",
+            env!("CARGO_PKG_VERSION"),
+            mycelium_peer_protocol::PROTOCOL_VERSION
+        )]),
         Some(other) => rt_block(run(other, &args[1..])),
         None => Ok(usage()),
     };
@@ -77,6 +82,11 @@ usage:
   mycelium networks adopt NAME --site SITE --vlan ID --subnet CIDR --write [--dry-run]
   mycelium networks drift [NAME] [--json]
   mycelium peers [--json]
+  mycelium releases list [--json]
+  mycelium releases keygen --path PATH --write [--json]
+  mycelium releases publish --binary PATH --signing-key PATH --version VERSION --channel CHANNEL [--target TRIPLE] --write [--dry-run] [--json]
+  mycelium update status [--channel CHANNEL] [--json]
+  mycelium update apply [--channel CHANNEL] [--path INSTALLED-BINARY] --write
   mycelium map [--json]
   mycelium annotate <node> [--name NAME] [--kind KIND] --write [--dry-run]
   mycelium boot-path <device> --target <IP-or-URL>... [--json]
@@ -113,6 +123,11 @@ struct Flags {
     site: Option<String>,
     vlan: Option<u16>,
     subnet: Option<String>,
+    path: Option<String>,
+    binary: Option<String>,
+    signing_key: Option<String>,
+    version: Option<String>,
+    channel: Option<String>,
     rest: Vec<String>,
 }
 
@@ -139,6 +154,11 @@ fn parse_flags(args: &[String]) -> Flags {
         site: None,
         vlan: None,
         subnet: None,
+        path: None,
+        binary: None,
+        signing_key: None,
+        version: None,
+        channel: None,
         rest: Vec::new(),
     };
     let mut i = 0;
@@ -232,6 +252,26 @@ fn parse_flags(args: &[String]) -> Flags {
             "--subnet" => {
                 i += 1;
                 f.subnet = args.get(i).cloned();
+            }
+            "--path" => {
+                i += 1;
+                f.path = args.get(i).cloned();
+            }
+            "--binary" => {
+                i += 1;
+                f.binary = args.get(i).cloned();
+            }
+            "--signing-key" => {
+                i += 1;
+                f.signing_key = args.get(i).cloned();
+            }
+            "--version" => {
+                i += 1;
+                f.version = args.get(i).cloned();
+            }
+            "--channel" => {
+                i += 1;
+                f.channel = args.get(i).cloned();
             }
             other => f.rest.push(other.to_owned()),
         }
@@ -349,6 +389,8 @@ async fn run(cmd: &str, args: &[String]) -> Result<Vec<String>, ClientError> {
                 Ok(render_peers(&value))
             }
         }
+        "releases" => releases(args).await,
+        "update" => update(args).await,
         "annotate" => {
             let f = parse_flags(args);
             let selector = f
@@ -412,6 +454,237 @@ async fn run(cmd: &str, args: &[String]) -> Result<Vec<String>, ClientError> {
         other => Err(err_usage(&format!(
             "unknown command `{other}` (see `mycelium`)"
         ))),
+    }
+}
+
+async fn releases(args: &[String]) -> Result<Vec<String>, ClientError> {
+    let flags = parse_flags(args);
+    let action = flags.rest.first().map(String::as_str).unwrap_or("list");
+    let request = match action {
+        "list" => Request::ReleaseList,
+        "keygen" => Request::ReleaseKeygen {
+            path: flags
+                .path
+                .ok_or(err_usage("releases keygen needs --path"))?,
+            write: flags.write,
+        },
+        "publish" => Request::ReleasePublish {
+            binary: flags
+                .binary
+                .ok_or(err_usage("releases publish needs --binary"))?,
+            signing_key: flags
+                .signing_key
+                .ok_or(err_usage("releases publish needs --signing-key"))?,
+            version: flags
+                .version
+                .ok_or(err_usage("releases publish needs --version"))?,
+            channel: flags
+                .channel
+                .ok_or(err_usage("releases publish needs --channel"))?,
+            target: flags.targets.first().cloned(),
+            write: flags.write,
+            dry_run: flags.dry_run,
+        },
+        other => return Err(err_usage(&format!("unknown releases action `{other}`"))),
+    };
+    let mut client = connect().await?;
+    let value = client.call(&request).await?;
+    if flags.json {
+        Ok(vec![value.to_string()])
+    } else if action == "list" {
+        let mut lines = vec!["releases:".into()];
+        for release in value.as_array().into_iter().flatten() {
+            lines.push(format!(
+                "  {} channel={} target={} digest={} size={}",
+                release["version"].as_str().unwrap_or("?"),
+                release["channel"].as_str().unwrap_or("?"),
+                release["target"].as_str().unwrap_or("?"),
+                release["artifact_digest"].as_str().unwrap_or("?"),
+                release["artifact_size"].as_u64().unwrap_or(0),
+            ));
+        }
+        Ok(lines)
+    } else {
+        Ok(vec![
+            serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string())
+        ])
+    }
+}
+
+async fn update(args: &[String]) -> Result<Vec<String>, ClientError> {
+    let flags = parse_flags(args);
+    let action = flags.rest.first().map(String::as_str).unwrap_or("status");
+    let channel = flags.channel.unwrap_or_else(|| "canary".into());
+    let target = local_target();
+    let mut client = connect().await?;
+    let value = client.call(&Request::ReleaseList).await?;
+    let release = value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|value| {
+            serde_json::from_value::<mycelium_peer_protocol::ReleaseManifest>(value.clone()).ok()
+        })
+        .filter(|release| release.channel == channel && release.target == target)
+        .max_by(|left, right| left.version.cmp(&right.version));
+    let Some(release) = release else {
+        return Err(err_usage(&format!("no `{channel}` release for {target}")));
+    };
+    release
+        .verify()
+        .map_err(|error| err_usage(&format!("release signature: {error}")))?;
+    let artifact = myceliumd::artifacts_dir().join(&release.artifact_digest);
+    let available = artifact.is_file();
+    if action == "status" {
+        let status = serde_json::json!({
+            "release": release,
+            "artifact": artifact,
+            "available": available,
+        });
+        return if flags.json {
+            Ok(vec![status.to_string()])
+        } else {
+            Ok(vec![format!(
+                "release {} channel={} target={} artifact={}",
+                status["release"]["version"].as_str().unwrap_or("?"),
+                channel,
+                target,
+                if available { "ready" } else { "downloading" },
+            )])
+        };
+    }
+    if action != "apply" {
+        return Err(err_usage(&format!("unknown update action `{action}`")));
+    }
+    if !flags.write {
+        return Err(ClientError::Rpc {
+            message: "update activation requires --write".into(),
+            kind: "writes_not_permitted".into(),
+        });
+    }
+    if !available {
+        return Err(err_usage("release artifact has not finished downloading"));
+    }
+    let bytes = std::fs::read(&artifact).map_err(ClientError::Io)?;
+    if bytes.len() as u64 != release.artifact_size
+        || mycelium_peer_protocol::sha256_hex(&bytes) != release.artifact_digest
+    {
+        return Err(err_usage(
+            "release artifact failed final size/digest verification",
+        ));
+    }
+    let destination = match flags.path {
+        Some(path) => std::path::PathBuf::from(path),
+        None => std::env::current_exe().map_err(ClientError::Io)?,
+    };
+    activate_update(&mut client, &artifact, &destination).await?;
+    Ok(vec![format!(
+        "activated {} for {} from {}",
+        release.version,
+        target,
+        artifact.display()
+    )])
+}
+
+fn local_target() -> String {
+    #[cfg(target_os = "macos")]
+    let os = "apple-darwin";
+    #[cfg(target_os = "linux")]
+    let os = "unknown-linux-gnu";
+    format!("{}-{os}", std::env::consts::ARCH)
+}
+
+async fn activate_update(
+    client: &mut Client,
+    artifact: &std::path::Path,
+    destination: &std::path::Path,
+) -> Result<(), ClientError> {
+    use std::os::unix::fs::PermissionsExt;
+    let parent = destination
+        .parent()
+        .ok_or_else(|| err_usage("installed binary has no parent directory"))?;
+    let name = destination
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| err_usage("installed binary name is not UTF-8"))?;
+    let candidate = parent.join(format!(".{name}.candidate"));
+    let previous = parent.join(format!(".{name}.previous"));
+    let failed = parent.join(format!(".{name}.failed"));
+    std::fs::copy(artifact, &candidate).map_err(ClientError::Io)?;
+    let mode = std::fs::metadata(destination)
+        .map_err(ClientError::Io)?
+        .permissions()
+        .mode();
+    std::fs::set_permissions(&candidate, std::fs::Permissions::from_mode(mode))
+        .map_err(ClientError::Io)?;
+    let check = std::process::Command::new(&candidate)
+        .arg("_self-check")
+        .output()
+        .map_err(ClientError::Io)?;
+    if !check.status.success() {
+        return Err(err_usage("candidate binary failed self-check"));
+    }
+    let _ = client.request(&Request::Shutdown).await;
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    if previous.exists() {
+        std::fs::remove_file(&previous).map_err(ClientError::Io)?;
+    }
+    std::fs::rename(destination, &previous).map_err(ClientError::Io)?;
+    if let Err(error) = std::fs::rename(&candidate, destination) {
+        let _ = std::fs::rename(&previous, destination);
+        return Err(ClientError::Io(error));
+    }
+    spawn_daemon_from(destination)?;
+    if wait_for_daemon().await.is_ok() {
+        return Ok(());
+    }
+
+    let _ = std::fs::rename(destination, &failed);
+    std::fs::rename(&previous, destination).map_err(ClientError::Io)?;
+    spawn_daemon_from(destination)?;
+    wait_for_daemon().await.map_err(|_| {
+        ClientError::Protocol(
+            "candidate failed health check; rollback daemon also failed to start".into(),
+        )
+    })?;
+    Err(ClientError::Protocol(
+        "candidate failed health check and was rolled back".into(),
+    ))
+}
+
+fn spawn_daemon_from(binary: &std::path::Path) -> Result<(), ClientError> {
+    let home = myceliumd::home_dir();
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(home.join("daemon.log"))
+        .map_err(ClientError::Io)?;
+    let stderr = log.try_clone().map_err(ClientError::Io)?;
+    use std::os::unix::process::CommandExt;
+    std::process::Command::new(binary)
+        .arg("_serve")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::from(log))
+        .stderr(std::process::Stdio::from(stderr))
+        .process_group(0)
+        .spawn()
+        .map_err(|error| ClientError::Spawn(error.to_string()))?;
+    Ok(())
+}
+
+async fn wait_for_daemon() -> Result<(), ClientError> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match Client::try_connect().await {
+            Ok(mut client) => {
+                client.call(&Request::PeerList).await?;
+                return Ok(());
+            }
+            Err(_) if std::time::Instant::now() >= deadline => {
+                return Err(ClientError::DaemonUnresponsive)
+            }
+            Err(_) => tokio::time::sleep(std::time::Duration::from_millis(100)).await,
+        }
     }
 }
 

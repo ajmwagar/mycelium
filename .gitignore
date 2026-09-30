@@ -5,3 +5,4 @@ Cargo.lock
 ~/.mycelium
 .mycelium/peer.key
 .mycelium/peer-observations.json
+.mycelium/artifacts/
