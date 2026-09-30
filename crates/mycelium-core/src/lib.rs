@@ -10,6 +10,7 @@
 //! - Capability subtraits ([`capabilities`]) are typed facades over declared
 //!   capabilities; drivers may override them for native implementations.
 
+pub mod allocation;
 pub mod boot;
 pub mod capabilities;
 pub mod credentials;
@@ -24,6 +25,7 @@ pub mod spec;
 pub mod topology;
 pub mod value;
 
+pub use allocation::{AllocationBasis, AllocationReceipt, AllocationStrategy, AllocationValue};
 pub use boot::{BootPath, BootPlanError, BootReachability, BootTarget, NbdePlan};
 pub use capabilities::{DhcpManagement, DnsFiltering, Identity, Sensors, VlanManagement, Wireless};
 pub use capabilities::{

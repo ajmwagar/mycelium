@@ -3,8 +3,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use mycelium_core::{
-    CredentialSet, DeviceId, DeviceMeta, DiscoveryRequest, DiscoveryScope, Driver, Inventory,
-    MyceliumError, Result, Secret, Target, Topology, Transport, Value,
+    AllocationReceipt, AllocationValue, CredentialSet, DeviceId, DeviceMeta, DiscoveryRequest,
+    DiscoveryScope, Driver, Inventory, MyceliumError, Result, Secret, Target, Topology, Transport,
+    Value,
 };
 use mycelium_driver_darwin::DarwinDriver;
 use mycelium_driver_edgeos::{EdgeOsDriver, SshSession};
@@ -37,6 +38,7 @@ pub struct Daemon {
     pub topology: Mutex<Topology>,
     saved: Mutex<BTreeMap<DeviceId, SavedDevice>>,
     discovery_scopes: Mutex<BTreeMap<String, DiscoveryScope>>,
+    allocations: Mutex<BTreeMap<String, AllocationReceipt>>,
 }
 
 /// SSH connector handed to Lua plugin drivers: vyos-family plugins reuse
@@ -118,6 +120,15 @@ impl Daemon {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
             Err(error) => return Err(MyceliumError::Io(error)),
         };
+        let allocations = match std::fs::read_to_string(crate::allocations_path()) {
+            Ok(text) => serde_json::from_str::<Vec<AllocationReceipt>>(&text)
+                .map_err(|error| MyceliumError::Parse(format!("allocations.json: {error}")))?
+                .into_iter()
+                .map(|receipt| (receipt.identity.clone(), receipt))
+                .collect(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
+            Err(error) => return Err(MyceliumError::Io(error)),
+        };
 
         let me = Self {
             inventory: Inventory::new(),
@@ -125,6 +136,7 @@ impl Daemon {
             topology: Mutex::new(topology),
             saved: Mutex::new(saved_map),
             discovery_scopes: Mutex::new(discovery_scopes),
+            allocations: Mutex::new(allocations),
         };
         // Reconnect saved devices; failures are recorded but keep the entry
         // (the appliance may simply be asleep).
@@ -181,6 +193,24 @@ impl Daemon {
             crate::discovery_path(),
             serde_json::to_string_pretty(&scopes).map_err(json_err)?,
         )?;
+        Ok(())
+    }
+
+    async fn persist_allocations(&self) -> Result<()> {
+        let receipts = self
+            .allocations
+            .lock()
+            .await
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        let path = crate::allocations_path();
+        let temporary = path.with_extension(format!("json.tmp-{}", std::process::id()));
+        std::fs::write(
+            &temporary,
+            serde_json::to_string_pretty(&receipts).map_err(json_err)?,
+        )?;
+        std::fs::rename(temporary, path)?;
         Ok(())
     }
 
@@ -476,6 +506,58 @@ impl Daemon {
                 to_value(serde_json::json!({"removed": removed.is_some(), "observer": observer}))
                     .map_err(json_err)
             }
+            Request::AllocationList => {
+                let receipts = self
+                    .allocations
+                    .lock()
+                    .await
+                    .values()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                to_value(receipts).map_err(json_err)
+            }
+            Request::AllocationImport {
+                site,
+                write,
+                dry_run,
+            } => {
+                validate_site_name(&site)?;
+                let candidates = {
+                    let topology = self.topology.lock().await;
+                    import_allocation_receipts(&topology, &site)
+                };
+                let existing = self.allocations.lock().await;
+                let additions = candidates
+                    .into_iter()
+                    .filter(|candidate| !existing.contains_key(&candidate.identity))
+                    .collect::<Vec<_>>();
+                drop(existing);
+                if dry_run {
+                    return to_value(serde_json::json!({
+                        "dry_run": true,
+                        "site": site,
+                        "additions": additions,
+                    }))
+                    .map_err(json_err);
+                }
+                if !write {
+                    return Err(MyceliumError::WritesNotPermitted(
+                        "allocation imports require --write".into(),
+                    ));
+                }
+                let mut allocations = self.allocations.lock().await;
+                for receipt in &additions {
+                    allocations.insert(receipt.identity.clone(), receipt.clone());
+                }
+                drop(allocations);
+                self.persist_allocations().await?;
+                to_value(serde_json::json!({
+                    "site": site,
+                    "imported": additions.len(),
+                    "receipts": additions,
+                }))
+                .map_err(json_err)
+            }
             Request::TopologyAnnotate {
                 selector,
                 name,
@@ -715,6 +797,54 @@ impl Daemon {
         }
         warnings
     }
+}
+
+fn validate_site_name(site: &str) -> Result<()> {
+    if site.is_empty()
+        || site.len() > 64
+        || !site
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    {
+        return Err(MyceliumError::Validation(
+            "site must be 1-64 lowercase letters, digits, or hyphens".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn import_allocation_receipts(topology: &Topology, site: &str) -> Vec<AllocationReceipt> {
+    let mut receipts = BTreeMap::<String, AllocationReceipt>::new();
+    for segment in topology.segments.values().filter(|segment| {
+        segment.id.starts_with("vlan:")
+            || segment
+                .id
+                .split('/')
+                .next()
+                .is_some_and(|value| value.parse::<std::net::IpAddr>().is_ok())
+    }) {
+        if let Some(id) = segment.vlan {
+            let receipt = AllocationReceipt::imported(
+                site,
+                AllocationValue::Vlan { id },
+                segment.origins.clone(),
+            );
+            receipts.insert(receipt.identity.clone(), receipt);
+        }
+        if let Some((network, prefix)) = segment.subnet {
+            let receipt = AllocationReceipt::imported(
+                site,
+                AllocationValue::Subnet {
+                    network,
+                    prefix,
+                    gateway: segment.gw,
+                },
+                segment.origins.clone(),
+            );
+            receipts.insert(receipt.identity.clone(), receipt);
+        }
+    }
+    receipts.into_values().collect()
 }
 
 fn creds_from(s: &SavedDevice) -> CredentialSet {
@@ -995,6 +1125,7 @@ mod tests {
             topology: Mutex::new(Topology::empty()),
             saved: Mutex::new(BTreeMap::new()),
             discovery_scopes: Mutex::new(BTreeMap::new()),
+            allocations: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -1017,6 +1148,39 @@ mod tests {
         assert!(validate_annotation(None, None).is_err());
         assert!(validate_annotation(Some(""), None).is_err());
         assert!(validate_annotation(None, Some("IP Camera")).is_err());
+    }
+
+    #[test]
+    fn imports_only_unscoped_observed_allocations() {
+        let mut topology = Topology::empty();
+        topology.segments.insert(
+            "192.168.30.0/24".into(),
+            Segment {
+                id: "192.168.30.0/24".into(),
+                subnet: Some(("192.168.30.0".parse().unwrap(), 24)),
+                gw: Some("192.168.30.1".parse().unwrap()),
+                ..Segment::default()
+            },
+        );
+        topology.segments.insert(
+            "vlan:30".into(),
+            Segment {
+                id: "vlan:30".into(),
+                vlan: Some(mycelium_core::VlanId(30)),
+                ..Segment::default()
+            },
+        );
+        topology.segments.insert(
+            "pris/172.17.0.0/16".into(),
+            Segment {
+                id: "pris/172.17.0.0/16".into(),
+                subnet: Some(("172.17.0.0".parse().unwrap(), 16)),
+                ..Segment::default()
+            },
+        );
+        let receipts = import_allocation_receipts(&topology, "home");
+        assert_eq!(receipts.len(), 2);
+        assert!(receipts.iter().all(|receipt| receipt.site == "home"));
     }
 
     #[tokio::test]

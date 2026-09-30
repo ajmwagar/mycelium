@@ -56,6 +56,10 @@ pub fn discovery_path() -> PathBuf {
     home_dir().join("discovery.json")
 }
 
+pub fn allocations_path() -> PathBuf {
+    home_dir().join("allocations.json")
+}
+
 pub fn plugins_dir() -> PathBuf {
     home_dir().join("plugins")
 }

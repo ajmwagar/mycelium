@@ -61,6 +61,14 @@ pub enum Request {
         #[serde(default)]
         dry_run: bool,
     },
+    AllocationList,
+    AllocationImport {
+        site: String,
+        #[serde(default)]
+        write: bool,
+        #[serde(default)]
+        dry_run: bool,
+    },
     /// Set durable human knowledge on exactly one discovered node.
     TopologyAnnotate {
         selector: String,

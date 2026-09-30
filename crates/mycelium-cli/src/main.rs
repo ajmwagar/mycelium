@@ -6,8 +6,8 @@
 //! applying it.
 
 use mycelium_core::{
-    ActionPlan, ActionRisk, BootReachability, DiscoveryProtocol, NbdePlan, Topology,
-    ID_SWITCH_OBSERVE,
+    ActionPlan, ActionRisk, AllocationReceipt, BootReachability, DiscoveryProtocol, NbdePlan,
+    Topology, ID_SWITCH_OBSERVE,
 };
 use mycelium_driver_netgear_fastpath::{FastpathConfig, FastpathIntent, SnmpSwitchState};
 use myceliumd::client::{Client, ClientError};
@@ -71,6 +71,8 @@ usage:
   mycelium discovery scopes [--json]
   mycelium discovery scope set <observer> --protocol ssdp|mdns --segment ID... --write [--dry-run]
   mycelium discovery scope remove <observer> --write [--dry-run]
+  mycelium allocations list [--json]
+  mycelium allocations import --site SITE --write [--dry-run] [--json]
   mycelium map [--json]
   mycelium annotate <node> [--name NAME] [--kind KIND] --write [--dry-run]
   mycelium boot-path <device> --target <IP-or-URL>... [--json]
@@ -104,6 +106,7 @@ struct Flags {
     desired: Option<String>,
     protocols: Vec<String>,
     segments: Vec<String>,
+    site: Option<String>,
     rest: Vec<String>,
 }
 
@@ -127,6 +130,7 @@ fn parse_flags(args: &[String]) -> Flags {
         desired: None,
         protocols: Vec::new(),
         segments: Vec::new(),
+        site: None,
         rest: Vec::new(),
     };
     let mut i = 0;
@@ -208,6 +212,10 @@ fn parse_flags(args: &[String]) -> Flags {
                 if let Some(segment) = args.get(i) {
                     f.segments.push(segment.clone());
                 }
+            }
+            "--site" => {
+                i += 1;
+                f.site = args.get(i).cloned();
             }
             other => f.rest.push(other.to_owned()),
         }
@@ -313,6 +321,7 @@ async fn run(cmd: &str, args: &[String]) -> Result<Vec<String>, ClientError> {
             Ok(render_topology(&topo))
         }
         "discovery" => discovery(args).await,
+        "allocations" => allocations(args).await,
         "annotate" => {
             let f = parse_flags(args);
             let selector = f
@@ -581,6 +590,55 @@ async fn discovery(args: &[String]) -> Result<Vec<String>, ClientError> {
             }
         }
         _ => Err(err_usage("usage: mycelium discovery scopes|scope ...")),
+    }
+}
+
+async fn allocations(args: &[String]) -> Result<Vec<String>, ClientError> {
+    let flags = parse_flags(&args[1..]);
+    match args.first().map(String::as_str) {
+        Some("list") => {
+            let mut client = connect().await?;
+            let value = client.call(&Request::AllocationList).await?;
+            if flags.json {
+                return Ok(vec![value.to_string()]);
+            }
+            let receipts: Vec<AllocationReceipt> = serde_json::from_value(value)
+                .map_err(|error| err_usage(&format!("bad allocation receipts: {error}")))?;
+            let mut output = vec![format!("allocations: {}", receipts.len())];
+            for receipt in receipts {
+                output.push(format!(
+                    "  {} {} {} generation={}",
+                    receipt.identity,
+                    receipt.resource,
+                    receipt.allocation.canonical(),
+                    receipt.generation
+                ));
+            }
+            Ok(output)
+        }
+        Some("import") => {
+            let site = flags
+                .site
+                .ok_or(err_usage("allocations import needs --site SITE"))?;
+            let mut client = connect().await?;
+            let value = client
+                .call(&Request::AllocationImport {
+                    site,
+                    write: flags.write,
+                    dry_run: flags.dry_run,
+                })
+                .await?;
+            if flags.json || flags.dry_run {
+                Ok(vec![value.to_string()])
+            } else {
+                Ok(vec![format!(
+                    "imported {} allocation receipt(s) for {}",
+                    value["imported"].as_u64().unwrap_or(0),
+                    value["site"].as_str().unwrap_or("?")
+                )])
+            }
+        }
+        _ => Err(err_usage("usage: mycelium allocations list|import ...")),
     }
 }
 
