@@ -7,7 +7,7 @@ use mycelium_core::{
     CapResult, CapSpec, CredentialSet, Device, DeviceId, DeviceKind, DeviceMeta, Driver,
     ExecContext, Inventory, LinkState, MyceliumError, Observation, Origin, Params, PortRef, Result,
     Segment, SegmentKind, ServiceRecord, ServiceState, Target, Value, ID_IDENTIFY,
-    ID_NET_FORWARD_ENSURE, ID_NET_VIP_ENSURE,
+    ID_NET_FORWARD_ENSURE, ID_NET_VIP_ENSURE, ID_SYSTEM_HEALTH,
 };
 use mycelium_driver_edgeos::SshSession;
 use mycelium_network_types::{Ipv4Prefix, PortForward, TransportProtocol};
@@ -21,6 +21,28 @@ use mycelium_tailscale::{parse_control_plane, parse_status, topology_observation
 
 pub const DRIVER_NAME: &str = "linux";
 const OBSERVE_COMMAND: &str = "printf '__MYCELIUM_LINKS__\\n'; ip -o link show; printf '__MYCELIUM_LINK_META__\\n'; for p in /sys/class/net/*; do n=${p##*/}; if [ \"$n\" = lo ]; then m=loopback; elif [ -d \"$p/wireless\" ]; then m=wifi; elif [ -e \"$p/device\" ]; then m=ethernet; else m=virtual; fi; printf '%s\\t%s\\t%s\\t%s\\n' \"$n\" \"$m\" \"$(cat \"$p/speed\" 2>/dev/null || true)\" \"$(cat \"$p/duplex\" 2>/dev/null || true)\"; done; printf '__MYCELIUM_ADDRS__\\n'; ip -o -4 addr show scope global; printf '__MYCELIUM_NEIGH__\\n'; ip neigh show; printf '__MYCELIUM_ROUTES__\\n'; ip -4 route show proto kernel scope link; printf '__MYCELIUM_SERVICES__\\n'; ss -H -lntup; printf '__MYCELIUM_TAILSCALE__\\n'; tailscale status --json 2>/dev/null || true; printf '\\n__MYCELIUM_TAILSCALE_PREFS__\\n'; tailscale debug prefs 2>/dev/null || true; printf '\\n__MYCELIUM_MDNS__\\n'; command -v avahi-browse >/dev/null 2>&1 && avahi-browse --all --resolve --parsable --terminate 2>/dev/null || true; printf '\\n__MYCELIUM_SSDP__\\n'; if command -v nc >/dev/null 2>&1; then ip -o -4 route show proto kernel scope link | awk '{ dev=\"\"; src=\"\"; for (i=1; i<=NF; i++) { if ($i == \"dev\") dev=$(i+1); if ($i == \"src\") src=$(i+1) } if (dev != \"\" && src != \"\") print dev, src }' | sort -u | while read -r iface addr; do case \"$iface\" in lo|docker*|br-*|veth*|tailscale*|sh-*|sv*) continue ;; esac; printf '__MYCELIUM_SSDP_PROBE__\\t%s\\t%s\\n' \"$iface\" \"$addr\"; printf 'M-SEARCH * HTTP/1.1\\r\\nHOST: 239.255.255.250:1900\\r\\nMAN: \"ssdp:discover\"\\r\\nMX: 2\\r\\nST: ssdp:all\\r\\n\\r\\n' | nc -4 -u -s \"$addr\" -w 3 239.255.255.250 1900 2>/dev/null || true; done; fi";
+const HEALTH_COMMAND: &str = "printf '__UPTIME__\\n'; cat /proc/uptime; printf '__LOAD__\\n'; cat /proc/loadavg; printf '__MEMORY__\\n'; awk '/^(MemTotal|MemAvailable|SwapTotal|SwapFree):/ {print $1, $2}' /proc/meminfo; printf '__DISK__\\n'; df -P -B1 / | tail -n 1; printf '__PRESSURE__\\n'; for p in cpu memory io; do [ -r /proc/pressure/$p ] && { printf '%s ' \"$p\"; tr '\\n' ' ' </proc/pressure/$p; printf '\\n'; }; done; printf '__SOCKETS__\\n'; ss -s; printf '__SSH__\\n'; ss -Htan 2>/dev/null | awk '$4 ~ /:22$/ {count[$1]++} END {for (state in count) print state, count[state]}'; printf '__PROCESSES__\\n'; ps -eo pid=,ppid=,stat=,pcpu=,pmem=,comm= --sort=-pcpu | head -n 10";
+
+fn parse_health(text: &str) -> Result<Value> {
+    const SECTIONS: [&str; 8] = [
+        "UPTIME", "LOAD", "MEMORY", "DISK", "PRESSURE", "SOCKETS", "SSH", "PROCESSES",
+    ];
+    let mut output = Params::new();
+    for (index, name) in SECTIONS.iter().enumerate() {
+        let marker = format!("__{name}__\n");
+        let start = text
+            .find(&marker)
+            .ok_or_else(|| MyceliumError::Parse(format!("missing health marker {marker:?}")))?
+            + marker.len();
+        let end = SECTIONS
+            .get(index + 1)
+            .and_then(|next| text[start..].find(&format!("__{next}__\n")))
+            .map(|offset| start + offset)
+            .unwrap_or(text.len());
+        output.insert(name.to_ascii_lowercase(), Value::Str(text[start..end].trim().into()));
+    }
+    Ok(Value::Map(output))
+}
 
 pub struct LinuxDriver {
     timeout: Duration,
@@ -216,6 +238,12 @@ impl Device for LinuxDevice {
                 CapSpec::readonly("Linux SSH vantage-point identity"),
             ),
             (
+                ID_SYSTEM_HEALTH.into(),
+                CapSpec::readonly(
+                    "load, memory, disk, pressure, sockets, SSH sessions, and process leaders",
+                ),
+            ),
+            (
                 ID_NET_VIP_ENSURE.into(),
                 CapSpec::mutation("ensure an IPv4 address is present on a Linux interface")
                     .param(
@@ -259,6 +287,16 @@ impl Device for LinuxDevice {
                         .unwrap_or(Value::Null),
                 ),
             ])))),
+            ID_SYSTEM_HEALTH => {
+                let result = self.session.exec(HEALTH_COMMAND).await?;
+                if !result.success() {
+                    return Err(MyceliumError::Device {
+                        exit_code: result.exit_code,
+                        stderr: result.stderr,
+                    });
+                }
+                Ok(CapResult::ok(parse_health(&result.stdout)?))
+            }
             ID_NET_VIP_ENSURE => {
                 let (prefix, interface, command) = vip_command(&params)?;
                 let output = Value::Map(Params::from_iter([
@@ -556,5 +594,20 @@ mod tests {
         assert_eq!(rule.listen_address, [192, 0, 2, 10]);
         assert_eq!(rule.target_address, [10, 0, 0, 20]);
         assert_eq!(rule.target_port, 443);
+    }
+
+    #[test]
+    fn health_snapshot_requires_and_names_every_section() {
+        let value = parse_health(
+            "__UPTIME__\n12.0 3.0\n__LOAD__\n1.0 2.0 3.0 1/2 3\n__MEMORY__\nMemTotal: 10\n__DISK__\n/dev/a 10 2 8 20% /\n__PRESSURE__\ncpu some avg10=0.00\n__SOCKETS__\nTCP: 2\n__SSH__\nESTAB 1\n__PROCESSES__\n1 0 S 1.0 2.0 init\n",
+        )
+        .unwrap();
+        let map = match value {
+            Value::Map(map) => map,
+            other => panic!("expected map, got {other:?}"),
+        };
+        assert_eq!(map.len(), 8);
+        assert_eq!(map["ssh"].as_str(), Some("ESTAB 1"));
+        assert!(parse_health("__UPTIME__\n1").is_err());
     }
 }

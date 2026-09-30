@@ -18,6 +18,7 @@ use crate::value::{IntoValue, Params, Value};
 
 pub const ID_IDENTIFY: &str = "system.identify";
 pub const ID_CAPABILITIES: &str = "system.capabilities";
+pub const ID_SYSTEM_HEALTH: &str = "system.health";
 pub const ID_VLAN_LIST: &str = "vlan.list";
 pub const ID_VLAN_CREATE: &str = "vlan.create";
 pub const ID_VLAN_ASSIGN: &str = "vlan.assign";
