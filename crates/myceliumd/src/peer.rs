@@ -34,6 +34,19 @@ pub struct PeerView {
     pub last_seen: u64,
 }
 
+#[derive(Debug, Deserialize)]
+struct ReleaseSetFile {
+    version: String,
+    channel: String,
+    artifacts: Vec<ReleaseSetArtifact>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReleaseSetArtifact {
+    target: String,
+    binary: String,
+}
+
 pub struct Mesh {
     key: SigningKey,
     hello: PeerHello,
@@ -241,6 +254,73 @@ impl Mesh {
         }
         self.publish_release(release.clone()).await?;
         Ok(release)
+    }
+
+    pub async fn publish_artifact_set(
+        &self,
+        manifest: &Path,
+        signing_key: &Path,
+    ) -> Result<Vec<ReleaseManifest>, AnyError> {
+        let definition: ReleaseSetFile = serde_json::from_slice(&std::fs::read(manifest)?)?;
+        validate_release_label("version", &definition.version)?;
+        validate_release_label("channel", &definition.channel)?;
+        if definition.artifacts.is_empty() {
+            return Err("release set must contain at least one artifact".into());
+        }
+        let key_bytes = std::fs::read(signing_key)?;
+        let key = SigningKey::from_bytes(
+            key_bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| "release signing key must be exactly 32 bytes")?,
+        );
+        let base = manifest.parent().unwrap_or_else(|| Path::new("."));
+        let mut targets = BTreeSet::new();
+        let mut prepared = Vec::with_capacity(definition.artifacts.len());
+        for artifact in definition.artifacts {
+            validate_release_label("target", &artifact.target)?;
+            if !targets.insert(artifact.target.clone()) {
+                return Err(format!("duplicate release target `{}`", artifact.target).into());
+            }
+            let path = {
+                let path = Path::new(&artifact.binary);
+                if path.is_absolute() {
+                    path.to_owned()
+                } else {
+                    base.join(path)
+                }
+            };
+            let bytes = std::fs::read(&path)
+                .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+            let release = ReleaseManifest::sign(
+                &key,
+                definition.version.clone(),
+                definition.channel.clone(),
+                artifact.target,
+                &bytes,
+            )?;
+            prepared.push((release, bytes));
+        }
+
+        // No release becomes visible until every input has been read, validated,
+        // hashed, and signed successfully.
+        std::fs::create_dir_all(crate::artifacts_dir())?;
+        for (release, bytes) in &prepared {
+            let final_path = artifact_path(&release.artifact_digest)?;
+            if !final_path.is_file() {
+                let temp = final_path.with_extension(format!("tmp-{}", std::process::id()));
+                std::fs::write(&temp, bytes)?;
+                std::fs::rename(temp, final_path)?;
+            }
+        }
+        let releases = prepared
+            .into_iter()
+            .map(|(release, _)| release)
+            .collect::<Vec<_>>();
+        for release in &releases {
+            self.publish_release(release.clone()).await?;
+        }
+        Ok(releases)
     }
 
     pub fn generate_release_key(path: &Path) -> Result<String, AnyError> {

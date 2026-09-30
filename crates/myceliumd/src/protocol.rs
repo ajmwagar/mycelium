@@ -104,6 +104,14 @@ pub enum Request {
         #[serde(default)]
         dry_run: bool,
     },
+    ReleasePublishSet {
+        manifest: String,
+        signing_key: String,
+        #[serde(default)]
+        write: bool,
+        #[serde(default)]
+        dry_run: bool,
+    },
     /// Set durable human knowledge on exactly one discovered node.
     TopologyAnnotate {
         selector: String,

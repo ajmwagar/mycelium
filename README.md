@@ -126,6 +126,27 @@ code. Peers fetch verified artifacts from one another, and `mycelium update
 apply --write` retains and automatically restores the prior executable if the
 new daemon fails its health check.
 
+Compilation belongs to the external build pipeline (for example Fab). The
+pipeline hands Mycelium a JSON release-set manifest whose relative binary paths
+are resolved from the manifest's directory:
+
+```json
+{
+  "version": "0.1.1",
+  "channel": "canary",
+  "artifacts": [
+    { "target": "aarch64-apple-darwin", "binary": "dist/mycelium-darwin-arm64" },
+    { "target": "aarch64-unknown-linux-gnu", "binary": "dist/mycelium-linux-arm64" },
+    { "target": "x86_64-unknown-linux-musl", "binary": "dist/mycelium-linux-x86_64" }
+  ]
+}
+```
+
+`mycelium releases publish-set --manifest release-set.json --signing-key
+release.key --write` validates, hashes, and signs every artifact before
+publishing any target. Peers may cache and relay every artifact, while update
+selection remains target-specific.
+
 The TLS CA authorizes direct peers. Signed observation envelopes preserve
 their originating node identity when relayed, use monotonic sequence numbers,
 and deterministically retain the newest event per origin. Back up `peer.key`:

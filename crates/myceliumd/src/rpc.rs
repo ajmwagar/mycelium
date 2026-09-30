@@ -757,6 +757,35 @@ impl Daemon {
                     .map_err(|error| MyceliumError::Validation(error.to_string()))?;
                 to_value(release).map_err(json_err)
             }
+            Request::ReleasePublishSet {
+                manifest,
+                signing_key,
+                write,
+                dry_run,
+            } => {
+                if dry_run {
+                    return to_value(serde_json::json!({
+                        "dry_run": true,
+                        "manifest": manifest,
+                        "signing_key": signing_key,
+                    }))
+                    .map_err(json_err);
+                }
+                if !write {
+                    return Err(MyceliumError::WritesNotPermitted(
+                        "release-set publication requires --write".into(),
+                    ));
+                }
+                let releases = self
+                    .mesh
+                    .publish_artifact_set(
+                        std::path::Path::new(&manifest),
+                        std::path::Path::new(&signing_key),
+                    )
+                    .await
+                    .map_err(|error| MyceliumError::Validation(error.to_string()))?;
+                to_value(releases).map_err(json_err)
+            }
             Request::TopologyAnnotate {
                 selector,
                 name,
