@@ -401,10 +401,13 @@ fn switch_state_value(
                 let Some(ifindex) = bridge_to_ifindex.get(bridge_port) else {
                     continue;
                 };
-                let Some(name) = ifaces.get(ifindex).map(|row| row.0.as_str()) else {
+                let Some(name) = ifaces
+                    .get(ifindex)
+                    .map(|row| fastpath_interface_name(&row.0))
+                else {
                     continue;
                 };
-                let Some(Value::Map(interface)) = interfaces.get_mut(name) else {
+                let Some(Value::Map(interface)) = interfaces.get_mut(&name) else {
                     continue;
                 };
                 push_int(interface, "included_vlans", *vlan as i64);
@@ -922,7 +925,11 @@ mod tests {
         };
         let ifaces = BTreeMap::from_iter([(
             7,
-            ("1/g7".into(), Some("00:11:22:33:44:55".into()), Some(1)),
+            (
+                "unit 1 port 7 Gigabit - Level".into(),
+                Some("00:11:22:33:44:55".into()),
+                Some(1),
+            ),
         )]);
         let value = switch_state_value(
             Some("GS728TS".into()),
