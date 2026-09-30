@@ -1,0 +1,13 @@
+[package]
+name = "mycelium-network-types"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Bounded no_std network semantics shared by Mycelium hosts and firmware"
+
+[features]
+default = []
+serde = ["dep:serde"]
+
+[dependencies]
+serde = { version = "1", default-features = false, features = ["derive"], optional = true }

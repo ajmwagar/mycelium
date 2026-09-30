@@ -10,6 +10,7 @@ repository = "https://github.com/ajmwagar/mycelium"
 
 [workspace.dependencies]
 mycelium-core = { path = "crates/mycelium-core" }
+mycelium-network-types = { path = "crates/mycelium-network-types" }
 mycelium-driver-edgeos = { path = "crates/mycelium-driver-edgeos" }
 mycelium-driver-redfish = { path = "crates/mycelium-driver-redfish" }
 mycelium-driver-linux = { path = "crates/mycelium-driver-linux" }

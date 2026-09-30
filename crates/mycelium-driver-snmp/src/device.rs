@@ -8,6 +8,9 @@ use mycelium_core::{
     MacAddress, MyceliumError, Observation, Origin, ParamType, Params, PortRef, Result, Value,
     ID_IDENTIFY, ID_SWITCH_OBSERVE,
 };
+use mycelium_network_types::{
+    ObservationCoverage, PortId, VlanId as SemanticVlanId, VlanMembership, VlanTagging,
+};
 
 use crate::client::SnmpHandle;
 
@@ -344,11 +347,11 @@ fn switch_state_value(
     let vlans = vlan_rows
         .into_iter()
         .filter_map(|(oid, value)| {
-            let id = u16::try_from(row_index(&oid)).ok()?;
+            let id = SemanticVlanId::new(u16::try_from(row_index(&oid)).ok()?)?;
             Some((
-                id.to_string(),
+                id.get().to_string(),
                 Value::Map(Params::from_iter([
-                    ("id".into(), Value::Int(id as i64)),
+                    ("id".into(), Value::Int(id.get() as i64)),
                     (
                         "name".into(),
                         value
@@ -375,6 +378,7 @@ fn switch_state_value(
             Some((
                 name.clone(),
                 Value::Map(Params::from_iter([
+                    ("port_id".into(), Value::Int(*ifindex as i64)),
                     ("name".into(), Value::Str(name)),
                     ("pvid".into(), Value::Int(pvid)),
                 ])),
@@ -410,16 +414,38 @@ fn switch_state_value(
                 let Some(Value::Map(interface)) = interfaces.get_mut(&name) else {
                     continue;
                 };
-                push_int(interface, "included_vlans", *vlan as i64);
-                if !untagged_ports.contains(bridge_port) {
-                    push_int(interface, "tagged_vlans", *vlan as i64);
+                let membership = VlanMembership {
+                    port: PortId(*ifindex),
+                    vlan: SemanticVlanId::new(*vlan).expect("Q-BRIDGE VLAN keys were validated"),
+                    tagging: if untagged_ports.contains(bridge_port) {
+                        VlanTagging::Untagged
+                    } else {
+                        VlanTagging::Tagged
+                    },
+                };
+                push_int(interface, "included_vlans", membership.vlan.get() as i64);
+                if membership.tagging == VlanTagging::Tagged {
+                    push_int(interface, "tagged_vlans", membership.vlan.get() as i64);
                 }
             }
         }
     }
 
+    let mut coverage = ObservationCoverage::empty();
+    for (present, capability) in [
+        (vlan_inventory_covered, ObservationCoverage::VLAN_INVENTORY),
+        (vlan_inventory_covered, ObservationCoverage::VLAN_NAMES),
+        (interface_pvids_covered, ObservationCoverage::PORT_PVIDS),
+        (membership_covered, ObservationCoverage::VLAN_MEMBERSHIP),
+    ] {
+        if present {
+            coverage = coverage.with(capability);
+        }
+    }
+
     Value::Map(Params::from_iter([
         ("schema_version".into(), Value::Int(1)),
+        ("coverage_bits".into(), Value::Int(coverage.bits() as i64)),
         (
             "model_family".into(),
             model

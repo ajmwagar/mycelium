@@ -9,6 +9,7 @@ use mycelium_core::{
     ActionPlan, ActionRisk, Params, PlanBlocker, PlannedAction, Value, VerificationPredicate,
     VerificationSpec, ID_SWITCH_OBSERVE, ID_VLAN_ASSIGN, ID_VLAN_CREATE,
 };
+use mycelium_network_types::{ObservationCoverage, PortId};
 use serde::{Deserialize, Serialize};
 
 use crate::FastpathIntent;
@@ -26,6 +27,28 @@ pub struct SnmpCoverage {
     pub lag_membership: bool,
 }
 
+impl SnmpCoverage {
+    pub fn semantic(&self) -> ObservationCoverage {
+        let mut coverage = ObservationCoverage::empty();
+        for (present, capability) in [
+            (self.vlan_inventory, ObservationCoverage::VLAN_INVENTORY),
+            (self.vlan_names, ObservationCoverage::VLAN_NAMES),
+            (self.interface_pvids, ObservationCoverage::PORT_PVIDS),
+            (
+                self.interface_membership,
+                ObservationCoverage::VLAN_MEMBERSHIP,
+            ),
+            (self.management_vlan, ObservationCoverage::MANAGEMENT_VLAN),
+            (self.lag_membership, ObservationCoverage::LAG_MEMBERSHIP),
+        ] {
+            if present {
+                coverage = coverage.with(capability);
+            }
+        }
+        coverage
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SnmpVlanState {
     pub id: u16,
@@ -34,6 +57,8 @@ pub struct SnmpVlanState {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SnmpInterfaceState {
+    #[serde(default)]
+    pub port_id: PortId,
     pub name: String,
     pub pvid: Option<u16>,
     #[serde(default)]
@@ -57,6 +82,7 @@ pub struct SnmpSwitchState {
 impl SnmpSwitchState {
     pub fn plan(&self, device: &str, desired: &FastpathIntent) -> ActionPlan {
         let mut plan = ActionPlan::new(format!("device:{device}"));
+        let coverage = self.coverage.semantic();
 
         if !model_families_match(
             desired.model_family.as_deref(),
@@ -82,10 +108,10 @@ impl SnmpSwitchState {
             ));
         }
 
-        if self.coverage.vlan_inventory {
+        if coverage.contains(ObservationCoverage::VLAN_INVENTORY) {
             for (id, desired_vlan) in &desired.vlans {
                 let observed = self.vlans.get(id);
-                let name_differs = self.coverage.vlan_names
+                let name_differs = coverage.contains(ObservationCoverage::VLAN_NAMES)
                     && observed.and_then(|vlan| vlan.name.as_ref()) != desired_vlan.name.as_ref();
                 if observed.is_none() {
                     let mut params = Params::from_iter([("id".into(), Value::Int(*id as i64))]);
@@ -120,7 +146,7 @@ impl SnmpSwitchState {
 
         for (name, desired_interface) in &desired.interfaces {
             if let Some(pvid) = desired_interface.pvid {
-                if self.coverage.interface_pvids {
+                if coverage.contains(ObservationCoverage::PORT_PVIDS) {
                     let observed = self.interfaces.get(name).and_then(|state| state.pvid);
                     if observed != Some(pvid) {
                         plan.actions.push(action(
@@ -143,7 +169,7 @@ impl SnmpSwitchState {
                     ));
                 }
             }
-            if self.coverage.interface_membership {
+            if coverage.contains(ObservationCoverage::VLAN_MEMBERSHIP) {
                 if let Some(observed) = self.interfaces.get(name) {
                     for vlan in desired_interface
                         .included_vlans
@@ -191,7 +217,9 @@ impl SnmpSwitchState {
             }
         }
 
-        if desired.management_vlan.is_some() && !self.coverage.management_vlan {
+        if desired.management_vlan.is_some()
+            && !coverage.contains(ObservationCoverage::MANAGEMENT_VLAN)
+        {
             plan.blockers.push(blocker(
                 "management_vlan_unobserved",
                 "the standard Q-BRIDGE snapshot cannot prove the management VLAN".into(),
