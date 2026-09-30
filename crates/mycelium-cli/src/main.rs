@@ -5,7 +5,10 @@
 //! explicit `--write`, and `--dry-run` always shows the plan instead of
 //! applying it.
 
-use mycelium_core::{BootReachability, NbdePlan, Topology};
+use mycelium_core::{
+    ActionPlan, ActionRisk, BootReachability, NbdePlan, Topology, ID_SWITCH_OBSERVE,
+};
+use mycelium_driver_netgear_fastpath::{FastpathConfig, FastpathIntent, SnmpSwitchState};
 use myceliumd::client::{Client, ClientError};
 use myceliumd::protocol::Request;
 
@@ -61,6 +64,7 @@ usage:
   mycelium devices [--json]
   mycelium describe <id> [--json]
   mycelium call <id> <capability> [--param k=v ...] [--write] [--dry-run]
+  mycelium plan switch <id> --desired <startup-config> [--json]
   mycelium scan
   mycelium topology [--json]
   mycelium map [--json]
@@ -93,6 +97,7 @@ struct Flags {
     local_port: Option<u16>,
     name: Option<String>,
     kind: Option<String>,
+    desired: Option<String>,
     rest: Vec<String>,
 }
 
@@ -113,6 +118,7 @@ fn parse_flags(args: &[String]) -> Flags {
         local_port: None,
         name: None,
         kind: None,
+        desired: None,
         rest: Vec::new(),
     };
     let mut i = 0;
@@ -178,6 +184,10 @@ fn parse_flags(args: &[String]) -> Flags {
             "--kind" => {
                 i += 1;
                 f.kind = args.get(i).cloned();
+            }
+            "--desired" => {
+                i += 1;
+                f.desired = args.get(i).cloned();
             }
             other => f.rest.push(other.to_owned()),
         }
@@ -261,6 +271,7 @@ async fn run(cmd: &str, args: &[String]) -> Result<Vec<String>, ClientError> {
                 .await?;
             Ok(render_call(&v))
         }
+        "plan" => plan(args).await,
         "scan" => {
             let f = parse_flags(args);
             let mut c = connect().await?;
@@ -505,6 +516,48 @@ async fn nbde(args: &[String]) -> Result<Vec<String>, ClientError> {
         ])
     } else {
         Ok(render_nbde_plan(&plan))
+    }
+}
+
+async fn plan(args: &[String]) -> Result<Vec<String>, ClientError> {
+    let flags = parse_flags(args);
+    if flags.rest.first().map(String::as_str) != Some("switch") {
+        return Err(err_usage(
+            "usage: mycelium plan switch <id> --desired <startup-config> [--json]",
+        ));
+    }
+    let device = flags
+        .rest
+        .get(1)
+        .ok_or(err_usage("plan switch needs a device id"))?;
+    let desired_path = flags
+        .desired
+        .ok_or(err_usage("plan switch needs --desired <startup-config>"))?;
+    let source = std::fs::read_to_string(&desired_path)?;
+    let config = FastpathConfig::parse(&source)
+        .map_err(|error| err_usage(&format!("cannot parse {desired_path}: {error}")))?;
+    let desired = FastpathIntent::normalize(&config)
+        .map_err(|error| err_usage(&format!("cannot normalize {desired_path}: {error}")))?;
+
+    let mut client = connect().await?;
+    let response = client
+        .call(&Request::DeviceCall {
+            id: device.clone(),
+            capability: ID_SWITCH_OBSERVE.into(),
+            params: serde_json::Map::new(),
+            write: false,
+            dry_run: false,
+        })
+        .await?;
+    let observed: SnmpSwitchState = serde_json::from_value(response["result"]["output"].clone())
+        .map_err(|error| err_usage(&format!("invalid switch observation: {error}")))?;
+    let plan = observed.plan(device, &desired);
+    if flags.json {
+        Ok(vec![serde_json::to_string(&plan).map_err(|error| {
+            err_usage(&format!("cannot serialize plan: {error}"))
+        })?])
+    } else {
+        Ok(render_switch_plan(&plan))
     }
 }
 
@@ -940,6 +993,50 @@ fn render_nbde_plan(plan: &NbdePlan) -> Vec<String> {
         out.push(format!("warning: {warning}"));
     }
     out
+}
+
+fn render_switch_plan(plan: &ActionPlan) -> Vec<String> {
+    let status = if plan.ready_to_apply() {
+        "READY"
+    } else {
+        "BLOCKED"
+    };
+    let mut lines = vec![format!(
+        "switch plan {}: {status} — {} action(s), {} blocker(s)",
+        plan.scope,
+        plan.actions.len(),
+        plan.blockers.len()
+    )];
+    for (index, action) in plan.actions.iter().enumerate() {
+        let risk = match action.risk {
+            ActionRisk::Low => "low",
+            ActionRisk::Disruptive => "disruptive",
+            ActionRisk::Destructive => "destructive",
+        };
+        lines.push(format!(
+            "  {}. [{}] {} {}",
+            index + 1,
+            risk,
+            action.capability,
+            serde_json::to_string(&action.params).unwrap_or_else(|_| "{}".into())
+        ));
+        lines.push(format!(
+            "     verify with {}",
+            action.verification.capability
+        ));
+    }
+    for blocker in &plan.blockers {
+        let resource = blocker
+            .resource
+            .as_deref()
+            .map(|resource| format!(" ({resource})"))
+            .unwrap_or_default();
+        lines.push(format!(
+            "  BLOCKED {}{resource}: {}",
+            blocker.code, blocker.message
+        ));
+    }
+    lines
 }
 
 fn reachability_label(reachability: BootReachability) -> &'static str {
