@@ -101,6 +101,31 @@ mycelium daemon start
 mycelium peers
 ```
 
+## Peer enrollment and updates
+
+Enrollment uses one locally held CA to issue a distinct mutual-TLS identity for
+each peer. Bundles contain no CA signing key. Installation stages the peer and
+its native user-service definition, but deliberately does not start it:
+
+```sh
+mycelium enroll init --write
+mycelium enroll issue pris --site lab --address pris \
+  --target x86_64-unknown-linux-gnu --binary ./mycelium \
+  --peer neo.example:7443 --write
+
+# On pris, after transferring its bundle:
+mycelium enroll install --bundle ./pris --write
+systemctl --user daemon-reload
+systemctl --user enable --now mycelium
+```
+
+Darwin installations write `~/Library/LaunchAgents/dev.fpl.mycelium.plist`
+instead. Release manifests and artifacts are signed independently of the mesh
+CA, so transport membership does not grant permission to publish executable
+code. Peers fetch verified artifacts from one another, and `mycelium update
+apply --write` retains and automatically restores the prior executable if the
+new daemon fails its health check.
+
 The TLS CA authorizes direct peers. Signed observation envelopes preserve
 their originating node identity when relayed, use monotonic sequence numbers,
 and deterministically retain the newest event per origin. Back up `peer.key`:

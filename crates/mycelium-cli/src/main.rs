@@ -5,6 +5,8 @@
 //! explicit `--write`, and `--dry-run` always shows the plan instead of
 //! applying it.
 
+mod enroll;
+
 use mycelium_core::{
     ActionPlan, ActionRisk, AllocationReceipt, BootReachability, DiscoveryProtocol, LogicalNetwork,
     NbdePlan, NetworkDriftReport, Topology, ID_SWITCH_OBSERVE,
@@ -87,6 +89,9 @@ usage:
   mycelium releases publish --binary PATH --signing-key PATH --version VERSION --channel CHANNEL [--target TRIPLE] --write [--dry-run] [--json]
   mycelium update status [--channel CHANNEL] [--json]
   mycelium update apply [--channel CHANNEL] [--path INSTALLED-BINARY] --write
+  mycelium enroll init [--path CA-DIR] --write
+  mycelium enroll issue NAME --site SITE --address DNS-OR-IP --binary PATH --target TRIPLE [--peer HOST:PORT]... [--ca CA-DIR] [--path OUTPUT-DIR] --write
+  mycelium enroll install --bundle DIR [--path MYCELIUM-HOME] --write
   mycelium map [--json]
   mycelium annotate <node> [--name NAME] [--kind KIND] --write [--dry-run]
   mycelium boot-path <device> --target <IP-or-URL>... [--json]
@@ -125,9 +130,13 @@ struct Flags {
     subnet: Option<String>,
     path: Option<String>,
     binary: Option<String>,
+    bundle: Option<String>,
     signing_key: Option<String>,
     version: Option<String>,
     channel: Option<String>,
+    address: Option<String>,
+    ca: Option<String>,
+    peers: Vec<String>,
     rest: Vec<String>,
 }
 
@@ -156,9 +165,13 @@ fn parse_flags(args: &[String]) -> Flags {
         subnet: None,
         path: None,
         binary: None,
+        bundle: None,
         signing_key: None,
         version: None,
         channel: None,
+        address: None,
+        ca: None,
+        peers: Vec::new(),
         rest: Vec::new(),
     };
     let mut i = 0;
@@ -261,6 +274,10 @@ fn parse_flags(args: &[String]) -> Flags {
                 i += 1;
                 f.binary = args.get(i).cloned();
             }
+            "--bundle" => {
+                i += 1;
+                f.bundle = args.get(i).cloned();
+            }
             "--signing-key" => {
                 i += 1;
                 f.signing_key = args.get(i).cloned();
@@ -272,6 +289,20 @@ fn parse_flags(args: &[String]) -> Flags {
             "--channel" => {
                 i += 1;
                 f.channel = args.get(i).cloned();
+            }
+            "--address" => {
+                i += 1;
+                f.address = args.get(i).cloned();
+            }
+            "--ca" => {
+                i += 1;
+                f.ca = args.get(i).cloned();
+            }
+            "--peer" => {
+                i += 1;
+                if let Some(peer) = args.get(i) {
+                    f.peers.push(peer.clone());
+                }
             }
             other => f.rest.push(other.to_owned()),
         }
@@ -391,6 +422,7 @@ async fn run(cmd: &str, args: &[String]) -> Result<Vec<String>, ClientError> {
         }
         "releases" => releases(args).await,
         "update" => update(args).await,
+        "enroll" => enroll_command(args).await,
         "annotate" => {
             let f = parse_flags(args);
             let selector = f
@@ -454,6 +486,77 @@ async fn run(cmd: &str, args: &[String]) -> Result<Vec<String>, ClientError> {
         other => Err(err_usage(&format!(
             "unknown command `{other}` (see `mycelium`)"
         ))),
+    }
+}
+
+async fn enroll_command(args: &[String]) -> Result<Vec<String>, ClientError> {
+    let flags = parse_flags(args);
+    if !flags.write {
+        return Err(ClientError::Rpc {
+            message: "enrollment changes require --write".into(),
+            kind: "writes_not_permitted".into(),
+        });
+    }
+    let action = flags.rest.first().map(String::as_str).unwrap_or("init");
+    match action {
+        "init" => enroll::init(
+            flags
+                .path
+                .as_deref()
+                .map(std::path::Path::new)
+                .unwrap_or(&enroll::default_ca()),
+        ),
+        "issue" => {
+            let name = flags
+                .rest
+                .get(1)
+                .ok_or(err_usage("enroll issue needs NAME"))?;
+            let site = flags.site.ok_or(err_usage("enroll issue needs --site"))?;
+            let address = flags
+                .address
+                .ok_or(err_usage("enroll issue needs --address"))?;
+            let target = flags
+                .targets
+                .first()
+                .ok_or(err_usage("enroll issue needs --target"))?;
+            let binary = flags
+                .binary
+                .as_deref()
+                .ok_or(err_usage("enroll issue needs --binary"))?;
+            let output = flags
+                .path
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| myceliumd::home_dir().join("enrollments").join(name));
+            let ca = flags
+                .ca
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(enroll::default_ca);
+            enroll::issue(
+                &ca,
+                enroll::Issue {
+                    name,
+                    site: &site,
+                    address: &address,
+                    target,
+                    binary: std::path::Path::new(binary),
+                    peers: &flags.peers,
+                    output: &output,
+                },
+            )
+        }
+        "install" => {
+            let bundle = flags
+                .bundle
+                .as_deref()
+                .or_else(|| flags.rest.get(1).map(String::as_str))
+                .ok_or(err_usage("enroll install needs --bundle DIR"))?;
+            let home = flags
+                .path
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(myceliumd::home_dir);
+            enroll::install(std::path::Path::new(bundle), &home)
+        }
+        other => Err(err_usage(&format!("unknown enroll action `{other}`"))),
     }
 }
 
