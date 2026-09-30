@@ -192,9 +192,38 @@ pub struct NodeAnnotation {
     pub kind: Option<String>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MeshProtocol {
+    Tailscale,
+    #[default]
+    Unknown,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MeshCoordinator {
+    TailscaleCloud,
+    Headscale,
+    Custom,
+    #[default]
+    Unknown,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MeshControlPlane {
+    pub coordinator: MeshCoordinator,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OverlayPeerRecord {
     pub network: String,
+    #[serde(default)]
+    pub protocol: MeshProtocol,
+    #[serde(default)]
+    pub control_plane: MeshControlPlane,
     pub observer: String,
     pub online: bool,
     pub active: bool,
@@ -1013,6 +1042,11 @@ mod tests {
             hostname: "agora-one".into(),
             record: OverlayPeerRecord {
                 network: "tailscale".into(),
+                protocol: MeshProtocol::Tailscale,
+                control_plane: MeshControlPlane {
+                    coordinator: MeshCoordinator::TailscaleCloud,
+                    url: Some("https://controlplane.tailscale.com".into()),
+                },
                 observer: "linux-titan".into(),
                 online: true,
                 active: false,

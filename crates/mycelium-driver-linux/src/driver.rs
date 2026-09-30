@@ -6,20 +6,20 @@ use std::time::Duration;
 use async_trait::async_trait;
 use mycelium_core::{
     CapResult, CapSpec, CredentialSet, Device, DeviceId, DeviceKind, DeviceMeta, Driver,
-    ExecContext, Inventory, LinkState, MyceliumError, Observation, Origin, OverlayPeerRecord,
-    Params, PortRef, Result, Segment, SegmentKind, ServiceRecord, ServiceState, Target, Value,
-    ID_IDENTIFY, ID_NET_FORWARD_ENSURE, ID_NET_VIP_ENSURE,
+    ExecContext, Inventory, LinkState, MeshProtocol, MyceliumError, Observation, Origin,
+    OverlayPeerRecord, Params, PortRef, Result, Segment, SegmentKind, ServiceRecord, ServiceState,
+    Target, Value, ID_IDENTIFY, ID_NET_FORWARD_ENSURE, ID_NET_VIP_ENSURE,
 };
 use mycelium_driver_edgeos::SshSession;
 use mycelium_network_types::{Ipv4Prefix, PortForward, TransportProtocol};
 
 use crate::parsers::{
     parse_interfaces, parse_link_properties, parse_listeners, parse_neighbors, parse_routes,
-    parse_tailscale_status,
+    parse_tailscale_control_plane, parse_tailscale_status,
 };
 
 pub const DRIVER_NAME: &str = "linux";
-const OBSERVE_COMMAND: &str = "printf '__MYCELIUM_LINKS__\\n'; ip -o link show; printf '__MYCELIUM_LINK_META__\\n'; for p in /sys/class/net/*; do n=${p##*/}; if [ \"$n\" = lo ]; then m=loopback; elif [ -d \"$p/wireless\" ]; then m=wifi; elif [ -e \"$p/device\" ]; then m=ethernet; else m=virtual; fi; printf '%s\\t%s\\t%s\\t%s\\n' \"$n\" \"$m\" \"$(cat \"$p/speed\" 2>/dev/null || true)\" \"$(cat \"$p/duplex\" 2>/dev/null || true)\"; done; printf '__MYCELIUM_ADDRS__\\n'; ip -o -4 addr show scope global; printf '__MYCELIUM_NEIGH__\\n'; ip neigh show; printf '__MYCELIUM_ROUTES__\\n'; ip -4 route show proto kernel scope link; printf '__MYCELIUM_SERVICES__\\n'; ss -H -lntup; printf '__MYCELIUM_TAILSCALE__\\n'; tailscale status --json 2>/dev/null || true";
+const OBSERVE_COMMAND: &str = "printf '__MYCELIUM_LINKS__\\n'; ip -o link show; printf '__MYCELIUM_LINK_META__\\n'; for p in /sys/class/net/*; do n=${p##*/}; if [ \"$n\" = lo ]; then m=loopback; elif [ -d \"$p/wireless\" ]; then m=wifi; elif [ -e \"$p/device\" ]; then m=ethernet; else m=virtual; fi; printf '%s\\t%s\\t%s\\t%s\\n' \"$n\" \"$m\" \"$(cat \"$p/speed\" 2>/dev/null || true)\" \"$(cat \"$p/duplex\" 2>/dev/null || true)\"; done; printf '__MYCELIUM_ADDRS__\\n'; ip -o -4 addr show scope global; printf '__MYCELIUM_NEIGH__\\n'; ip neigh show; printf '__MYCELIUM_ROUTES__\\n'; ip -4 route show proto kernel scope link; printf '__MYCELIUM_SERVICES__\\n'; ss -H -lntup; printf '__MYCELIUM_TAILSCALE__\\n'; tailscale status --json 2>/dev/null || true; printf '\\n__MYCELIUM_TAILSCALE_PREFS__\\n'; tailscale debug prefs 2>/dev/null || true";
 
 pub struct LinuxDriver {
     timeout: Duration,
@@ -412,6 +412,13 @@ impl Device for LinuxDevice {
             });
         }
         let mut warnings = Vec::new();
+        let control_plane = match parse_tailscale_control_plane(sections[7]) {
+            Ok(control_plane) => control_plane,
+            Err(error) => {
+                warnings.push(format!("tailscale preferences: {error}"));
+                Default::default()
+            }
+        };
         match parse_tailscale_status(sections[6]) {
             Ok(peers) => {
                 for peer in peers {
@@ -421,6 +428,8 @@ impl Device for LinuxDevice {
                             hostname: peer.hostname.clone(),
                             record: OverlayPeerRecord {
                                 network: "tailscale".into(),
+                                protocol: MeshProtocol::Tailscale,
+                                control_plane: control_plane.clone(),
                                 observer: self.meta.id.to_string(),
                                 online: peer.online,
                                 active: peer.active,
@@ -469,7 +478,7 @@ fn service_name(port: u16, process: Option<&str>) -> String {
     }
 }
 
-fn split_sections(text: &str) -> Result<[&str; 7]> {
+fn split_sections(text: &str) -> Result<[&str; 8]> {
     let (_, after_links) = text
         .split_once("__MYCELIUM_LINKS__\n")
         .ok_or_else(|| MyceliumError::Parse("missing links marker".into()))?;
@@ -488,10 +497,22 @@ fn split_sections(text: &str) -> Result<[&str; 7]> {
     let (routes, after_services) = after_routes
         .split_once("__MYCELIUM_SERVICES__\n")
         .ok_or_else(|| MyceliumError::Parse("missing services marker".into()))?;
-    let (services, tailscale) = after_services
+    let (services, tailscale_and_prefs) = after_services
         .split_once("__MYCELIUM_TAILSCALE__\n")
         .ok_or_else(|| MyceliumError::Parse("missing tailscale marker".into()))?;
-    Ok([links, link_meta, addrs, neigh, routes, services, tailscale])
+    let (tailscale, tailscale_prefs) = tailscale_and_prefs
+        .split_once("__MYCELIUM_TAILSCALE_PREFS__\n")
+        .ok_or_else(|| MyceliumError::Parse("missing tailscale preferences marker".into()))?;
+    Ok([
+        links,
+        link_meta,
+        addrs,
+        neigh,
+        routes,
+        services,
+        tailscale,
+        tailscale_prefs,
+    ])
 }
 
 #[cfg(test)]

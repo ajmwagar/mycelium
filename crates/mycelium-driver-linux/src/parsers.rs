@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::net::IpAddr;
 
-use mycelium_core::{LinkDuplex, LinkMedium, MacAddress};
+use mycelium_core::{LinkDuplex, LinkMedium, MacAddress, MeshControlPlane, MeshCoordinator};
 use serde::Deserialize;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -72,6 +72,12 @@ struct TailscalePeerWire {
     allowed_ips: Vec<String>,
     #[serde(rename = "PrimaryRoutes", default)]
     primary_routes: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct TailscalePrefsWire {
+    #[serde(rename = "ControlURL")]
+    control_url: Option<String>,
 }
 
 pub fn parse_interfaces(links: &str, addresses: &str) -> Vec<Interface> {
@@ -259,6 +265,37 @@ pub fn parse_tailscale_status(text: &str) -> Result<Vec<TailscalePeer>, serde_js
         .collect())
 }
 
+pub fn parse_tailscale_control_plane(text: &str) -> Result<MeshControlPlane, serde_json::Error> {
+    if text.trim().is_empty() {
+        return Ok(MeshControlPlane::default());
+    }
+    let prefs: TailscalePrefsWire = serde_json::from_str(text)?;
+    let url = prefs.control_url.filter(|url| !url.trim().is_empty());
+    let coordinator = match url.as_deref() {
+        Some(url) if is_tailscale_cloud_url(url) => MeshCoordinator::TailscaleCloud,
+        Some(url) if url.to_ascii_lowercase().contains("headscale") => MeshCoordinator::Headscale,
+        Some(_) => MeshCoordinator::Custom,
+        None => MeshCoordinator::Unknown,
+    };
+    Ok(MeshControlPlane { coordinator, url })
+}
+
+fn is_tailscale_cloud_url(url: &str) -> bool {
+    let host = url
+        .split_once("://")
+        .map(|(_, authority)| authority)
+        .unwrap_or(url)
+        .split('/')
+        .next()
+        .unwrap_or_default()
+        .split(':')
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    host == "tailscale.com" || host.ends_with(".tailscale.com")
+}
+
 fn parse_cidr(text: &str) -> Option<(IpAddr, u8)> {
     let (ip, prefix) = text.split_once('/')?;
     Some((ip.parse().ok()?, prefix.parse().ok()?))
@@ -324,5 +361,26 @@ mod tests {
         assert_eq!(peers[0].ips[0].to_string(), "100.80.85.86");
         assert_eq!(peers[0].routed_lans, vec!["192.168.40.0/24"]);
         assert!(peers[0].online);
+    }
+
+    #[test]
+    fn classifies_tailscale_coordination_servers_without_guessing_custom_hosts() {
+        let cloud =
+            parse_tailscale_control_plane(r#"{"ControlURL":"https://controlplane.tailscale.com"}"#)
+                .unwrap();
+        assert_eq!(cloud.coordinator, MeshCoordinator::TailscaleCloud);
+
+        let headscale =
+            parse_tailscale_control_plane(r#"{"ControlURL":"https://headscale.fpl.dev"}"#).unwrap();
+        assert_eq!(headscale.coordinator, MeshCoordinator::Headscale);
+
+        let custom =
+            parse_tailscale_control_plane(r#"{"ControlURL":"https://mesh.fpl.dev"}"#).unwrap();
+        assert_eq!(custom.coordinator, MeshCoordinator::Custom);
+
+        let lookalike =
+            parse_tailscale_control_plane(r#"{"ControlURL":"https://notreallytailscale.com"}"#)
+                .unwrap();
+        assert_eq!(lookalike.coordinator, MeshCoordinator::Custom);
     }
 }

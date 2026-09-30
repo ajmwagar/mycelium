@@ -978,10 +978,21 @@ fn render_overlays(out: &mut Vec<String>, node: &mycelium_core::TopoNode) {
                     .join(",")
             )
         };
+        let coordinator = match overlay.control_plane.coordinator {
+            mycelium_core::MeshCoordinator::TailscaleCloud => "tailscale-cloud".to_owned(),
+            mycelium_core::MeshCoordinator::Headscale => "headscale".to_owned(),
+            mycelium_core::MeshCoordinator::Custom => overlay
+                .control_plane
+                .url
+                .clone()
+                .unwrap_or_else(|| "custom".into()),
+            mycelium_core::MeshCoordinator::Unknown => "coordinator=unknown".to_owned(),
+        };
         out.push(format!(
-            "    └─ {} via {}  {}{}  {}{}",
+            "    └─ {} via {} ({})  {}{}  {}{}",
             overlay.network,
             overlay.observer,
+            coordinator,
             state,
             if overlay.active { "/ACTIVE" } else { "" },
             path,
