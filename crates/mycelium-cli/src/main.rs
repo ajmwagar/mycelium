@@ -873,7 +873,12 @@ fn render_topology(topo: &Topology) -> Vec<String> {
 }
 
 fn render_device_links(out: &mut Vec<String>, node: &mycelium_core::TopoNode) {
-    for (name, link) in &node.ports {
+    for (name, link) in node.ports.iter().filter(|(_, link)| {
+        !matches!(
+            link.medium,
+            Some(mycelium_core::LinkMedium::Virtual | mycelium_core::LinkMedium::Loopback)
+        )
+    }) {
         let medium = link
             .medium
             .map(|medium| format!("{medium:?}").to_ascii_lowercase())
