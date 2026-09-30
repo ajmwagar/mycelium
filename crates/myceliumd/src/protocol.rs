@@ -1,4 +1,4 @@
-use mycelium_core::{MyceliumError, Value};
+use mycelium_core::{DiscoveryProtocol, MyceliumError, Value};
 use serde::{Deserialize, Serialize};
 
 /// One JSON-RPC request (newline-delimited over the socket).
@@ -44,6 +44,23 @@ pub enum Request {
     /// Pull observations from every open device and merge the topology.
     Scan,
     Topology,
+    DiscoveryScopeList,
+    DiscoveryScopeSet {
+        observer: String,
+        protocols: Vec<DiscoveryProtocol>,
+        segments: Vec<String>,
+        #[serde(default)]
+        write: bool,
+        #[serde(default)]
+        dry_run: bool,
+    },
+    DiscoveryScopeRemove {
+        observer: String,
+        #[serde(default)]
+        write: bool,
+        #[serde(default)]
+        dry_run: bool,
+    },
     /// Set durable human knowledge on exactly one discovered node.
     TopologyAnnotate {
         selector: String,

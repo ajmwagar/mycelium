@@ -14,6 +14,7 @@ pub mod boot;
 pub mod capabilities;
 pub mod credentials;
 pub mod device;
+pub mod discovery;
 pub mod driver;
 pub mod error;
 pub mod exec;
@@ -33,6 +34,7 @@ pub use capabilities::{
 };
 pub use credentials::{CredentialSet, Secret};
 pub use device::{DeviceId, DeviceKind, DeviceMeta};
+pub use discovery::{DiscoveryProtocol, DiscoveryRequest, DiscoveryScope};
 pub use driver::{Driver, Target};
 pub use error::{MyceliumError, Result};
 pub use exec::{ExecContext, ExecOutcome, RecordingTransport, Transport};

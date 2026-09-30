@@ -4,13 +4,15 @@ use std::sync::OnceLock;
 
 use async_trait::async_trait;
 use mycelium_core::{
-    CapResult, CapSpec, Device, DeviceMeta, ExecContext, IntoValue, MacAddress, MyceliumError,
-    Params, ParamType, Result, Value, VlanId,
+    CapResult, CapSpec, Device, DeviceMeta, DiscoveryProtocol, DiscoveryRequest, ExecContext,
+    IntoValue, MacAddress, MyceliumError, Observation, Origin, ParamType, Params, Result, Value,
+    VlanId,
 };
 use mycelium_core::{
     DhcpManagement, Identity, VlanManagement, ID_CAPABILITIES, ID_DHCP_ADD_STATIC_LEASE,
     ID_DHCP_LIST_POOLS, ID_IDENTIFY, ID_VLAN_ASSIGN, ID_VLAN_LIST,
 };
+use mycelium_ssdp::parse_responses as parse_ssdp_responses;
 
 use crate::parsers::{parse_show_version, EdgeConfig};
 use crate::transport::SshSession;
@@ -328,6 +330,43 @@ impl Device for EdgeOsDevice {
 
     async fn observe(&self) -> Result<(Vec<mycelium_core::Observation>, Vec<String>)> {
         self.observations_impl().await
+    }
+
+    async fn discover(&self, request: &DiscoveryRequest) -> Result<Vec<Observation>> {
+        if request.protocol != DiscoveryProtocol::Ssdp {
+            return Err(MyceliumError::Unsupported {
+                device: self.id().to_string(),
+                capability: format!("discovery.{:?}", request.protocol).to_ascii_lowercase(),
+            });
+        }
+        let command = format!(
+            "command -v nc >/dev/null 2>&1 && nc -h 2>&1 | grep -q -- '-u' || {{ echo 'UDP-capable nc unavailable' >&2; exit 127; }}; printf 'M-SEARCH * HTTP/1.1\\r\\nHOST: 239.255.255.250:1900\\r\\nMAN: \\\"ssdp:discover\\\"\\r\\nMX: 2\\r\\nST: ssdp:all\\r\\n\\r\\n' | nc -4 -u -s '{}' -w 3 239.255.255.250 1900",
+            request.source
+        );
+        let output = self.session.exec(&command).await?;
+        if !output.success() {
+            return Err(MyceliumError::Device {
+                exit_code: output.exit_code,
+                stderr: output.stderr,
+            });
+        }
+        let observed_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        Ok(parse_ssdp_responses(&output.stdout, observed_at)
+            .into_iter()
+            .map(|mut advertisement| {
+                advertisement.interface = Some(request.segment.clone());
+                Observation::ServiceAdvertisement {
+                    advertisement,
+                    origin: Origin::new(
+                        self.id().to_string(),
+                        format!("ssdp-m-search:{}", request.segment),
+                    ),
+                }
+            })
+            .collect())
     }
 
     async fn exec(&self, ctx: &ExecContext, cap: &str, params: Params) -> Result<CapResult> {

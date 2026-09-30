@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use mycelium_core::{
-    CredentialSet, DeviceId, DeviceMeta, Driver, Inventory, MyceliumError, Result, Secret, Target,
-    Topology, Transport, Value,
+    CredentialSet, DeviceId, DeviceMeta, DiscoveryRequest, DiscoveryScope, Driver, Inventory,
+    MyceliumError, Result, Secret, Target, Topology, Transport, Value,
 };
 use mycelium_driver_darwin::DarwinDriver;
 use mycelium_driver_edgeos::{EdgeOsDriver, SshSession};
@@ -36,6 +36,7 @@ pub struct Daemon {
     drivers: Vec<Arc<dyn Driver>>,
     pub topology: Mutex<Topology>,
     saved: Mutex<BTreeMap<DeviceId, SavedDevice>>,
+    discovery_scopes: Mutex<BTreeMap<String, DiscoveryScope>>,
 }
 
 /// SSH connector handed to Lua plugin drivers: vyos-family plugins reuse
@@ -108,12 +109,22 @@ impl Daemon {
             .ok()
             .and_then(|t| serde_json::from_str(&t).ok())
             .unwrap_or_else(Topology::empty);
+        let discovery_scopes = match std::fs::read_to_string(crate::discovery_path()) {
+            Ok(text) => serde_json::from_str::<Vec<DiscoveryScope>>(&text)
+                .map_err(|error| MyceliumError::Parse(format!("discovery.json: {error}")))?
+                .into_iter()
+                .map(|scope| (scope.observer.clone(), scope))
+                .collect(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
+            Err(error) => return Err(MyceliumError::Io(error)),
+        };
 
         let me = Self {
             inventory: Inventory::new(),
             drivers,
             topology: Mutex::new(topology),
             saved: Mutex::new(saved_map),
+            discovery_scopes: Mutex::new(discovery_scopes),
         };
         // Reconnect saved devices; failures are recorded but keep the entry
         // (the appliance may simply be asleep).
@@ -154,6 +165,21 @@ impl Daemon {
         std::fs::write(
             crate::topology_path(),
             serde_json::to_string_pretty(&*topo).map_err(json_err)?,
+        )?;
+        Ok(())
+    }
+
+    async fn persist_discovery(&self) -> Result<()> {
+        let scopes = self
+            .discovery_scopes
+            .lock()
+            .await
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        std::fs::write(
+            crate::discovery_path(),
+            serde_json::to_string_pretty(&scopes).map_err(json_err)?,
         )?;
         Ok(())
     }
@@ -298,6 +324,62 @@ impl Daemon {
                         Err(e) => warnings.push(format!("{}: scan failed: {e}", dev.id())),
                     }
                 }
+                let scopes = self
+                    .discovery_scopes
+                    .lock()
+                    .await
+                    .values()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let requests = {
+                    let topology = self.topology.lock().await;
+                    let mut requests = Vec::new();
+                    for scope in &scopes {
+                        for segment_id in &scope.segments {
+                            let source = topology
+                                .segments
+                                .get(segment_id)
+                                .and_then(|segment| segment.gw);
+                            for protocol in &scope.protocols {
+                                requests.push((
+                                    scope.observer.clone(),
+                                    segment_id.clone(),
+                                    *protocol,
+                                    source,
+                                ));
+                            }
+                        }
+                    }
+                    requests
+                };
+                for (observer, segment, protocol, source) in requests {
+                    let Some(source) = source else {
+                        warnings.push(format!(
+                            "{observer}: discovery {protocol:?} skipped: segment {segment} has no observed gateway/source address"
+                        ));
+                        continue;
+                    };
+                    let device = match self.inventory.get(&observer) {
+                        Ok(device) => device,
+                        Err(error) => {
+                            warnings.push(format!("{observer}: discovery skipped: {error}"));
+                            continue;
+                        }
+                    };
+                    match device
+                        .discover(&DiscoveryRequest {
+                            protocol,
+                            segment: segment.clone(),
+                            source,
+                        })
+                        .await
+                    {
+                        Ok(discovered) => observations.extend(discovered),
+                        Err(error) => warnings.push(format!(
+                            "{observer}: discovery {protocol:?} on {segment} failed: {error}"
+                        )),
+                    }
+                }
                 let report = {
                     let mut topo = self.topology.lock().await;
                     topo.observe_all(observations)
@@ -315,6 +397,84 @@ impl Daemon {
             Request::Topology => {
                 let topo = self.topology.lock().await;
                 to_value(&*topo).map_err(json_err)
+            }
+            Request::DiscoveryScopeList => {
+                let scopes = self
+                    .discovery_scopes
+                    .lock()
+                    .await
+                    .values()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                to_value(scopes).map_err(json_err)
+            }
+            Request::DiscoveryScopeSet {
+                observer,
+                protocols,
+                segments,
+                write,
+                dry_run,
+            } => {
+                if protocols.is_empty() || segments.is_empty() {
+                    return Err(MyceliumError::Validation(
+                        "discovery scope needs at least one protocol and segment".into(),
+                    ));
+                }
+                self.inventory.get(&observer)?;
+                let topology = self.topology.lock().await;
+                for segment in &segments {
+                    let observed = topology.segments.get(segment).ok_or_else(|| {
+                        MyceliumError::Validation(format!("unknown topology segment `{segment}`"))
+                    })?;
+                    if observed.gw.is_none() {
+                        return Err(MyceliumError::Validation(format!(
+                            "segment `{segment}` has no observed gateway/source address"
+                        )));
+                    }
+                }
+                drop(topology);
+                let scope = DiscoveryScope {
+                    observer: observer.clone(),
+                    protocols: protocols.into_iter().collect(),
+                    segments: segments.into_iter().collect(),
+                };
+                if dry_run {
+                    return to_value(serde_json::json!({"dry_run": true, "scope": scope}))
+                        .map_err(json_err);
+                }
+                if !write {
+                    return Err(MyceliumError::WritesNotPermitted(
+                        "discovery scope changes require --write".into(),
+                    ));
+                }
+                self.discovery_scopes
+                    .lock()
+                    .await
+                    .insert(observer, scope.clone());
+                self.persist_discovery().await?;
+                to_value(scope).map_err(json_err)
+            }
+            Request::DiscoveryScopeRemove {
+                observer,
+                write,
+                dry_run,
+            } => {
+                if dry_run {
+                    return to_value(serde_json::json!({
+                        "dry_run": true,
+                        "observer": observer
+                    }))
+                    .map_err(json_err);
+                }
+                if !write {
+                    return Err(MyceliumError::WritesNotPermitted(
+                        "discovery scope changes require --write".into(),
+                    ));
+                }
+                let removed = self.discovery_scopes.lock().await.remove(&observer);
+                self.persist_discovery().await?;
+                to_value(serde_json::json!({"removed": removed.is_some(), "observer": observer}))
+                    .map_err(json_err)
             }
             Request::TopologyAnnotate {
                 selector,
@@ -759,7 +919,9 @@ async fn handle_conn(stream: UnixStream, daemon: Arc<Daemon>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mycelium_core::{CapResult, CapSpec, DeviceKind, ExecContext, Params};
+    use mycelium_core::{
+        CapResult, CapSpec, DeviceKind, DiscoveryProtocol, ExecContext, Params, Segment,
+    };
     use std::collections::BTreeMap as StdMap;
 
     /// A fake device+driver to exercise dispatch without hardware.
@@ -832,6 +994,7 @@ mod tests {
             drivers: vec![Arc::new(FakeDriver)],
             topology: Mutex::new(Topology::empty()),
             saved: Mutex::new(BTreeMap::new()),
+            discovery_scopes: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -928,6 +1091,33 @@ mod tests {
         assert!(topo.nodes["02:00:00:00:00:99"]
             .hostnames
             .contains("fakehost"));
+
+        d.topology.lock().await.segments.insert(
+            "10.0.9.0/24".into(),
+            Segment {
+                id: "10.0.9.0/24".into(),
+                gw: Some("10.0.9.1".parse().unwrap()),
+                ..Segment::default()
+            },
+        );
+        let request = || Request::DiscoveryScopeSet {
+            observer: "fake-1".into(),
+            protocols: vec![DiscoveryProtocol::Ssdp],
+            segments: vec!["10.0.9.0/24".into()],
+            write: false,
+            dry_run: false,
+        };
+        let denied = d.dispatch(request()).await;
+        assert_eq!(denied.kind.as_deref(), Some("writes_not_permitted"));
+        let mut allowed = request();
+        if let Request::DiscoveryScopeSet { write, .. } = &mut allowed {
+            *write = true;
+        }
+        assert!(d.dispatch(allowed).await.ok);
+        let scopes = d.dispatch(Request::DiscoveryScopeList).await;
+        assert_eq!(scopes.result.unwrap().as_array().unwrap().len(), 1);
+        let saved_scope = std::fs::read_to_string(home.join("discovery.json")).unwrap();
+        assert!(saved_scope.contains("10.0.9.0/24"));
 
         // devices.json persisted with no secret literals
         let saved = std::fs::read_to_string(home.join("devices.json")).unwrap();

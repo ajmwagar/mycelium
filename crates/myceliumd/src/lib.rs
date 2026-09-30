@@ -52,6 +52,10 @@ pub fn topology_path() -> PathBuf {
     home_dir().join("topology.json")
 }
 
+pub fn discovery_path() -> PathBuf {
+    home_dir().join("discovery.json")
+}
+
 pub fn plugins_dir() -> PathBuf {
     home_dir().join("plugins")
 }

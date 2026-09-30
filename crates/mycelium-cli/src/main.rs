@@ -6,7 +6,8 @@
 //! applying it.
 
 use mycelium_core::{
-    ActionPlan, ActionRisk, BootReachability, NbdePlan, Topology, ID_SWITCH_OBSERVE,
+    ActionPlan, ActionRisk, BootReachability, DiscoveryProtocol, NbdePlan, Topology,
+    ID_SWITCH_OBSERVE,
 };
 use mycelium_driver_netgear_fastpath::{FastpathConfig, FastpathIntent, SnmpSwitchState};
 use myceliumd::client::{Client, ClientError};
@@ -67,6 +68,9 @@ usage:
   mycelium plan switch <id> --desired <startup-config> [--json]
   mycelium scan
   mycelium topology [--json]
+  mycelium discovery scopes [--json]
+  mycelium discovery scope set <observer> --protocol ssdp|mdns --segment ID... --write [--dry-run]
+  mycelium discovery scope remove <observer> --write [--dry-run]
   mycelium map [--json]
   mycelium annotate <node> [--name NAME] [--kind KIND] --write [--dry-run]
   mycelium boot-path <device> --target <IP-or-URL>... [--json]
@@ -98,6 +102,8 @@ struct Flags {
     name: Option<String>,
     kind: Option<String>,
     desired: Option<String>,
+    protocols: Vec<String>,
+    segments: Vec<String>,
     rest: Vec<String>,
 }
 
@@ -119,6 +125,8 @@ fn parse_flags(args: &[String]) -> Flags {
         name: None,
         kind: None,
         desired: None,
+        protocols: Vec::new(),
+        segments: Vec::new(),
         rest: Vec::new(),
     };
     let mut i = 0;
@@ -188,6 +196,18 @@ fn parse_flags(args: &[String]) -> Flags {
             "--desired" => {
                 i += 1;
                 f.desired = args.get(i).cloned();
+            }
+            "--protocol" => {
+                i += 1;
+                if let Some(protocol) = args.get(i) {
+                    f.protocols.push(protocol.clone());
+                }
+            }
+            "--segment" => {
+                i += 1;
+                if let Some(segment) = args.get(i) {
+                    f.segments.push(segment.clone());
+                }
             }
             other => f.rest.push(other.to_owned()),
         }
@@ -292,6 +312,7 @@ async fn run(cmd: &str, args: &[String]) -> Result<Vec<String>, ClientError> {
                 .map_err(|e| err_usage(&format!("bad topology json: {e}")))?;
             Ok(render_topology(&topo))
         }
+        "discovery" => discovery(args).await,
         "annotate" => {
             let f = parse_flags(args);
             let selector = f
@@ -481,6 +502,86 @@ fn run_tunnel(plan: &serde_json::Value) -> Result<(), ClientError> {
         return Err(err_usage(&format!("SSH tunnel exited with {status}")));
     }
     Ok(())
+}
+
+async fn discovery(args: &[String]) -> Result<Vec<String>, ClientError> {
+    match args.first().map(String::as_str) {
+        Some("scopes") => {
+            let flags = parse_flags(&args[1..]);
+            let mut client = connect().await?;
+            let value = client.call(&Request::DiscoveryScopeList).await?;
+            if flags.json {
+                return Ok(vec![value.to_string()]);
+            }
+            let scopes: Vec<mycelium_core::DiscoveryScope> = serde_json::from_value(value)
+                .map_err(|error| err_usage(&format!("bad discovery scopes: {error}")))?;
+            let mut output = vec![format!("discovery scopes: {}", scopes.len())];
+            for scope in scopes {
+                output.push(format!(
+                    "  {} protocols={} segments={}",
+                    scope.observer,
+                    scope
+                        .protocols
+                        .iter()
+                        .map(|protocol| format!("{protocol:?}").to_ascii_lowercase())
+                        .collect::<Vec<_>>()
+                        .join(","),
+                    scope.segments.into_iter().collect::<Vec<_>>().join(",")
+                ));
+            }
+            Ok(output)
+        }
+        Some("scope") => {
+            let flags = parse_flags(&args[1..]);
+            match flags.rest.first().map(String::as_str) {
+                Some("set") => {
+                    let observer = flags
+                        .rest
+                        .get(1)
+                        .ok_or(err_usage("discovery scope set needs an observer"))?;
+                    let protocols = flags
+                        .protocols
+                        .iter()
+                        .map(|protocol| match protocol.as_str() {
+                            "ssdp" => Ok(DiscoveryProtocol::Ssdp),
+                            "mdns" => Ok(DiscoveryProtocol::Mdns),
+                            _ => Err(err_usage(&format!(
+                                "unsupported discovery protocol `{protocol}`"
+                            ))),
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let mut client = connect().await?;
+                    let value = client
+                        .call(&Request::DiscoveryScopeSet {
+                            observer: observer.clone(),
+                            protocols,
+                            segments: flags.segments,
+                            write: flags.write,
+                            dry_run: flags.dry_run,
+                        })
+                        .await?;
+                    Ok(vec![value.to_string()])
+                }
+                Some("remove") => {
+                    let observer = flags
+                        .rest
+                        .get(1)
+                        .ok_or(err_usage("discovery scope remove needs an observer"))?;
+                    let mut client = connect().await?;
+                    let value = client
+                        .call(&Request::DiscoveryScopeRemove {
+                            observer: observer.clone(),
+                            write: flags.write,
+                            dry_run: flags.dry_run,
+                        })
+                        .await?;
+                    Ok(vec![value.to_string()])
+                }
+                _ => Err(err_usage("usage: mycelium discovery scope set|remove ...")),
+            }
+        }
+        _ => Err(err_usage("usage: mycelium discovery scopes|scope ...")),
+    }
 }
 
 async fn fetch_topology() -> Result<Topology, ClientError> {

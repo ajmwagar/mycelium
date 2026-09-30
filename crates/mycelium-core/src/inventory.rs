@@ -59,6 +59,18 @@ pub trait Device: Send + Sync {
     async fn observe(&self) -> Result<(Vec<crate::topology::Observation>, Vec<String>)> {
         Ok((Vec::new(), Vec::new()))
     }
+
+    /// Execute one explicitly authorized routed-discovery probe. Ordinary
+    /// local observation remains in `observe`; this seam never infers policy.
+    async fn discover(
+        &self,
+        request: &crate::discovery::DiscoveryRequest,
+    ) -> Result<Vec<crate::topology::Observation>> {
+        Err(MyceliumError::Unsupported {
+            device: self.id().to_string(),
+            capability: format!("discovery.{:?}", request.protocol).to_ascii_lowercase(),
+        })
+    }
 }
 
 /// Info about one capability as surfaced by `mycelium describe`.
