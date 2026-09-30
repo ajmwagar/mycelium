@@ -8,9 +8,10 @@ use mycelium_core::{
     CapResult, CapSpec, CredentialSet, Device, DeviceId, DeviceKind, DeviceMeta, Driver,
     ExecContext, Inventory, LinkState, MyceliumError, Observation, Origin, OverlayPeerRecord,
     Params, PortRef, Result, Segment, SegmentKind, ServiceRecord, ServiceState, Target, Value,
-    ID_IDENTIFY,
+    ID_IDENTIFY, ID_NET_FORWARD_ENSURE, ID_NET_VIP_ENSURE,
 };
 use mycelium_driver_edgeos::SshSession;
+use mycelium_network_types::{Ipv4Prefix, PortForward, TransportProtocol};
 
 use crate::parsers::{
     parse_interfaces, parse_listeners, parse_neighbors, parse_routes, parse_tailscale_status,
@@ -67,6 +68,96 @@ async fn identity(session: &SshSession) -> Result<(String, String)> {
     Ok((hostname, uname))
 }
 
+fn vip_command(params: &Params) -> Result<(Ipv4Prefix, String, String)> {
+    let interface = string_param(params, "interface")?;
+    if interface.is_empty()
+        || interface.len() > 15
+        || !interface
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(&byte))
+    {
+        return Err(MyceliumError::Validation(
+            "interface must be a Linux interface name of at most 15 safe ASCII characters".into(),
+        ));
+    }
+    let address = string_param(params, "address")?;
+    let (ip, prefix) = address
+        .split_once('/')
+        .ok_or_else(|| MyceliumError::Validation("address must be IPv4 CIDR notation".into()))?;
+    let ip = ip.parse::<std::net::Ipv4Addr>().map_err(|_| {
+        MyceliumError::Validation("address must contain a valid IPv4 address".into())
+    })?;
+    let prefix = prefix
+        .parse::<u8>()
+        .ok()
+        .and_then(|prefix| Ipv4Prefix::new(ip.octets(), prefix))
+        .ok_or_else(|| {
+            MyceliumError::Validation("IPv4 prefix length must be 0 through 32".into())
+        })?;
+    let canonical = format_prefix(prefix);
+    let command = format!("sudo -n ip address replace {canonical} dev {interface}");
+    Ok((prefix, interface.into(), command))
+}
+
+fn forwarding_rule(params: &Params) -> Result<PortForward> {
+    let protocol = match string_param(params, "protocol")? {
+        "tcp" => TransportProtocol::Tcp,
+        "udp" => TransportProtocol::Udp,
+        _ => {
+            return Err(MyceliumError::Validation(
+                "protocol must be `tcp` or `udp`".into(),
+            ))
+        }
+    };
+    Ok(PortForward {
+        protocol,
+        listen_address: ipv4_param(params, "listen_address")?,
+        listen_port: port_param(params, "listen_port")?,
+        target_address: ipv4_param(params, "target_address")?,
+        target_port: port_param(params, "target_port")?,
+    })
+}
+
+fn string_param<'a>(params: &'a Params, name: &str) -> Result<&'a str> {
+    params
+        .get(name)
+        .and_then(Value::as_str)
+        .ok_or_else(|| MyceliumError::Validation(format!("param `{name}` must be a string")))
+}
+
+fn ipv4_param(params: &Params, name: &str) -> Result<[u8; 4]> {
+    string_param(params, name)?
+        .parse::<std::net::Ipv4Addr>()
+        .map(|address| address.octets())
+        .map_err(|_| MyceliumError::Validation(format!("param `{name}` must be an IPv4 address")))
+}
+
+fn port_param(params: &Params, name: &str) -> Result<u16> {
+    let value = params
+        .get(name)
+        .and_then(Value::as_i64)
+        .ok_or_else(|| MyceliumError::Validation(format!("param `{name}` must be an integer")))?;
+    u16::try_from(value)
+        .ok()
+        .filter(|port| *port != 0)
+        .ok_or_else(|| MyceliumError::Validation(format!("param `{name}` must be 1 through 65535")))
+}
+
+fn format_prefix(prefix: Ipv4Prefix) -> String {
+    format!(
+        "{}/{}",
+        std::net::Ipv4Addr::from(prefix.address),
+        prefix.prefix_length
+    )
+}
+
+fn protocol_name(protocol: TransportProtocol) -> &'static str {
+    match protocol {
+        TransportProtocol::Tcp => "tcp",
+        TransportProtocol::Udp => "udp",
+    }
+}
+
 #[async_trait]
 impl Driver for LinuxDriver {
     fn name(&self) -> &str {
@@ -117,13 +208,42 @@ impl Device for LinuxDevice {
     }
 
     fn capabilities(&self) -> BTreeMap<String, CapSpec> {
-        BTreeMap::from_iter([(
-            ID_IDENTIFY.into(),
-            CapSpec::readonly("Linux SSH vantage-point identity"),
-        )])
+        BTreeMap::from_iter([
+            (
+                ID_IDENTIFY.into(),
+                CapSpec::readonly("Linux SSH vantage-point identity"),
+            ),
+            (
+                ID_NET_VIP_ENSURE.into(),
+                CapSpec::mutation("ensure an IPv4 address is present on a Linux interface")
+                    .param(
+                        "interface",
+                        mycelium_core::ParamType::Str,
+                        "kernel interface name",
+                    )
+                    .param("address", mycelium_core::ParamType::Str, "IPv4 CIDR prefix"),
+            ),
+            (
+                ID_NET_FORWARD_ENSURE.into(),
+                CapSpec::mutation("plan an nftables DNAT forwarding rule")
+                    .param("protocol", mycelium_core::ParamType::Str, "tcp or udp")
+                    .param(
+                        "listen_address",
+                        mycelium_core::ParamType::Str,
+                        "IPv4 listen address",
+                    )
+                    .param("listen_port", mycelium_core::ParamType::Int, "listen port")
+                    .param(
+                        "target_address",
+                        mycelium_core::ParamType::Str,
+                        "IPv4 target address",
+                    )
+                    .param("target_port", mycelium_core::ParamType::Int, "target port"),
+            ),
+        ])
     }
 
-    async fn exec(&self, _ctx: &ExecContext, cap: &str, _params: Params) -> Result<CapResult> {
+    async fn exec(&self, ctx: &ExecContext, cap: &str, params: Params) -> Result<CapResult> {
         match cap {
             ID_IDENTIFY => Ok(CapResult::ok(Value::Map(Params::from_iter([
                 ("vendor".into(), Value::Str("Linux".into())),
@@ -137,6 +257,59 @@ impl Device for LinuxDevice {
                         .unwrap_or(Value::Null),
                 ),
             ])))),
+            ID_NET_VIP_ENSURE => {
+                let (prefix, interface, command) = vip_command(&params)?;
+                let output = Value::Map(Params::from_iter([
+                    ("interface".into(), Value::Str(interface)),
+                    ("address".into(), Value::Str(format_prefix(prefix))),
+                    ("command".into(), Value::Str(command.clone())),
+                ]));
+                if ctx.dry_run {
+                    return Ok(CapResult::dry_run(output));
+                }
+                let result = self.session.exec(&command).await?;
+                if !result.success() {
+                    return Err(MyceliumError::Device {
+                        exit_code: result.exit_code,
+                        stderr: result.stderr,
+                    });
+                }
+                Ok(CapResult::ok(output))
+            }
+            ID_NET_FORWARD_ENSURE => {
+                let rule = forwarding_rule(&params)?;
+                let output = Value::Map(Params::from_iter([
+                    (
+                        "protocol".into(),
+                        Value::Str(protocol_name(rule.protocol).into()),
+                    ),
+                    (
+                        "listen".into(),
+                        Value::Str(format!(
+                            "{}:{}",
+                            std::net::Ipv4Addr::from(rule.listen_address),
+                            rule.listen_port
+                        )),
+                    ),
+                    (
+                        "target".into(),
+                        Value::Str(format!(
+                            "{}:{}",
+                            std::net::Ipv4Addr::from(rule.target_address),
+                            rule.target_port
+                        )),
+                    ),
+                ]));
+                if ctx.dry_run {
+                    return Ok(CapResult::dry_run(output).with_message(
+                        "nftables apply remains blocked until Mycelium owns a persistent table and can verify forwarding",
+                    ));
+                }
+                Err(MyceliumError::Unsupported {
+                    device: self.meta.id.to_string(),
+                    capability: ID_NET_FORWARD_ENSURE.into(),
+                })
+            }
             other => Err(MyceliumError::Unsupported {
                 device: self.meta.id.to_string(),
                 capability: other.into(),
@@ -311,4 +484,41 @@ fn split_sections(text: &str) -> Result<[&str; 6]> {
         .split_once("__MYCELIUM_TAILSCALE__\n")
         .ok_or_else(|| MyceliumError::Parse("missing tailscale marker".into()))?;
     Ok([links, addrs, neigh, routes, services, tailscale])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vip_command_is_canonical_and_rejects_shell_input() {
+        let params = Params::from_iter([
+            ("interface".into(), Value::Str("eth0".into())),
+            ("address".into(), Value::Str("192.0.2.20/24".into())),
+        ]);
+        let (_, _, command) = vip_command(&params).unwrap();
+        assert_eq!(command, "sudo -n ip address replace 192.0.2.20/24 dev eth0");
+
+        let malicious = Params::from_iter([
+            ("interface".into(), Value::Str("eth0;reboot".into())),
+            ("address".into(), Value::Str("192.0.2.20/24".into())),
+        ]);
+        assert!(vip_command(&malicious).is_err());
+    }
+
+    #[test]
+    fn forwarding_rule_uses_bounded_shared_type() {
+        let params = Params::from_iter([
+            ("protocol".into(), Value::Str("tcp".into())),
+            ("listen_address".into(), Value::Str("192.0.2.10".into())),
+            ("listen_port".into(), Value::Int(8443)),
+            ("target_address".into(), Value::Str("10.0.0.20".into())),
+            ("target_port".into(), Value::Int(443)),
+        ]);
+        let rule = forwarding_rule(&params).unwrap();
+        assert_eq!(rule.protocol, TransportProtocol::Tcp);
+        assert_eq!(rule.listen_address, [192, 0, 2, 10]);
+        assert_eq!(rule.target_address, [10, 0, 0, 20]);
+        assert_eq!(rule.target_port, 443);
+    }
 }
