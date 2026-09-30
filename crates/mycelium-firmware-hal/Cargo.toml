@@ -1,0 +1,12 @@
+[package]
+name = "mycelium-firmware-hal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Small no_std hardware capability contracts for Mycelium firmware"
+
+[features]
+default = []
+
+[dependencies]
+mycelium-network-types.workspace = true

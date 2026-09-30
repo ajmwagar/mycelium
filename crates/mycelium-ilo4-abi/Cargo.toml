@@ -1,0 +1,12 @@
+[package]
+name = "mycelium-ilo4-abi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared no_std ABI for Mycelium iLO4 payloads and host tooling"
+
+[dependencies]
+mycelium-network-types.workspace = true
+
+[lib]
+path = "src/lib.rs"
