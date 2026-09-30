@@ -18,6 +18,7 @@ pub mod driver;
 pub mod error;
 pub mod exec;
 pub mod inventory;
+pub mod reconcile;
 pub mod spec;
 pub mod topology;
 pub mod value;
@@ -35,6 +36,10 @@ pub use driver::{Driver, Target};
 pub use error::{MyceliumError, Result};
 pub use exec::{ExecContext, ExecOutcome, RecordingTransport, Transport};
 pub use inventory::{result_from_outcome, CapabilityInfo, Device, Inventory, InvokeResult};
+pub use reconcile::{
+    ActionPlan, ActionRisk, PlanBlocker, PlannedAction, VerificationPredicate, VerificationSpec,
+    ACTION_PLAN_SCHEMA_VERSION,
+};
 pub use spec::{CapResult, CapSpec, ParamSpec, ParamType};
 pub use topology::{
     ipv4_in_cidr, Conflict, IpRecord, LeaseRecord, Link, LinkState, MacAddress, NodeAnnotation,
