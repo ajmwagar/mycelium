@@ -15,10 +15,11 @@ use mycelium_network_types::{Ipv4Prefix, PortForward, TransportProtocol};
 use crate::parsers::{
     parse_interfaces, parse_link_properties, parse_listeners, parse_neighbors, parse_routes,
 };
+use mycelium_dnssd::parse_avahi;
 use mycelium_tailscale::{parse_control_plane, parse_status, topology_observations};
 
 pub const DRIVER_NAME: &str = "linux";
-const OBSERVE_COMMAND: &str = "printf '__MYCELIUM_LINKS__\\n'; ip -o link show; printf '__MYCELIUM_LINK_META__\\n'; for p in /sys/class/net/*; do n=${p##*/}; if [ \"$n\" = lo ]; then m=loopback; elif [ -d \"$p/wireless\" ]; then m=wifi; elif [ -e \"$p/device\" ]; then m=ethernet; else m=virtual; fi; printf '%s\\t%s\\t%s\\t%s\\n' \"$n\" \"$m\" \"$(cat \"$p/speed\" 2>/dev/null || true)\" \"$(cat \"$p/duplex\" 2>/dev/null || true)\"; done; printf '__MYCELIUM_ADDRS__\\n'; ip -o -4 addr show scope global; printf '__MYCELIUM_NEIGH__\\n'; ip neigh show; printf '__MYCELIUM_ROUTES__\\n'; ip -4 route show proto kernel scope link; printf '__MYCELIUM_SERVICES__\\n'; ss -H -lntup; printf '__MYCELIUM_TAILSCALE__\\n'; tailscale status --json 2>/dev/null || true; printf '\\n__MYCELIUM_TAILSCALE_PREFS__\\n'; tailscale debug prefs 2>/dev/null || true";
+const OBSERVE_COMMAND: &str = "printf '__MYCELIUM_LINKS__\\n'; ip -o link show; printf '__MYCELIUM_LINK_META__\\n'; for p in /sys/class/net/*; do n=${p##*/}; if [ \"$n\" = lo ]; then m=loopback; elif [ -d \"$p/wireless\" ]; then m=wifi; elif [ -e \"$p/device\" ]; then m=ethernet; else m=virtual; fi; printf '%s\\t%s\\t%s\\t%s\\n' \"$n\" \"$m\" \"$(cat \"$p/speed\" 2>/dev/null || true)\" \"$(cat \"$p/duplex\" 2>/dev/null || true)\"; done; printf '__MYCELIUM_ADDRS__\\n'; ip -o -4 addr show scope global; printf '__MYCELIUM_NEIGH__\\n'; ip neigh show; printf '__MYCELIUM_ROUTES__\\n'; ip -4 route show proto kernel scope link; printf '__MYCELIUM_SERVICES__\\n'; ss -H -lntup; printf '__MYCELIUM_TAILSCALE__\\n'; tailscale status --json 2>/dev/null || true; printf '\\n__MYCELIUM_TAILSCALE_PREFS__\\n'; tailscale debug prefs 2>/dev/null || true; printf '\\n__MYCELIUM_MDNS__\\n'; command -v avahi-browse >/dev/null 2>&1 && avahi-browse --all --resolve --parsable --terminate 2>/dev/null || true";
 
 pub struct LinuxDriver {
     timeout: Duration,
@@ -430,6 +431,14 @@ impl Device for LinuxDevice {
             }
             Err(error) => warnings.push(format!("tailscale status: {error}")),
         }
+        out.extend(
+            parse_avahi(sections[8], observed_at)
+                .into_iter()
+                .map(|advertisement| Observation::ServiceAdvertisement {
+                    advertisement,
+                    origin: origin("avahi-browse"),
+                }),
+        );
         Ok((out, warnings))
     }
 }
@@ -459,7 +468,7 @@ fn service_name(port: u16, process: Option<&str>) -> String {
     }
 }
 
-fn split_sections(text: &str) -> Result<[&str; 8]> {
+fn split_sections(text: &str) -> Result<[&str; 9]> {
     let (_, after_links) = text
         .split_once("__MYCELIUM_LINKS__\n")
         .ok_or_else(|| MyceliumError::Parse("missing links marker".into()))?;
@@ -481,9 +490,12 @@ fn split_sections(text: &str) -> Result<[&str; 8]> {
     let (services, tailscale_and_prefs) = after_services
         .split_once("__MYCELIUM_TAILSCALE__\n")
         .ok_or_else(|| MyceliumError::Parse("missing tailscale marker".into()))?;
-    let (tailscale, tailscale_prefs) = tailscale_and_prefs
+    let (tailscale, prefs_and_mdns) = tailscale_and_prefs
         .split_once("__MYCELIUM_TAILSCALE_PREFS__\n")
         .ok_or_else(|| MyceliumError::Parse("missing tailscale preferences marker".into()))?;
+    let (tailscale_prefs, mdns) = prefs_and_mdns
+        .split_once("__MYCELIUM_MDNS__\n")
+        .ok_or_else(|| MyceliumError::Parse("missing mDNS marker".into()))?;
     Ok([
         links,
         link_meta,
@@ -493,6 +505,7 @@ fn split_sections(text: &str) -> Result<[&str; 8]> {
         services,
         tailscale,
         tailscale_prefs,
+        mdns,
     ])
 }
 

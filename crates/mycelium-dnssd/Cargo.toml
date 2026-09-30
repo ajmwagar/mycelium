@@ -1,0 +1,9 @@
+[package]
+name = "mycelium-dnssd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared DNS-SD and mDNS observation parsers for mycelium"
+
+[dependencies]
+mycelium-core.workspace = true

@@ -852,6 +852,37 @@ fn render_topology(topo: &Topology) -> Vec<String> {
         render_services(&mut out, node);
         render_overlays(&mut out, node);
     }
+    if !topo.advertisements.is_empty() {
+        out.push(format!(
+            "service advertisements: {}",
+            topo.advertisements.len()
+        ));
+        for advertisement in topo.advertisements.values() {
+            let endpoint = advertisement
+                .target
+                .as_deref()
+                .map(str::to_owned)
+                .or_else(|| {
+                    advertisement
+                        .addresses
+                        .iter()
+                        .next()
+                        .map(ToString::to_string)
+                })
+                .unwrap_or_else(|| "unresolved".into());
+            let port = advertisement
+                .port
+                .map(|port| format!(":{port}"))
+                .unwrap_or_default();
+            let node = topology_node_for_advertisement(topo, advertisement)
+                .map(|node| format!(" node={}", node.id))
+                .unwrap_or_default();
+            out.push(format!(
+                "  {}  {}.{}  {endpoint}{port}{node}",
+                advertisement.instance, advertisement.service_type, advertisement.domain
+            ));
+        }
+    }
     if !topo.leases.is_empty() {
         out.push("leases:".into());
         for l in &topo.leases {
@@ -870,6 +901,24 @@ fn render_topology(topo: &Topology) -> Vec<String> {
         }
     }
     out
+}
+
+fn topology_node_for_advertisement<'a>(
+    topology: &'a Topology,
+    advertisement: &mycelium_core::ServiceAdvertisement,
+) -> Option<&'a mycelium_core::TopoNode> {
+    topology.nodes.values().find(|node| {
+        advertisement
+            .addresses
+            .iter()
+            .any(|address| node.ips.contains_key(address))
+            || advertisement.target.as_ref().is_some_and(|target| {
+                let target = target.trim_end_matches('.').to_lowercase();
+                node.hostnames.iter().any(|hostname| {
+                    hostname == &target || hostname.split('.').next() == target.split('.').next()
+                })
+            })
+    })
 }
 
 fn render_device_links(out: &mut Vec<String>, node: &mycelium_core::TopoNode) {

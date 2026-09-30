@@ -186,6 +186,42 @@ pub struct ServiceRecord {
     pub origin: Origin,
 }
 
+/// A service advertised through DNS-SD/mDNS. Unlike [`ServiceRecord`], this
+/// is a network announcement and may not yet resolve to a known topology node.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServiceAdvertisement {
+    pub instance: String,
+    pub service_type: String,
+    pub domain: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    #[serde(default)]
+    pub addresses: BTreeSet<IpAddr>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    #[serde(default)]
+    pub txt: BTreeSet<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interface: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl: Option<u32>,
+    pub first_seen: u64,
+    pub last_seen: u64,
+    #[serde(default)]
+    pub origins: BTreeSet<String>,
+}
+
+impl ServiceAdvertisement {
+    pub fn key(&self) -> String {
+        format!(
+            "{}.{}.{}",
+            self.instance.to_lowercase(),
+            self.service_type.to_lowercase(),
+            self.domain.trim_end_matches('.').to_lowercase()
+        )
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeAnnotation {
     pub name: Option<String>,
@@ -268,6 +304,11 @@ pub enum Observation {
         mac: Option<MacAddress>,
         ip: Option<IpAddr>,
         service: ServiceRecord,
+    },
+    /// A DNS-SD/mDNS announcement visible from an observer.
+    ServiceAdvertisement {
+        advertisement: ServiceAdvertisement,
+        origin: Origin,
     },
     OverlayPeer {
         ip: IpAddr,
@@ -363,6 +404,8 @@ pub struct Topology {
     pub nodes: BTreeMap<String, TopoNode>,
     pub segments: BTreeMap<String, Segment>,
     pub leases: Vec<LeaseRecord>,
+    #[serde(default)]
+    pub advertisements: BTreeMap<String, ServiceAdvertisement>,
     pub conflicts: Vec<Conflict>,
     pub updated_from: Vec<Origin>,
 }
@@ -552,6 +595,37 @@ impl Topology {
                 node.origins.insert(origin_key(&service.origin));
                 node.services.insert(service_key, service);
                 report.updated_nodes += 1;
+            }
+            Observation::ServiceAdvertisement {
+                mut advertisement,
+                origin,
+            } => {
+                advertisement.origins.insert(origin_key(&origin));
+                let key = advertisement.key();
+                match self.advertisements.get_mut(&key) {
+                    Some(existing) => {
+                        existing.first_seen = existing.first_seen.min(advertisement.first_seen);
+                        existing.last_seen = existing.last_seen.max(advertisement.last_seen);
+                        existing.addresses.extend(advertisement.addresses);
+                        existing.txt.extend(advertisement.txt);
+                        existing.origins.extend(advertisement.origins);
+                        if advertisement.target.is_some() {
+                            existing.target = advertisement.target;
+                        }
+                        if advertisement.port.is_some() {
+                            existing.port = advertisement.port;
+                        }
+                        if advertisement.interface.is_some() {
+                            existing.interface = advertisement.interface;
+                        }
+                        if advertisement.ttl.is_some() {
+                            existing.ttl = advertisement.ttl;
+                        }
+                    }
+                    None => {
+                        self.advertisements.insert(key, advertisement);
+                    }
+                }
             }
             Observation::OverlayPeer {
                 ip,
@@ -862,6 +936,7 @@ fn observation_origin(o: &Observation) -> Origin {
         | Observation::Segment { origin, .. }
         | Observation::Lease { origin, .. } => origin.clone(),
         Observation::Service { service, .. } => service.origin.clone(),
+        Observation::ServiceAdvertisement { origin, .. } => origin.clone(),
         Observation::OverlayPeer { record, .. } | Observation::OverlaySelf { record, .. } => {
             record.origin.clone()
         }
@@ -1125,6 +1200,42 @@ mod tests {
         }]);
         assert_eq!(topo.nodes.len(), 1);
         assert_eq!(topo.nodes["02:00:00:00:00:05"].services.len(), 1);
+    }
+
+    #[test]
+    fn service_advertisements_merge_resolution_and_provenance() {
+        let advertisement = |time, address: Option<&str>| ServiceAdvertisement {
+            instance: "Office Printer".into(),
+            service_type: "_ipp._tcp".into(),
+            domain: "local".into(),
+            target: address.map(|_| "printer.local".into()),
+            addresses: address.into_iter().map(ip).collect(),
+            port: address.map(|_| 631),
+            txt: BTreeSet::new(),
+            interface: None,
+            ttl: None,
+            first_seen: time,
+            last_seen: time,
+            origins: BTreeSet::new(),
+        };
+        let mut topology = Topology::empty();
+        topology.observe_all([
+            Observation::ServiceAdvertisement {
+                advertisement: advertisement(10, None),
+                origin: Origin::new("darwin-deckard", "dns-sd"),
+            },
+            Observation::ServiceAdvertisement {
+                advertisement: advertisement(20, Some("192.168.1.20")),
+                origin: Origin::new("linux-pris", "avahi-browse"),
+            },
+        ]);
+
+        assert_eq!(topology.advertisements.len(), 1);
+        let merged = topology.advertisements.values().next().unwrap();
+        assert_eq!(merged.first_seen, 10);
+        assert_eq!(merged.last_seen, 20);
+        assert_eq!(merged.port, Some(631));
+        assert_eq!(merged.origins.len(), 2);
     }
 
     #[test]

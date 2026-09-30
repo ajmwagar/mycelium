@@ -12,13 +12,14 @@ use mycelium_core::{
     ExecContext, Inventory, LinkState, MyceliumError, Observation, Origin, Params, PortRef, Result,
     Segment, SegmentKind, ServiceRecord, ServiceState, Target, Value, ID_IDENTIFY,
 };
+use mycelium_dnssd::parse_dns_sd_zone;
 use mycelium_driver_edgeos::SshSession;
 use mycelium_tailscale::{parse_control_plane, parse_status, topology_observations};
 
 use parsers::{parse_hardware_ports, parse_interfaces, parse_listeners, parse_neighbors};
 
 pub const DRIVER_NAME: &str = "darwin";
-const OBSERVE_COMMAND: &str = "printf '__MYCELIUM_IFCONFIG__\\n'; /sbin/ifconfig -a; printf '__MYCELIUM_HARDWARE_PORTS__\\n'; /usr/sbin/networksetup -listallhardwareports 2>/dev/null || true; printf '__MYCELIUM_ARP__\\n'; /usr/sbin/arp -an; printf '__MYCELIUM_SERVICES__\\n'; /usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -iUDP 2>/dev/null || true; t=/Applications/Tailscale.app/Contents/MacOS/Tailscale; command -v tailscale >/dev/null 2>&1 && t=$(command -v tailscale); printf '__MYCELIUM_TAILSCALE__\\n'; \"$t\" status --json 2>/dev/null || true; printf '\\n__MYCELIUM_TAILSCALE_PREFS__\\n'; \"$t\" debug prefs 2>/dev/null || true";
+const OBSERVE_COMMAND: &str = "printf '__MYCELIUM_IFCONFIG__\\n'; /sbin/ifconfig -a; printf '__MYCELIUM_HARDWARE_PORTS__\\n'; /usr/sbin/networksetup -listallhardwareports 2>/dev/null || true; printf '__MYCELIUM_ARP__\\n'; /usr/sbin/arp -an; printf '__MYCELIUM_SERVICES__\\n'; /usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -iUDP 2>/dev/null || true; t=/Applications/Tailscale.app/Contents/MacOS/Tailscale; command -v tailscale >/dev/null 2>&1 && t=$(command -v tailscale); printf '__MYCELIUM_TAILSCALE__\\n'; \"$t\" status --json 2>/dev/null || true; printf '\\n__MYCELIUM_TAILSCALE_PREFS__\\n'; \"$t\" debug prefs 2>/dev/null || true; printf '\\n__MYCELIUM_MDNS__\\n'; if [ -x /usr/bin/dns-sd ] && [ -x /usr/bin/perl ]; then for type in _http._tcp _https._tcp _ssh._tcp _airplay._tcp _raop._tcp _googlecast._tcp _hap._tcp _ipp._tcp _printer._tcp _workstation._tcp; do /usr/bin/perl -e '$SIG{ALRM}=sub{kill 2,$p if $p; exit}; $p=fork(); if(!$p){exec @ARGV} alarm 3; wait' /usr/bin/dns-sd -Z \"$type\" local. & done; wait; fi";
 
 pub struct DarwinDriver {
     timeout: Duration,
@@ -259,11 +260,19 @@ impl Device for DarwinDevice {
             )),
             Err(error) => warnings.push(format!("tailscale status: {error}")),
         }
+        out.extend(
+            parse_dns_sd_zone(sections[6], observed_at)
+                .into_iter()
+                .map(|advertisement| Observation::ServiceAdvertisement {
+                    advertisement,
+                    origin: origin("dns-sd"),
+                }),
+        );
         Ok((out, warnings))
     }
 }
 
-fn split_sections(text: &str) -> Result<[&str; 6]> {
+fn split_sections(text: &str) -> Result<[&str; 7]> {
     let (_, after_interfaces) = text
         .split_once("__MYCELIUM_IFCONFIG__\n")
         .ok_or_else(|| MyceliumError::Parse("missing ifconfig marker".into()))?;
@@ -279,8 +288,11 @@ fn split_sections(text: &str) -> Result<[&str; 6]> {
     let (services, after_tailscale) = after_services
         .split_once("__MYCELIUM_TAILSCALE__\n")
         .ok_or_else(|| MyceliumError::Parse("missing tailscale marker".into()))?;
-    let (tailscale, prefs) = after_tailscale
+    let (tailscale, prefs_and_mdns) = after_tailscale
         .split_once("__MYCELIUM_TAILSCALE_PREFS__\n")
         .ok_or_else(|| MyceliumError::Parse("missing tailscale preferences marker".into()))?;
-    Ok([interfaces, ports, arp, services, tailscale, prefs])
+    let (prefs, mdns) = prefs_and_mdns
+        .split_once("__MYCELIUM_MDNS__\n")
+        .ok_or_else(|| MyceliumError::Parse("missing mDNS marker".into()))?;
+    Ok([interfaces, ports, arp, services, tailscale, prefs, mdns])
 }

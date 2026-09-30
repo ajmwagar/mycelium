@@ -9,4 +9,5 @@ description = "mycelium SSH observation driver for Darwin/macOS hosts"
 mycelium-core.workspace = true
 mycelium-driver-edgeos.workspace = true
 mycelium-tailscale.workspace = true
+mycelium-dnssd.workspace = true
 async-trait.workspace = true
