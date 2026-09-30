@@ -10,4 +10,5 @@ mycelium-core.workspace = true
 mycelium-driver-edgeos.workspace = true
 mycelium-tailscale.workspace = true
 mycelium-dnssd.workspace = true
+mycelium-ssdp.workspace = true
 async-trait.workspace = true

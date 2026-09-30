@@ -1,0 +1,9 @@
+[package]
+name = "mycelium-ssdp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared SSDP and UPnP observation parser for mycelium"
+
+[dependencies]
+mycelium-core.workspace = true

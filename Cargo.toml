@@ -13,6 +13,7 @@ mycelium-core = { path = "crates/mycelium-core" }
 mycelium-network-types = { path = "crates/mycelium-network-types" }
 mycelium-tailscale = { path = "crates/mycelium-tailscale" }
 mycelium-dnssd = { path = "crates/mycelium-dnssd" }
+mycelium-ssdp = { path = "crates/mycelium-ssdp" }
 mycelium-driver-edgeos = { path = "crates/mycelium-driver-edgeos" }
 mycelium-driver-redfish = { path = "crates/mycelium-driver-redfish" }
 mycelium-driver-linux = { path = "crates/mycelium-driver-linux" }
