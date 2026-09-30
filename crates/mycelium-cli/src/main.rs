@@ -751,12 +751,14 @@ fn render_topology(topo: &Topology) -> Vec<String> {
             .collect::<Vec<_>>()
             .join(",");
         out.push(format!(
-            "  {:<28} ports={} ips={}",
+            "  {:<28} ports={} ips={}{}",
             label,
             node.ports.len(),
-            format_args!("{ips}{kind}")
+            ips,
+            format_args!("{kind}{}", render_lans(topo, node))
         ));
         render_services(&mut out, node);
+        render_overlays(&mut out, node);
     }
     out.push(format!(
         "hosts: {}",
@@ -783,16 +785,18 @@ fn render_topology(topo: &Topology) -> Vec<String> {
             .map(|kind| format!(" kind={kind}"))
             .unwrap_or_default();
         out.push(format!(
-            "  {:<20} {:<20} {names}  [{ips}]{kind}",
+            "  {:<20} {:<20} {names}  [{ips}]{kind}{}",
             node.mac
                 .map(|m| m.to_string())
                 .unwrap_or_else(|| "no-mac".into()),
-            node.id
+            node.id,
+            render_lans(topo, node)
         ));
         for link in node.ports.values().filter_map(|link| link.b.as_ref()) {
             out.push(format!("    └─ {}", link));
         }
         render_services(&mut out, node);
+        render_overlays(&mut out, node);
     }
     if !topo.leases.is_empty() {
         out.push("leases:".into());
@@ -836,6 +840,72 @@ fn render_services(out: &mut Vec<String>, node: &mycelium_core::TopoNode) {
             service.transport,
             state,
             service.product.as_deref().unwrap_or("unidentified")
+        ));
+    }
+}
+
+fn render_lans(topo: &Topology, node: &mycelium_core::TopoNode) -> String {
+    let lans =
+        topo.segments
+            .values()
+            .filter(|segment| {
+                let scoped_site = segment.id.split_once('/').and_then(|(first, _)| {
+                    first.parse::<std::net::IpAddr>().is_err().then_some(first)
+                });
+                let scope_matches = scoped_site
+                    .map(|site| node.sites.contains(site))
+                    .unwrap_or(true);
+                scope_matches
+                    && segment.subnet.is_some_and(|(network, prefix)| {
+                        node.ips
+                            .keys()
+                            .any(|address| mycelium_core::ipv4_in_cidr(*address, network, prefix))
+                    })
+            })
+            .map(|segment| segment.id.clone())
+            .collect::<Vec<_>>();
+    if lans.is_empty() {
+        String::new()
+    } else {
+        format!(" lans=[{}]", lans.join(","))
+    }
+}
+
+fn render_overlays(out: &mut Vec<String>, node: &mycelium_core::TopoNode) {
+    for overlay in node.overlays.values() {
+        let state = if overlay.online { "ONLINE" } else { "OFFLINE" };
+        let path = overlay
+            .endpoint
+            .as_deref()
+            .map(|endpoint| format!("direct={endpoint}"))
+            .or_else(|| {
+                overlay
+                    .relay
+                    .as_deref()
+                    .map(|relay| format!("relay={relay}"))
+            })
+            .unwrap_or_else(|| "path=unknown".into());
+        let routes = if overlay.routed_lans.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " routes={}",
+                overlay
+                    .routed_lans
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        };
+        out.push(format!(
+            "    └─ {} via {}  {}{}  {}{}",
+            overlay.network,
+            overlay.observer,
+            state,
+            if overlay.active { "/ACTIVE" } else { "" },
+            path,
+            routes
         ));
     }
 }

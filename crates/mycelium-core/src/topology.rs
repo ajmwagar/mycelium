@@ -185,6 +185,19 @@ pub struct NodeAnnotation {
     pub kind: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OverlayPeerRecord {
+    pub network: String,
+    pub observer: String,
+    pub online: bool,
+    pub active: bool,
+    pub relay: Option<String>,
+    pub endpoint: Option<String>,
+    pub routed_lans: BTreeSet<String>,
+    pub observed_at: u64,
+    pub origin: Origin,
+}
+
 /// One atomic piece of topology truth from one device.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Observation {
@@ -211,6 +224,11 @@ pub enum Observation {
         mac: Option<MacAddress>,
         ip: Option<IpAddr>,
         service: ServiceRecord,
+    },
+    OverlayPeer {
+        ip: IpAddr,
+        hostname: String,
+        record: OverlayPeerRecord,
     },
     /// A port of a device, with link state.
     DevicePort {
@@ -250,6 +268,8 @@ pub struct TopoNode {
     pub services: BTreeMap<String, ServiceRecord>,
     #[serde(default)]
     pub annotation: NodeAnnotation,
+    #[serde(default)]
+    pub overlays: BTreeMap<String, OverlayPeerRecord>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -351,6 +371,7 @@ impl Topology {
                         sites: BTreeSet::new(),
                         services: BTreeMap::new(),
                         annotation: NodeAnnotation::default(),
+                        overlays: BTreeMap::new(),
                     }
                 });
                 if let Some(site) = &origin.site {
@@ -468,6 +489,39 @@ impl Topology {
                     format!("{}:{}/{}", service.transport, service.port, service.name);
                 node.origins.insert(origin_key(&service.origin));
                 node.services.insert(service_key, service);
+                report.updated_nodes += 1;
+            }
+            Observation::OverlayPeer {
+                ip,
+                hostname,
+                record,
+            } => {
+                let normalized_hostname = hostname.to_lowercase();
+                let key = self
+                    .nodes
+                    .iter()
+                    .find(|(_, node)| node.ips.contains_key(&ip))
+                    .or_else(|| {
+                        self.nodes
+                            .iter()
+                            .find(|(_, node)| node.hostnames.contains(&normalized_hostname))
+                    })
+                    .map(|(id, _)| id.clone())
+                    .unwrap_or_else(|| node_key(None, ip, None));
+                let node = self.nodes.entry(key.clone()).or_insert_with(|| TopoNode {
+                    id: key,
+                    ..TopoNode::default()
+                });
+                node.hostnames.insert(normalized_hostname);
+                node.ips.entry(ip).or_insert_with(|| IpRecord {
+                    addr: ip,
+                    prefix: None,
+                    vlan: None,
+                    origins: BTreeSet::from_iter([origin_key(&record.origin)]),
+                });
+                node.origins.insert(origin_key(&record.origin));
+                node.overlays
+                    .insert(format!("{}/{}", record.network, record.observer), record);
                 report.updated_nodes += 1;
             }
             Observation::DevicePort {
@@ -634,10 +688,11 @@ impl Topology {
                 sites: BTreeSet::new(),
                 services: BTreeMap::new(),
                 annotation: NodeAnnotation::default(),
+                overlays: BTreeMap::new(),
             });
         node.device = true;
-        if node.mac.is_none() {
-            node.mac = mac;
+        if let Some(mac) = mac {
+            node.mac = Some(mac);
         }
         if let Some(site) = &_origin.site {
             node.sites.insert(site.clone());
@@ -690,6 +745,7 @@ fn observation_origin(o: &Observation) -> Origin {
         | Observation::Segment { origin, .. }
         | Observation::Lease { origin, .. } => origin.clone(),
         Observation::Service { service, .. } => service.origin.clone(),
+        Observation::OverlayPeer { record, .. } => record.origin.clone(),
     }
 }
 
@@ -916,6 +972,29 @@ mod tests {
         }]);
         assert_eq!(topo.nodes.len(), 1);
         assert_eq!(topo.nodes["02:00:00:00:00:05"].services.len(), 1);
+    }
+
+    #[test]
+    fn overlay_ipv4_and_ipv6_merge_by_hostname() {
+        let mut topology = Topology::empty();
+        let peer = |address: &str| Observation::OverlayPeer {
+            ip: ip(address),
+            hostname: "agora-one".into(),
+            record: OverlayPeerRecord {
+                network: "tailscale".into(),
+                observer: "linux-titan".into(),
+                online: true,
+                active: false,
+                relay: Some("sea".into()),
+                endpoint: None,
+                routed_lans: BTreeSet::new(),
+                observed_at: 1,
+                origin: Origin::new("linux-titan", "tailscale-status"),
+            },
+        };
+        topology.observe_all([peer("100.80.85.86"), peer("fd7a:115c:a1e0::901:55d1")]);
+        assert_eq!(topology.nodes.len(), 1);
+        assert_eq!(topology.nodes.values().next().unwrap().ips.len(), 2);
     }
 
     #[test]

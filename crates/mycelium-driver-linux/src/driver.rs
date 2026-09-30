@@ -1,19 +1,23 @@
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use mycelium_core::{
     CapResult, CapSpec, CredentialSet, Device, DeviceId, DeviceKind, DeviceMeta, Driver,
-    ExecContext, Inventory, LinkState, MyceliumError, Observation, Origin, Params, PortRef, Result,
-    Segment, SegmentKind, ServiceRecord, ServiceState, Target, Value, ID_IDENTIFY,
+    ExecContext, Inventory, LinkState, MyceliumError, Observation, Origin, OverlayPeerRecord,
+    Params, PortRef, Result, Segment, SegmentKind, ServiceRecord, ServiceState, Target, Value,
+    ID_IDENTIFY,
 };
 use mycelium_driver_edgeos::SshSession;
 
-use crate::parsers::{parse_interfaces, parse_listeners, parse_neighbors, parse_routes};
+use crate::parsers::{
+    parse_interfaces, parse_listeners, parse_neighbors, parse_routes, parse_tailscale_status,
+};
 
 pub const DRIVER_NAME: &str = "linux";
-const OBSERVE_COMMAND: &str = "printf '__MYCELIUM_LINKS__\\n'; ip -o link show; printf '__MYCELIUM_ADDRS__\\n'; ip -o -4 addr show scope global; printf '__MYCELIUM_NEIGH__\\n'; ip neigh show; printf '__MYCELIUM_ROUTES__\\n'; ip -4 route show proto kernel scope link; printf '__MYCELIUM_SERVICES__\\n'; ss -H -lntup";
+const OBSERVE_COMMAND: &str = "printf '__MYCELIUM_LINKS__\\n'; ip -o link show; printf '__MYCELIUM_ADDRS__\\n'; ip -o -4 addr show scope global; printf '__MYCELIUM_NEIGH__\\n'; ip neigh show; printf '__MYCELIUM_ROUTES__\\n'; ip -4 route show proto kernel scope link; printf '__MYCELIUM_SERVICES__\\n'; ss -H -lntup; printf '__MYCELIUM_TAILSCALE__\\n'; tailscale status --json 2>/dev/null || true";
 
 pub struct LinuxDriver {
     timeout: Duration,
@@ -150,6 +154,20 @@ impl Device for LinuxDevice {
         }
         let sections = split_sections(&raw.stdout)?;
         let interfaces = parse_interfaces(sections[0], sections[1]);
+        let primary_mac = interfaces
+            .iter()
+            .find(|interface| {
+                !interface.name.starts_with("br-")
+                    && !interface.name.starts_with("docker")
+                    && !interface.name.starts_with("tailscale")
+                    && !interface.name.starts_with("veth")
+                    && !interface.name.starts_with("sh-")
+                    && !interface.name.starts_with("sv")
+                    && interface.addresses.iter().any(|(address, _)| {
+                        matches!(address, std::net::IpAddr::V4(address) if address.is_private())
+                    })
+            })
+            .and_then(|interface| interface.mac);
         let mut out = Vec::new();
         let origin = |source: &str| {
             Origin::new(self.meta.id.to_string(), source.to_owned()).at_site(self.site.clone())
@@ -158,7 +176,7 @@ impl Device for LinuxDevice {
             out.push(Observation::DevicePort {
                 device: self.meta.id.to_string(),
                 port: iface.name,
-                mac: iface.mac,
+                mac: iface.mac.filter(|mac| Some(*mac) == primary_mac),
                 ips: iface.addresses.into_iter().map(|(ip, _)| ip).collect(),
                 state: if iface.up {
                     LinkState::Up
@@ -215,7 +233,36 @@ impl Device for LinuxDevice {
                 },
             });
         }
-        Ok((out, Vec::new()))
+        let mut warnings = Vec::new();
+        match parse_tailscale_status(sections[5]) {
+            Ok(peers) => {
+                for peer in peers {
+                    for ip in peer.ips {
+                        out.push(Observation::OverlayPeer {
+                            ip,
+                            hostname: peer.hostname.clone(),
+                            record: OverlayPeerRecord {
+                                network: "tailscale".into(),
+                                observer: self.meta.id.to_string(),
+                                online: peer.online,
+                                active: peer.active,
+                                relay: peer.relay.clone(),
+                                endpoint: peer.endpoint.clone(),
+                                routed_lans: peer
+                                    .routed_lans
+                                    .iter()
+                                    .cloned()
+                                    .collect::<BTreeSet<_>>(),
+                                observed_at,
+                                origin: origin("tailscale-status"),
+                            },
+                        });
+                    }
+                }
+            }
+            Err(error) => warnings.push(format!("tailscale status: {error}")),
+        }
+        Ok((out, warnings))
     }
 }
 
@@ -244,7 +291,7 @@ fn service_name(port: u16, process: Option<&str>) -> String {
     }
 }
 
-fn split_sections(text: &str) -> Result<[&str; 5]> {
+fn split_sections(text: &str) -> Result<[&str; 6]> {
     let (_, after_links) = text
         .split_once("__MYCELIUM_LINKS__\n")
         .ok_or_else(|| MyceliumError::Parse("missing links marker".into()))?;
@@ -257,8 +304,11 @@ fn split_sections(text: &str) -> Result<[&str; 5]> {
     let (neigh, after_routes) = after_neigh
         .split_once("__MYCELIUM_ROUTES__\n")
         .ok_or_else(|| MyceliumError::Parse("missing routes marker".into()))?;
-    let (routes, services) = after_routes
+    let (routes, after_services) = after_routes
         .split_once("__MYCELIUM_SERVICES__\n")
         .ok_or_else(|| MyceliumError::Parse("missing services marker".into()))?;
-    Ok([links, addrs, neigh, routes, services])
+    let (services, tailscale) = after_services
+        .split_once("__MYCELIUM_TAILSCALE__\n")
+        .ok_or_else(|| MyceliumError::Parse("missing tailscale marker".into()))?;
+    Ok([links, addrs, neigh, routes, services, tailscale])
 }

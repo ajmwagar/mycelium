@@ -9,4 +9,5 @@ description = "mycelium SSH observation driver for Linux network vantage points"
 mycelium-core.workspace = true
 mycelium-driver-edgeos.workspace = true
 async-trait.workspace = true
-
+serde.workspace = true
+serde_json.workspace = true

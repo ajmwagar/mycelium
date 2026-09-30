@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::net::IpAddr;
 
 use mycelium_core::MacAddress;
+use serde::Deserialize;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Interface {
@@ -31,6 +32,43 @@ pub struct Listener {
     pub transport: String,
     pub port: u16,
     pub process: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TailscalePeer {
+    pub hostname: String,
+    pub ips: Vec<IpAddr>,
+    pub online: bool,
+    pub active: bool,
+    pub relay: Option<String>,
+    pub endpoint: Option<String>,
+    pub routed_lans: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct TailscaleStatus {
+    #[serde(rename = "Peer", default)]
+    peer: BTreeMap<String, TailscalePeerWire>,
+}
+
+#[derive(Deserialize)]
+struct TailscalePeerWire {
+    #[serde(rename = "HostName", default)]
+    host_name: String,
+    #[serde(rename = "TailscaleIPs", default)]
+    tailscale_ips: Vec<IpAddr>,
+    #[serde(rename = "Online", default)]
+    online: bool,
+    #[serde(rename = "Active", default)]
+    active: bool,
+    #[serde(rename = "Relay")]
+    relay: Option<String>,
+    #[serde(rename = "CurAddr")]
+    cur_addr: Option<String>,
+    #[serde(rename = "AllowedIPs", default)]
+    allowed_ips: Vec<String>,
+    #[serde(rename = "PrimaryRoutes", default)]
+    primary_routes: Vec<String>,
 }
 
 pub fn parse_interfaces(links: &str, addresses: &str) -> Vec<Interface> {
@@ -144,6 +182,36 @@ pub fn parse_listeners(text: &str) -> Vec<Listener> {
     listeners
 }
 
+pub fn parse_tailscale_status(text: &str) -> Result<Vec<TailscalePeer>, serde_json::Error> {
+    if text.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let status: TailscaleStatus = serde_json::from_str(text)?;
+    Ok(status
+        .peer
+        .into_values()
+        .map(|peer| {
+            let mut routed_lans = peer.primary_routes;
+            routed_lans.extend(
+                peer.allowed_ips
+                    .into_iter()
+                    .filter(|prefix| !prefix.ends_with("/32") && !prefix.ends_with("/128")),
+            );
+            routed_lans.sort();
+            routed_lans.dedup();
+            TailscalePeer {
+                hostname: peer.host_name,
+                ips: peer.tailscale_ips,
+                online: peer.online,
+                active: peer.active,
+                relay: peer.relay.filter(|relay| !relay.is_empty()),
+                endpoint: peer.cur_addr.filter(|endpoint| !endpoint.is_empty()),
+                routed_lans,
+            }
+        })
+        .collect())
+}
+
 fn parse_cidr(text: &str) -> Option<(IpAddr, u8)> {
     let (ip, prefix) = text.split_once('/')?;
     Some((ip.parse().ok()?, prefix.parse().ok()?))
@@ -181,5 +249,29 @@ mod tests {
         assert_eq!(rows[0].process.as_deref(), Some("frigate"));
         assert_eq!(rows[0].port, 8971);
         assert_eq!(rows[1].transport, "udp");
+    }
+
+    #[test]
+    fn parses_tailscale_peers_and_subnet_routes() {
+        let peers = parse_tailscale_status(
+            r#"{
+              "Peer": {
+                "node-key": {
+                  "HostName": "agora-one",
+                  "TailscaleIPs": ["100.80.85.86"],
+                  "Online": true,
+                  "Active": false,
+                  "Relay": "sea",
+                  "CurAddr": "192.0.2.4:41641",
+                  "AllowedIPs": ["100.80.85.86/32", "192.168.40.0/24"]
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(peers[0].hostname, "agora-one");
+        assert_eq!(peers[0].ips[0].to_string(), "100.80.85.86");
+        assert_eq!(peers[0].routed_lans, vec!["192.168.40.0/24"]);
+        assert!(peers[0].online);
     }
 }
