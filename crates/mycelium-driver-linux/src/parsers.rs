@@ -1,8 +1,7 @@
 use std::collections::BTreeMap;
 use std::net::IpAddr;
 
-use mycelium_core::{LinkDuplex, LinkMedium, MacAddress, MeshControlPlane, MeshCoordinator};
-use serde::Deserialize;
+use mycelium_core::{LinkDuplex, LinkMedium, MacAddress};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Interface {
@@ -35,72 +34,6 @@ pub struct Listener {
     pub transport: String,
     pub port: u16,
     pub process: Option<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TailscalePeer {
-    pub hostname: String,
-    pub dns_name: Option<String>,
-    pub ips: Vec<IpAddr>,
-    pub online: bool,
-    pub active: bool,
-    pub relay: Option<String>,
-    pub endpoint: Option<String>,
-    pub routed_lans: Vec<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TailscaleObservation {
-    pub backend_state: Option<String>,
-    pub tailnet: Option<String>,
-    pub self_node: Option<TailscalePeer>,
-    pub peers: Vec<TailscalePeer>,
-}
-
-#[derive(Deserialize)]
-struct TailscaleStatus {
-    #[serde(rename = "BackendState")]
-    backend_state: Option<String>,
-    #[serde(rename = "CurrentTailnet")]
-    current_tailnet: Option<TailscaleTailnetWire>,
-    #[serde(rename = "Self")]
-    self_node: Option<TailscalePeerWire>,
-    #[serde(rename = "Peer", default)]
-    peer: BTreeMap<String, TailscalePeerWire>,
-}
-
-#[derive(Deserialize)]
-struct TailscaleTailnetWire {
-    #[serde(rename = "Name")]
-    name: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct TailscalePeerWire {
-    #[serde(rename = "HostName", default)]
-    host_name: String,
-    #[serde(rename = "DNSName")]
-    dns_name: Option<String>,
-    #[serde(rename = "TailscaleIPs", default)]
-    tailscale_ips: Vec<IpAddr>,
-    #[serde(rename = "Online", default)]
-    online: bool,
-    #[serde(rename = "Active", default)]
-    active: bool,
-    #[serde(rename = "Relay")]
-    relay: Option<String>,
-    #[serde(rename = "CurAddr")]
-    cur_addr: Option<String>,
-    #[serde(rename = "AllowedIPs", default)]
-    allowed_ips: Option<Vec<String>>,
-    #[serde(rename = "PrimaryRoutes", default)]
-    primary_routes: Option<Vec<String>>,
-}
-
-#[derive(Deserialize)]
-struct TailscalePrefsWire {
-    #[serde(rename = "ControlURL")]
-    control_url: Option<String>,
 }
 
 pub fn parse_interfaces(links: &str, addresses: &str) -> Vec<Interface> {
@@ -258,77 +191,6 @@ pub fn parse_listeners(text: &str) -> Vec<Listener> {
     listeners
 }
 
-pub fn parse_tailscale_status(text: &str) -> Result<TailscaleObservation, serde_json::Error> {
-    if text.trim().is_empty() {
-        return Ok(TailscaleObservation {
-            backend_state: None,
-            tailnet: None,
-            self_node: None,
-            peers: Vec::new(),
-        });
-    }
-    let status: TailscaleStatus = serde_json::from_str(text)?;
-    Ok(TailscaleObservation {
-        backend_state: status.backend_state.filter(|state| !state.is_empty()),
-        tailnet: status.current_tailnet.and_then(|tailnet| tailnet.name),
-        self_node: status.self_node.map(tailscale_peer),
-        peers: status.peer.into_values().map(tailscale_peer).collect(),
-    })
-}
-
-fn tailscale_peer(peer: TailscalePeerWire) -> TailscalePeer {
-    let mut routed_lans = peer.primary_routes.unwrap_or_default();
-    routed_lans.extend(
-        peer.allowed_ips
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|prefix| !prefix.ends_with("/32") && !prefix.ends_with("/128")),
-    );
-    routed_lans.sort();
-    routed_lans.dedup();
-    TailscalePeer {
-        hostname: peer.host_name,
-        dns_name: peer.dns_name.filter(|name| !name.is_empty()),
-        ips: peer.tailscale_ips,
-        online: peer.online,
-        active: peer.active,
-        relay: peer.relay.filter(|relay| !relay.is_empty()),
-        endpoint: peer.cur_addr.filter(|endpoint| !endpoint.is_empty()),
-        routed_lans,
-    }
-}
-
-pub fn parse_tailscale_control_plane(text: &str) -> Result<MeshControlPlane, serde_json::Error> {
-    if text.trim().is_empty() {
-        return Ok(MeshControlPlane::default());
-    }
-    let prefs: TailscalePrefsWire = serde_json::from_str(text)?;
-    let url = prefs.control_url.filter(|url| !url.trim().is_empty());
-    let coordinator = match url.as_deref() {
-        Some(url) if is_tailscale_cloud_url(url) => MeshCoordinator::TailscaleCloud,
-        Some(url) if url.to_ascii_lowercase().contains("headscale") => MeshCoordinator::Headscale,
-        Some(_) => MeshCoordinator::Custom,
-        None => MeshCoordinator::Unknown,
-    };
-    Ok(MeshControlPlane { coordinator, url })
-}
-
-fn is_tailscale_cloud_url(url: &str) -> bool {
-    let host = url
-        .split_once("://")
-        .map(|(_, authority)| authority)
-        .unwrap_or(url)
-        .split('/')
-        .next()
-        .unwrap_or_default()
-        .split(':')
-        .next()
-        .unwrap_or_default()
-        .trim_end_matches('.')
-        .to_ascii_lowercase();
-    host == "tailscale.com" || host.ends_with(".tailscale.com")
-}
-
 fn parse_cidr(text: &str) -> Option<(IpAddr, u8)> {
     let (ip, prefix) = text.split_once('/')?;
     Some((ip.parse().ok()?, prefix.parse().ok()?))
@@ -370,75 +232,5 @@ mod tests {
         assert_eq!(rows[0].process.as_deref(), Some("frigate"));
         assert_eq!(rows[0].port, 8971);
         assert_eq!(rows[1].transport, "udp");
-    }
-
-    #[test]
-    fn parses_tailscale_peers_and_subnet_routes() {
-        let status = parse_tailscale_status(
-            r#"{
-              "Peer": {
-                "node-key": {
-                  "HostName": "agora-one",
-                  "TailscaleIPs": ["100.80.85.86"],
-                  "Online": true,
-                  "Active": false,
-                  "Relay": "sea",
-                  "CurAddr": "192.0.2.4:41641",
-                  "AllowedIPs": ["100.80.85.86/32", "192.168.40.0/24"]
-                }
-              }
-            }"#,
-        )
-        .unwrap();
-        let peers = status.peers;
-        assert_eq!(peers[0].hostname, "agora-one");
-        assert_eq!(peers[0].ips[0].to_string(), "100.80.85.86");
-        assert_eq!(peers[0].routed_lans, vec!["192.168.40.0/24"]);
-        assert!(peers[0].online);
-    }
-
-    #[test]
-    fn parses_self_attachment_with_nullable_primary_routes() {
-        let status = parse_tailscale_status(
-            r#"{
-              "BackendState": "Running",
-              "CurrentTailnet": {"Name": "fpl"},
-              "Self": {
-                "HostName": "pris",
-                "DNSName": "pris.example.ts.net.",
-                "TailscaleIPs": ["100.64.0.1", "fd7a:115c:a1e0::1"],
-                "Online": true,
-                "PrimaryRoutes": null
-              }
-            }"#,
-        )
-        .unwrap();
-        assert_eq!(status.backend_state.as_deref(), Some("Running"));
-        assert_eq!(status.tailnet.as_deref(), Some("fpl"));
-        let node = status.self_node.unwrap();
-        assert_eq!(node.hostname, "pris");
-        assert_eq!(node.ips.len(), 2);
-        assert!(node.routed_lans.is_empty());
-    }
-
-    #[test]
-    fn classifies_tailscale_coordination_servers_without_guessing_custom_hosts() {
-        let cloud =
-            parse_tailscale_control_plane(r#"{"ControlURL":"https://controlplane.tailscale.com"}"#)
-                .unwrap();
-        assert_eq!(cloud.coordinator, MeshCoordinator::TailscaleCloud);
-
-        let headscale =
-            parse_tailscale_control_plane(r#"{"ControlURL":"https://headscale.fpl.dev"}"#).unwrap();
-        assert_eq!(headscale.coordinator, MeshCoordinator::Headscale);
-
-        let custom =
-            parse_tailscale_control_plane(r#"{"ControlURL":"https://mesh.fpl.dev"}"#).unwrap();
-        assert_eq!(custom.coordinator, MeshCoordinator::Custom);
-
-        let lookalike =
-            parse_tailscale_control_plane(r#"{"ControlURL":"https://notreallytailscale.com"}"#)
-                .unwrap();
-        assert_eq!(lookalike.coordinator, MeshCoordinator::Custom);
     }
 }

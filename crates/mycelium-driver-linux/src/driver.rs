@@ -15,8 +15,8 @@ use mycelium_network_types::{Ipv4Prefix, PortForward, TransportProtocol};
 
 use crate::parsers::{
     parse_interfaces, parse_link_properties, parse_listeners, parse_neighbors, parse_routes,
-    parse_tailscale_control_plane, parse_tailscale_status,
 };
+use mycelium_tailscale::{parse_control_plane, parse_status};
 
 pub const DRIVER_NAME: &str = "linux";
 const OBSERVE_COMMAND: &str = "printf '__MYCELIUM_LINKS__\\n'; ip -o link show; printf '__MYCELIUM_LINK_META__\\n'; for p in /sys/class/net/*; do n=${p##*/}; if [ \"$n\" = lo ]; then m=loopback; elif [ -d \"$p/wireless\" ]; then m=wifi; elif [ -e \"$p/device\" ]; then m=ethernet; else m=virtual; fi; printf '%s\\t%s\\t%s\\t%s\\n' \"$n\" \"$m\" \"$(cat \"$p/speed\" 2>/dev/null || true)\" \"$(cat \"$p/duplex\" 2>/dev/null || true)\"; done; printf '__MYCELIUM_ADDRS__\\n'; ip -o -4 addr show scope global; printf '__MYCELIUM_NEIGH__\\n'; ip neigh show; printf '__MYCELIUM_ROUTES__\\n'; ip -4 route show proto kernel scope link; printf '__MYCELIUM_SERVICES__\\n'; ss -H -lntup; printf '__MYCELIUM_TAILSCALE__\\n'; tailscale status --json 2>/dev/null || true; printf '\\n__MYCELIUM_TAILSCALE_PREFS__\\n'; tailscale debug prefs 2>/dev/null || true";
@@ -412,14 +412,14 @@ impl Device for LinuxDevice {
             });
         }
         let mut warnings = Vec::new();
-        let control_plane = match parse_tailscale_control_plane(sections[7]) {
+        let control_plane = match parse_control_plane(sections[7]) {
             Ok(control_plane) => control_plane,
             Err(error) => {
                 warnings.push(format!("tailscale preferences: {error}"));
                 Default::default()
             }
         };
-        match parse_tailscale_status(sections[6]) {
+        match parse_status(sections[6]) {
             Ok(status) => {
                 if let Some(peer) = status.self_node {
                     out.push(Observation::OverlaySelf {
