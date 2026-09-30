@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use mycelium_core::{
     CapResult, CapSpec, Device, DeviceKind, DeviceMeta, ExecContext, Identity, IntoValue,
     MacAddress, MyceliumError, Observation, Origin, ParamType, Params, PortRef, Result, Value,
-    ID_IDENTIFY,
+    ID_IDENTIFY, ID_SWITCH_OBSERVE,
 };
 
 use crate::client::SnmpHandle;
@@ -30,6 +30,9 @@ const ARP_MAC: &str = "1.3.6.1.2.1.4.22.2.1.4";
 const BRIDGE_PORT_IFINDEX: &str = "1.3.6.1.2.1.17.1.4.1.2";
 const FDB_PORT: &str = "1.3.6.1.2.1.17.4.3.1.2";
 const Q_FDB_PORT: &str = "1.3.6.1.2.1.17.7.1.2.2.1.2";
+// Q-BRIDGE-MIB: VLAN names and per-bridge-port default VLAN IDs.
+const Q_VLAN_STATIC_NAME: &str = "1.3.6.1.2.1.17.7.1.4.3.1.1";
+const Q_PVID: &str = "1.3.6.1.2.1.17.7.1.4.5.1.1";
 
 pub const ID_SNMP_GET: &str = "snmp.get";
 pub const ID_SNMP_WALK: &str = "snmp.walk";
@@ -54,6 +57,11 @@ pub fn caps() -> &'static BTreeMap<String, CapSpec> {
             (
                 ID_NET_ARP.to_owned(),
                 CapSpec::readonly("arp/ipNetToMedia table").returns("list of {ip, mac, iface}"),
+            ),
+            (
+                ID_SWITCH_OBSERVE.to_owned(),
+                CapSpec::readonly("partial switch state from standard Q-BRIDGE-MIB")
+                    .returns("versioned map with explicit coverage, VLANs, and interface PVIDs"),
             ),
             (
                 ID_SNMP_GET.to_owned(),
@@ -227,6 +235,22 @@ impl SnmpDevice {
         Ok(rows)
     }
 
+    async fn switch_state(&self) -> Result<Value> {
+        let info = Self::probe(&self.handle).await?;
+        let vlan_rows = self.handle.walk(Q_VLAN_STATIC_NAME, 4096).await?;
+        let pvid_rows = self.handle.walk(Q_PVID, 4096).await?;
+        let bridge_rows = self.handle.walk(BRIDGE_PORT_IFINDEX, 4096).await?;
+        let ifaces = self.iface_rows().await?;
+        Ok(switch_state_value(
+            self.meta.model.clone(),
+            &info,
+            vlan_rows,
+            pvid_rows,
+            bridge_rows,
+            &ifaces,
+        ))
+    }
+
     fn ifindex_names(
         &self,
         map: &BTreeMap<u32, (String, Option<String>, Option<u32>)>,
@@ -295,6 +319,85 @@ fn split_column(oid: &str) -> (u32, u32) {
     } else {
         (col, arcs[arcs.len() - 1].parse().unwrap_or(0))
     }
+}
+
+fn switch_state_value(
+    model: Option<String>,
+    info: &SnmpInfo,
+    vlan_rows: Vec<(String, Value)>,
+    pvid_rows: Vec<(String, Value)>,
+    bridge_rows: Vec<(String, Value)>,
+    ifaces: &BTreeMap<u32, (String, Option<String>, Option<u32>)>,
+) -> Value {
+    let vlan_inventory_covered = !vlan_rows.is_empty();
+    let pvid_row_count = pvid_rows.len();
+    let vlans = vlan_rows
+        .into_iter()
+        .filter_map(|(oid, value)| {
+            let id = u16::try_from(row_index(&oid)).ok()?;
+            Some((
+                id.to_string(),
+                Value::Map(Params::from_iter([
+                    ("id".into(), Value::Int(id as i64)),
+                    (
+                        "name".into(),
+                        value
+                            .as_str()
+                            .filter(|name| !name.is_empty())
+                            .map(|name| Value::Str(name.to_owned()))
+                            .unwrap_or(Value::Null),
+                    ),
+                ])),
+            ))
+        })
+        .collect::<Params>();
+    let bridge_to_ifindex = bridge_rows
+        .into_iter()
+        .filter_map(|(oid, value)| Some((row_index(&oid), value.as_i64()? as u32)))
+        .collect::<HashMap<_, _>>();
+    let interfaces = pvid_rows
+        .into_iter()
+        .filter_map(|(oid, value)| {
+            let bridge_port = row_index(&oid);
+            let ifindex = bridge_to_ifindex.get(&bridge_port)?;
+            let name = ifaces.get(ifindex)?.0.clone();
+            let pvid = value.as_i64()?;
+            Some((
+                name.clone(),
+                Value::Map(Params::from_iter([
+                    ("name".into(), Value::Str(name)),
+                    ("pvid".into(), Value::Int(pvid)),
+                ])),
+            ))
+        })
+        .collect::<Params>();
+    let interface_pvids_covered = pvid_row_count > 0 && interfaces.len() == pvid_row_count;
+
+    Value::Map(Params::from_iter([
+        ("schema_version".into(), Value::Int(1)),
+        (
+            "model_family".into(),
+            model
+                .or_else(|| first_model_token(&info.sys_descr))
+                .map(Value::Str)
+                .unwrap_or(Value::Null),
+        ),
+        ("firmware_version".into(), Value::Null),
+        (
+            "coverage".into(),
+            Value::Map(Params::from_iter([
+                ("vlan_inventory".into(), Value::Bool(vlan_inventory_covered)),
+                ("vlan_names".into(), Value::Bool(vlan_inventory_covered)),
+                (
+                    "interface_pvids".into(),
+                    Value::Bool(interface_pvids_covered),
+                ),
+                ("interface_membership".into(), Value::Bool(false)),
+            ])),
+        ),
+        ("vlans".into(), Value::Map(vlans)),
+        ("interfaces".into(), Value::Map(interfaces)),
+    ]))
 }
 
 pub fn classify(info: &SnmpInfo, host: &str) -> (DeviceKind, String, Option<String>) {
@@ -385,6 +488,7 @@ impl Device for SnmpDevice {
                 ]))))
             }
             ID_NET_IFACES => Ok(CapResult::ok(self.ifaces().await?)),
+            ID_SWITCH_OBSERVE => Ok(CapResult::ok(self.switch_state().await?)),
             ID_NET_ARP => {
                 let rows = self.arp().await?;
                 let names = self.ifindex_names(&self.iface_rows().await?);
@@ -685,6 +789,44 @@ mod tests {
                 ("oid".into(), Value::Str("1.3.6.1.2.1.1.5.0".into())),
                 ("value".into(), Value::Int(42)),
             ]))
+        );
+    }
+
+    #[test]
+    fn standard_mibs_form_a_versioned_partial_switch_snapshot() {
+        let info = SnmpInfo {
+            sys_descr: "NETGEAR GS728TS 6.0.1.29".into(),
+            ..SnmpInfo::default()
+        };
+        let ifaces = BTreeMap::from_iter([(
+            7,
+            ("1/g7".into(), Some("00:11:22:33:44:55".into()), Some(1)),
+        )]);
+        let value = switch_state_value(
+            Some("GS728TS".into()),
+            &info,
+            vec![(
+                format!("{Q_VLAN_STATIC_NAME}.20"),
+                Value::Str("CAMERAS".into()),
+            )],
+            vec![(format!("{Q_PVID}.3"), Value::Int(20))],
+            vec![(format!("{BRIDGE_PORT_IFINDEX}.3"), Value::Int(7))],
+            &ifaces,
+        );
+
+        assert_eq!(value.get("schema_version"), Some(&Value::Int(1)));
+        assert_eq!(
+            value
+                .get("coverage")
+                .and_then(|coverage| coverage.get("interface_pvids")),
+            Some(&Value::Bool(true))
+        );
+        assert_eq!(
+            value
+                .get("interfaces")
+                .and_then(|interfaces| interfaces.get("1/g7"))
+                .and_then(|interface| interface.get("pvid")),
+            Some(&Value::Int(20))
         );
     }
 }

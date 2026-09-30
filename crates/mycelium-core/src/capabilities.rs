@@ -21,6 +21,7 @@ pub const ID_CAPABILITIES: &str = "system.capabilities";
 pub const ID_VLAN_LIST: &str = "vlan.list";
 pub const ID_VLAN_CREATE: &str = "vlan.create";
 pub const ID_VLAN_ASSIGN: &str = "vlan.assign";
+pub const ID_SWITCH_OBSERVE: &str = "switch.observe";
 pub const ID_DHCP_LIST_POOLS: &str = "dhcp.list-pools";
 pub const ID_DHCP_ADD_STATIC_LEASE: &str = "dhcp.add-static-lease";
 pub const ID_DNS_LIST_ENTRIES: &str = "dns.list-entries";
