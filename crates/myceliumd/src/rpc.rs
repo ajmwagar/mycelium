@@ -6,6 +6,7 @@ use mycelium_core::{
     CredentialSet, DeviceId, DeviceMeta, Driver, Inventory, MyceliumError, Result, Secret, Target,
     Topology, Transport, Value,
 };
+use mycelium_driver_darwin::DarwinDriver;
 use mycelium_driver_edgeos::{EdgeOsDriver, SshSession};
 use mycelium_driver_linux::LinuxDriver;
 use mycelium_driver_redfish::RedfishDriver;
@@ -70,6 +71,7 @@ impl Daemon {
     pub async fn boot() -> Result<Self> {
         let mut drivers: Vec<Arc<dyn Driver>> = vec![
             Arc::new(EdgeOsDriver::default()),
+            Arc::new(DarwinDriver::default()),
             Arc::new(LinuxDriver::default()),
             Arc::new(RedfishDriver::default()),
             Arc::new(SnmpDriver::default()),

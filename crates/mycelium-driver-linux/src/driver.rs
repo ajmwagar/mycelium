@@ -1,14 +1,13 @@
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use mycelium_core::{
     CapResult, CapSpec, CredentialSet, Device, DeviceId, DeviceKind, DeviceMeta, Driver,
-    ExecContext, Inventory, LinkState, MeshProtocol, MyceliumError, Observation, Origin,
-    OverlayPeerRecord, Params, PortRef, Result, Segment, SegmentKind, ServiceRecord, ServiceState,
-    Target, Value, ID_IDENTIFY, ID_NET_FORWARD_ENSURE, ID_NET_VIP_ENSURE,
+    ExecContext, Inventory, LinkState, MyceliumError, Observation, Origin, Params, PortRef, Result,
+    Segment, SegmentKind, ServiceRecord, ServiceState, Target, Value, ID_IDENTIFY,
+    ID_NET_FORWARD_ENSURE, ID_NET_VIP_ENSURE,
 };
 use mycelium_driver_edgeos::SshSession;
 use mycelium_network_types::{Ipv4Prefix, PortForward, TransportProtocol};
@@ -16,7 +15,7 @@ use mycelium_network_types::{Ipv4Prefix, PortForward, TransportProtocol};
 use crate::parsers::{
     parse_interfaces, parse_link_properties, parse_listeners, parse_neighbors, parse_routes,
 };
-use mycelium_tailscale::{parse_control_plane, parse_status};
+use mycelium_tailscale::{parse_control_plane, parse_status, topology_observations};
 
 pub const DRIVER_NAME: &str = "linux";
 const OBSERVE_COMMAND: &str = "printf '__MYCELIUM_LINKS__\\n'; ip -o link show; printf '__MYCELIUM_LINK_META__\\n'; for p in /sys/class/net/*; do n=${p##*/}; if [ \"$n\" = lo ]; then m=loopback; elif [ -d \"$p/wireless\" ]; then m=wifi; elif [ -e \"$p/device\" ]; then m=ethernet; else m=virtual; fi; printf '%s\\t%s\\t%s\\t%s\\n' \"$n\" \"$m\" \"$(cat \"$p/speed\" 2>/dev/null || true)\" \"$(cat \"$p/duplex\" 2>/dev/null || true)\"; done; printf '__MYCELIUM_ADDRS__\\n'; ip -o -4 addr show scope global; printf '__MYCELIUM_NEIGH__\\n'; ip neigh show; printf '__MYCELIUM_ROUTES__\\n'; ip -4 route show proto kernel scope link; printf '__MYCELIUM_SERVICES__\\n'; ss -H -lntup; printf '__MYCELIUM_TAILSCALE__\\n'; tailscale status --json 2>/dev/null || true; printf '\\n__MYCELIUM_TAILSCALE_PREFS__\\n'; tailscale debug prefs 2>/dev/null || true";
@@ -421,59 +420,13 @@ impl Device for LinuxDevice {
         };
         match parse_status(sections[6]) {
             Ok(status) => {
-                if let Some(peer) = status.self_node {
-                    out.push(Observation::OverlaySelf {
-                        device: self.meta.id.to_string(),
-                        ips: peer.ips.clone(),
-                        hostname: peer.hostname.clone(),
-                        record: OverlayPeerRecord {
-                            network: "tailscale".into(),
-                            protocol: MeshProtocol::Tailscale,
-                            control_plane: control_plane.clone(),
-                            self_node: true,
-                            tailnet: status.tailnet.clone(),
-                            dns_name: peer.dns_name.clone(),
-                            backend_state: status.backend_state.clone(),
-                            observer: self.meta.id.to_string(),
-                            online: peer.online,
-                            active: peer.active,
-                            relay: None,
-                            endpoint: None,
-                            routed_lans: peer.routed_lans.iter().cloned().collect(),
-                            observed_at,
-                            origin: origin("tailscale-status"),
-                        },
-                    });
-                }
-                for peer in status.peers {
-                    for ip in peer.ips {
-                        out.push(Observation::OverlayPeer {
-                            ip,
-                            hostname: peer.hostname.clone(),
-                            record: OverlayPeerRecord {
-                                network: "tailscale".into(),
-                                protocol: MeshProtocol::Tailscale,
-                                control_plane: control_plane.clone(),
-                                self_node: false,
-                                tailnet: status.tailnet.clone(),
-                                dns_name: peer.dns_name.clone(),
-                                backend_state: status.backend_state.clone(),
-                                observer: self.meta.id.to_string(),
-                                online: peer.online,
-                                active: peer.active,
-                                relay: peer.relay.clone(),
-                                endpoint: peer.endpoint.clone(),
-                                routed_lans: peer
-                                    .routed_lans
-                                    .iter()
-                                    .cloned()
-                                    .collect::<BTreeSet<_>>(),
-                                observed_at,
-                                origin: origin("tailscale-status"),
-                            },
-                        });
-                    }
-                }
+                out.extend(topology_observations(
+                    status,
+                    control_plane,
+                    &self.meta.id.to_string(),
+                    &self.site,
+                    observed_at,
+                ));
             }
             Err(error) => warnings.push(format!("tailscale status: {error}")),
         }

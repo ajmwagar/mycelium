@@ -1,9 +1,12 @@
 //! Platform-neutral parsing of the Tailscale CLI's JSON observations.
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::net::IpAddr;
 
-use mycelium_core::{MeshControlPlane, MeshCoordinator};
+use mycelium_core::{
+    MeshControlPlane, MeshCoordinator, MeshProtocol, Observation, Origin, OverlayPeerRecord,
+};
 use serde::Deserialize;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -125,6 +128,80 @@ pub fn parse_control_plane(text: &str) -> Result<MeshControlPlane, serde_json::E
         None => MeshCoordinator::Unknown,
     };
     Ok(MeshControlPlane { coordinator, url })
+}
+
+/// Convert one platform's CLI snapshots into the shared topology contract.
+pub fn topology_observations(
+    status: Status,
+    control_plane: MeshControlPlane,
+    device: &str,
+    site: &str,
+    observed_at: u64,
+) -> Vec<Observation> {
+    let origin = || Origin::new(device, "tailscale-status").at_site(site);
+    let mut out = Vec::new();
+    if let Some(peer) = &status.self_node {
+        out.push(Observation::OverlaySelf {
+            device: device.to_owned(),
+            ips: peer.ips.clone(),
+            hostname: peer.hostname.clone(),
+            record: record(
+                &peer,
+                true,
+                &status,
+                control_plane.clone(),
+                device,
+                observed_at,
+                origin(),
+            ),
+        });
+    }
+    for peer in &status.peers {
+        for ip in &peer.ips {
+            out.push(Observation::OverlayPeer {
+                ip: *ip,
+                hostname: peer.hostname.clone(),
+                record: record(
+                    &peer,
+                    false,
+                    &status,
+                    control_plane.clone(),
+                    device,
+                    observed_at,
+                    origin(),
+                ),
+            });
+        }
+    }
+    out
+}
+
+fn record(
+    peer: &Peer,
+    self_node: bool,
+    status: &Status,
+    control_plane: MeshControlPlane,
+    device: &str,
+    observed_at: u64,
+    origin: Origin,
+) -> OverlayPeerRecord {
+    OverlayPeerRecord {
+        network: "tailscale".into(),
+        protocol: MeshProtocol::Tailscale,
+        control_plane,
+        self_node,
+        tailnet: status.tailnet.clone(),
+        dns_name: peer.dns_name.clone(),
+        backend_state: status.backend_state.clone(),
+        observer: device.to_owned(),
+        online: peer.online,
+        active: peer.active,
+        relay: (!self_node).then(|| peer.relay.clone()).flatten(),
+        endpoint: (!self_node).then(|| peer.endpoint.clone()).flatten(),
+        routed_lans: peer.routed_lans.iter().cloned().collect::<BTreeSet<_>>(),
+        observed_at,
+        origin,
+    }
 }
 
 fn is_tailscale_cloud_url(url: &str) -> bool {

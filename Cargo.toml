@@ -15,6 +15,7 @@ mycelium-tailscale = { path = "crates/mycelium-tailscale" }
 mycelium-driver-edgeos = { path = "crates/mycelium-driver-edgeos" }
 mycelium-driver-redfish = { path = "crates/mycelium-driver-redfish" }
 mycelium-driver-linux = { path = "crates/mycelium-driver-linux" }
+mycelium-driver-darwin = { path = "crates/mycelium-driver-darwin" }
 mycelium-driver-snmp = { path = "crates/mycelium-driver-snmp" }
 mycelium-driver-unifi = { path = "crates/mycelium-driver-unifi" }
 mycelium-plugins-lua = { path = "crates/mycelium-plugins-lua" }
