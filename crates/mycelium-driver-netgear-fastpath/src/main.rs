@@ -1,5 +1,5 @@
 use mycelium_driver_netgear_fastpath::{
-    FastpathConfig, FastpathIntent, ReconcileOptions, ReconciliationPlan,
+    FastpathConfig, FastpathIntent, ReconcileOptions, ReconciliationPlan, SnmpSwitchState,
 };
 use std::env;
 use std::fs;
@@ -18,6 +18,7 @@ fn run() -> Result<(), String> {
     let mut redacted_output = None;
     let mut intent_output = None;
     let mut observed_intent = None;
+    let mut observed_snmp = None;
     let mut plan_output = None;
     let mut allow_deletes = false;
     let mut allow_model_mismatch = false;
@@ -29,6 +30,8 @@ fn run() -> Result<(), String> {
             intent_output = Some(arguments.next().map(PathBuf::from).ok_or_else(usage)?);
         } else if argument == "--observed-intent" {
             observed_intent = Some(arguments.next().map(PathBuf::from).ok_or_else(usage)?);
+        } else if argument == "--observed-snmp" {
+            observed_snmp = Some(arguments.next().map(PathBuf::from).ok_or_else(usage)?);
         } else if argument == "--plan-output" {
             plan_output = Some(arguments.next().map(PathBuf::from).ok_or_else(usage)?);
         } else if argument == "--allow-deletes" {
@@ -77,8 +80,8 @@ fn run() -> Result<(), String> {
         println!("intent_output={}", destination.display());
     }
 
-    match (observed_intent, plan_output) {
-        (Some(observed_path), Some(destination)) => {
+    match (observed_intent, observed_snmp, plan_output) {
+        (Some(observed_path), None, Some(destination)) => {
             let observed_bytes = fs::read(&observed_path).map_err(|error| {
                 format!(
                     "cannot read observed intent {}: {error}",
@@ -109,9 +112,40 @@ fn run() -> Result<(), String> {
             println!("ready_to_apply={}", plan.ready_to_apply);
             println!("plan_output={}", destination.display());
         }
-        (None, None) => {}
+        (None, Some(observed_path), Some(destination)) => {
+            let observed_bytes = fs::read(&observed_path).map_err(|error| {
+                format!(
+                    "cannot read SNMP observation {}: {error}",
+                    observed_path.display()
+                )
+            })?;
+            let observed: SnmpSwitchState =
+                serde_json::from_slice(&observed_bytes).map_err(|error| {
+                    format!(
+                        "cannot parse SNMP observation {}: {error}",
+                        observed_path.display()
+                    )
+                })?;
+            let device = observed_path
+                .file_stem()
+                .and_then(|name| name.to_str())
+                .unwrap_or("netgear-switch");
+            let plan = observed.plan(device, &intent);
+            let json = serde_json::to_vec_pretty(&plan)
+                .map_err(|error| format!("cannot serialize action plan: {error}"))?;
+            fs::write(&destination, json)
+                .map_err(|error| format!("cannot write {}: {error}", destination.display()))?;
+            println!("plan_actions={}", plan.actions.len());
+            println!("plan_blockers={}", plan.blockers.len());
+            println!("ready_to_apply={}", plan.ready_to_apply());
+            println!("plan_output={}", destination.display());
+        }
+        (None, None, None) => {}
         _ => {
-            return Err("--observed-intent and --plan-output must be supplied together".to_owned())
+            return Err(
+                "choose one of --observed-intent or --observed-snmp and supply --plan-output"
+                    .to_owned(),
+            )
         }
     }
 
@@ -122,7 +156,7 @@ fn usage() -> String {
     concat!(
         "usage: mycelium-driver-netgear-fastpath <startup-config> ",
         "[--redacted-output <path>] [--intent-output <path>] ",
-        "[--observed-intent <path> --plan-output <path> ",
+        "[(--observed-intent <path> | --observed-snmp <path>) --plan-output <path> ",
         "[--allow-deletes] [--allow-model-mismatch]]"
     )
     .to_owned()
