@@ -22,10 +22,13 @@ impl ExecContext {
     }
 
     /// Refuse to proceed when this capability mutates state but writes are
-    /// not permitted. Called by every honest driver/plugin host.
+    /// not permitted. A dry run is allowed without write permission because
+    /// it computes a plan and must not touch the transport.
     pub fn gate(&self, mutation: bool) -> Result<(), crate::MyceliumError> {
-        if mutation && !self.allow_writes {
-            return Err(crate::MyceliumError::WritesNotPermitted(self.capability.clone()));
+        if mutation && !self.allow_writes && !self.dry_run {
+            return Err(crate::MyceliumError::WritesNotPermitted(
+                self.capability.clone(),
+            ));
         }
         Ok(())
     }

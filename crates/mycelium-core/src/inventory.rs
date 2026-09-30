@@ -217,10 +217,27 @@ mod tests {
         let err = dev.invoke(&gated, "test.apply", Params::new()).await.unwrap_err();
         assert!(matches!(err, MyceliumError::WritesNotPermitted(_)));
 
-        // ...and passes with explicit opt-in
-        let opted =
-            ExecContext { capability: "test.apply".into(), allow_writes: true, dry_run: true };
-        assert!(dev.invoke(&opted, "test.apply", Params::new()).await.is_ok());
+        // Planning a mutation never requires write permission.
+        let dry_run = ExecContext {
+            capability: "test.apply".into(),
+            allow_writes: false,
+            dry_run: true,
+        };
+        assert!(dev
+            .invoke(&dry_run, "test.apply", Params::new())
+            .await
+            .is_ok());
+
+        // Applying passes only with explicit opt-in.
+        let opted = ExecContext {
+            capability: "test.apply".into(),
+            allow_writes: true,
+            dry_run: false,
+        };
+        assert!(dev
+            .invoke(&opted, "test.apply", Params::new())
+            .await
+            .is_ok());
     }
 
     #[tokio::test]

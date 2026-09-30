@@ -358,7 +358,7 @@ impl Device for SnmpDevice {
         caps().clone()
     }
 
-    async fn exec(&self, _ctx: &ExecContext, cap: &str, params: Params) -> Result<CapResult> {
+    async fn exec(&self, ctx: &ExecContext, cap: &str, params: Params) -> Result<CapResult> {
         match cap {
             ID_IDENTIFY => {
                 let info = SnmpDevice::probe(&self.handle).await?;
@@ -455,6 +455,12 @@ impl Device for SnmpDevice {
                         .map(Value::Int)
                         .unwrap_or_else(|_| Value::Str(raw.to_owned())),
                 };
+                if ctx.dry_run {
+                    return Ok(CapResult::dry_run(Value::Map(Params::from_iter([
+                        ("oid".into(), Value::Str(oid)),
+                        ("value".into(), value),
+                    ]))));
+                }
                 let (o, v) = self.handle.set(&oid, value).await?;
                 Ok(CapResult::ok(Value::Map(Params::from_iter([
                     ("oid".into(), Value::Str(o)),
@@ -608,6 +614,21 @@ pub(crate) fn enterprise_vendor_public(objectid: &str) -> String {
 mod tests {
     use super::*;
 
+    fn test_device() -> SnmpDevice {
+        SnmpDevice::new(
+            SnmpHandle::new("192.0.2.1", DEFAULT_SNMP_PORT, "public"),
+            DeviceMeta {
+                id: mycelium_core::DeviceId::new("test-switch"),
+                kind: DeviceKind::Switch,
+                driver: "snmp".into(),
+                vendor: Some("NETGEAR".into()),
+                model: None,
+                firmware: None,
+                address: "192.0.2.1:161".into(),
+            },
+        )
+    }
+
     fn info(descr: &str, objectid: &str) -> SnmpInfo {
         SnmpInfo {
             sys_descr: descr.into(),
@@ -635,5 +656,35 @@ mod tests {
     fn classifies_edge_router_before_ubiquiti_enterprise_fallback() {
         let (kind, _, _) = classify(&info("EdgeRouter 6P", "1.3.6.1.4.1.41112.1.5"), "192.0.2.1");
         assert_eq!(kind, DeviceKind::Router);
+    }
+
+    #[tokio::test]
+    async fn snmp_set_dry_run_never_needs_a_write_community_or_network() {
+        let device = test_device();
+        let context = ExecContext {
+            capability: ID_SNMP_SET.into(),
+            allow_writes: false,
+            dry_run: true,
+        };
+        let result = device
+            .invoke(
+                &context,
+                ID_SNMP_SET,
+                Params::from_iter([
+                    ("oid".into(), Value::Str("1.3.6.1.2.1.1.5.0".into())),
+                    ("value".into(), Value::Str("42".into())),
+                ]),
+            )
+            .await
+            .unwrap();
+
+        assert!(result.dry_run);
+        assert_eq!(
+            result.output,
+            Value::Map(Params::from_iter([
+                ("oid".into(), Value::Str("1.3.6.1.2.1.1.5.0".into())),
+                ("value".into(), Value::Int(42)),
+            ]))
+        );
     }
 }
