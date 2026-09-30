@@ -338,7 +338,7 @@ fn usage(message: &str) -> ClientError {
 }
 
 pub fn default_ca() -> PathBuf {
-    myceliumd::home_dir().join("pki")
+    myceliumd::home_dir().join("authority")
 }
 
 #[cfg(test)]

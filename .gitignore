@@ -7,5 +7,6 @@ Cargo.lock
 .mycelium/peer-observations.json
 .mycelium/artifacts/
 .mycelium/pki/
+.mycelium/authority/
 .mycelium/enrollments/
 .mycelium/release.key
