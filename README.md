@@ -77,7 +77,7 @@ socket and listens on port 7443. An already-enrolled machine can reconstruct
 and verify its native service without consuming another claim:
 
 ```sh
-mycelium setup --repair
+mycelium setup --repair --site mames-house
 ```
 
 Requirements: a current stable Rust toolchain and the native tools required by

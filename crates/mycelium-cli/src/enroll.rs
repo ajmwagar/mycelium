@@ -325,7 +325,10 @@ pub(crate) fn install_peer_material(
     ])
 }
 
-pub(crate) fn repair_peer_service(home: &Path) -> Result<Vec<String>, String> {
+pub(crate) fn repair_peer_service(
+    home: &Path,
+    site_override: Option<&str>,
+) -> Result<Vec<String>, String> {
     for required in ["node.env", "pki/ca.pem", "pki/node.pem", "pki/node-key.pem"] {
         if !home.join(required).is_file() {
             return Err(format!(
@@ -334,8 +337,14 @@ pub(crate) fn repair_peer_service(home: &Path) -> Result<Vec<String>, String> {
             ));
         }
     }
-    let environment = std::fs::read_to_string(home.join("node.env"))
+    let mut environment = std::fs::read_to_string(home.join("node.env"))
         .map_err(|error| format!("read node environment: {error}"))?;
+    if let Some(site) = site_override {
+        validate_label("site", site).map_err(|error| error.to_string())?;
+        environment = replace_environment_value(&environment, "MYCELIUM_SITE", site)?;
+        std::fs::write(home.join("node.env"), &environment)
+            .map_err(|error| format!("update node site: {error}"))?;
+    }
     let setting = |name: &str| -> Result<&str, String> {
         environment
             .lines()
@@ -355,6 +364,27 @@ pub(crate) fn repair_peer_service(home: &Path) -> Result<Vec<String>, String> {
         "repaired and verified peer service from {}",
         service.display()
     )])
+}
+
+fn replace_environment_value(source: &str, name: &str, value: &str) -> Result<String, String> {
+    let prefix = format!("{name}=");
+    let mut replaced = false;
+    let mut lines = source
+        .lines()
+        .map(|line| {
+            if line.starts_with(&prefix) {
+                replaced = true;
+                format!("{prefix}{value}")
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect::<Vec<_>>();
+    if !replaced {
+        return Err(format!("node environment is missing {name}"));
+    }
+    lines.push(String::new());
+    Ok(lines.join("\n"))
 }
 
 fn write_peer_service(

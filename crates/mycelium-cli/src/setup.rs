@@ -7,7 +7,7 @@ pub async fn run(args: &[String]) -> Result<Vec<String>, String> {
         let home = value(args, "--path")
             .map(expand_home)
             .unwrap_or_else(myceliumd::home_dir);
-        return crate::enroll::repair_peer_service(&home);
+        return crate::enroll::repair_peer_service(&home, value(args, "--site"));
     }
     let claim = value(args, "--claim");
     let embedded = claim
