@@ -20,6 +20,7 @@ struct GatewayState {
     issuer: Arc<str>,
     audience: Arc<str>,
     ca: Arc<PathBuf>,
+    enrollment_ca: Option<Arc<PathBuf>>,
     client_id: Arc<str>,
     client_secret: Arc<str>,
     callback_url: Arc<str>,
@@ -126,6 +127,7 @@ pub async fn serve(args: &[String]) -> Result<Vec<String>, String> {
         issuer: issuer.into(),
         audience: audience.into(),
         ca: Arc::new(ca),
+        enrollment_ca: None,
         client_id: client_id.into(),
         client_secret: client_secret.into(),
         callback_url: callback_url.into(),
@@ -151,6 +153,7 @@ pub async fn serve(args: &[String]) -> Result<Vec<String>, String> {
 pub(crate) async fn serve_pairing(
     listen: SocketAddr,
     ca: PathBuf,
+    enrollment_ca: PathBuf,
     invite_store: PathBuf,
     invitation_id: String,
     expires_at: u64,
@@ -162,6 +165,7 @@ pub(crate) async fn serve_pairing(
         issuer: "pairing".into(),
         audience: "pairing".into(),
         ca: Arc::new(ca),
+        enrollment_ca: Some(Arc::new(enrollment_ca)),
         client_id: "pairing".into(),
         client_secret: "pairing".into(),
         callback_url: "pairing".into(),
@@ -201,7 +205,13 @@ async fn redeem_invite(
     State(state): State<GatewayState>,
     Json(request): Json<crate::invite::RedeemRequest>,
 ) -> Result<Json<crate::invite::RedeemResponse>, (StatusCode, Json<ErrorResponse>)> {
-    if request.claim.len() > 128 || request.public_key.len() > 16 * 1024 {
+    if request.claim.len() > 128
+        || request.public_key.len() > 16 * 1024
+        || request
+            .peer_csr
+            .as_ref()
+            .is_some_and(|csr| csr.len() > 32 * 1024)
+    {
         return Err(api_error(
             StatusCode::PAYLOAD_TOO_LARGE,
             "request too large",
@@ -228,10 +238,62 @@ async fn redeem_invite(
     let root = temporary_root();
     fs::create_dir_all(&root)
         .map_err(|error| api_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
-    let public_key = root.join("user.pub");
-    let certificate = root.join("user-cert.pub");
     let ttl = invitation.credential_ttl;
-    let result = (|| {
+    let result = (|| -> Result<(String, Option<crate::invite::PeerEnrollment>), String> {
+        if invitation.kind == crate::invite::InvitationKind::Peer {
+            let csr = request
+                .peer_csr
+                .as_deref()
+                .ok_or("peer invitation requires a certificate signing request")?;
+            let ca = state
+                .enrollment_ca
+                .as_deref()
+                .ok_or("peer enrollment is unavailable on this gateway")?;
+            let node_certificate = crate::enroll::sign_csr(ca, csr, &invitation.name, &root)?;
+            let ca_certificate = fs::read_to_string(ca.join("ca.pem"))
+                .map_err(|error| format!("read mesh CA: {error}"))?;
+            let certificate = if invitation.unix_users.is_empty() {
+                String::new()
+            } else {
+                if request.public_key.is_empty() {
+                    return Err("peer invitation with SSH roles requires a public key".into());
+                }
+                let public_key = root.join("user.pub");
+                let certificate = root.join("user-cert.pub");
+                fs::write(&public_key, request.public_key.as_bytes())
+                    .map_err(|error| format!("stage SSH public key: {error}"))?;
+                crate::ssh_access::issue_for_invite(
+                    &public_key,
+                    &state.ca,
+                    &certificate,
+                    &invitation.id,
+                    &invitation.name,
+                    invitation
+                        .serial
+                        .wrapping_add(invitation.remaining_uses as u64),
+                    &invitation.unix_users,
+                    &invitation.roles,
+                    ttl,
+                )?;
+                fs::read_to_string(certificate)
+                    .map_err(|error| format!("read issued SSH certificate: {error}"))?
+            };
+            return Ok((
+                certificate,
+                Some(crate::invite::PeerEnrollment {
+                    ca_certificate,
+                    node_certificate,
+                    site: invitation
+                        .site
+                        .clone()
+                        .ok_or("peer invitation has no site")?,
+                    peers: invitation.peers.clone(),
+                    roles: invitation.roles.clone(),
+                }),
+            ));
+        }
+        let public_key = root.join("user.pub");
+        let certificate = root.join("user-cert.pub");
         fs::write(&public_key, request.public_key.as_bytes())
             .map_err(|error| format!("stage SSH public key: {error}"))?;
         crate::ssh_access::issue_for_invite(
@@ -244,13 +306,15 @@ async fn redeem_invite(
                 .serial
                 .wrapping_add(invitation.remaining_uses as u64),
             &invitation.unix_users,
+            &invitation.roles,
             ttl,
         )?;
-        fs::read_to_string(&certificate)
-            .map_err(|error| format!("read issued SSH certificate: {error}"))
+        let certificate = fs::read_to_string(&certificate)
+            .map_err(|error| format!("read issued SSH certificate: {error}"))?;
+        Ok((certificate, None))
     })();
     let _ = fs::remove_dir_all(&root);
-    let certificate = result.map_err(|error| api_error(StatusCode::FORBIDDEN, error))?;
+    let (certificate, peer) = result.map_err(|error| api_error(StatusCode::FORBIDDEN, error))?;
     store.invitations[index].remaining_uses -= 1;
     crate::invite::save(&state.invite_store, &store)
         .map_err(|error| api_error(StatusCode::INTERNAL_SERVER_ERROR, error))?;
@@ -259,6 +323,7 @@ async fn redeem_invite(
         invitation: invitation.id,
         principal: invitation.name,
         expires_at: now.saturating_add(ttl),
+        peer,
     }))
 }
 
@@ -608,14 +673,23 @@ pub async fn redeem(args: &[String]) -> Result<Vec<String>, String> {
     let gateway = required(args, "--gateway")?.trim_end_matches('/');
     validate_gateway_url(gateway)?;
     let claim = required(args, "--claim")?;
-    let public_key_path = required(args, "--public-key")?;
-    let public_key = fs::read_to_string(public_key_path)
-        .map_err(|error| format!("read SSH public key {public_key_path}: {error}"))?;
-    let certificate_path = Path::new(required(args, "--certificate")?);
-    if certificate_path.exists() {
+    let public_key = value(args, "--public-key")
+        .map(fs::read_to_string)
+        .transpose()
+        .map_err(|error| format!("read SSH public key: {error}"))?
+        .unwrap_or_default();
+    let peer_csr = value(args, "--peer-csr")
+        .map(fs::read_to_string)
+        .transpose()
+        .map_err(|error| format!("read peer CSR: {error}"))?;
+    if public_key.is_empty() && peer_csr.is_none() {
+        return Err("redeem needs --public-key, --peer-csr, or both".into());
+    }
+    let certificate_path = value(args, "--certificate").map(Path::new);
+    if certificate_path.is_some_and(Path::exists) {
         return Err(format!(
             "refusing to replace existing SSH certificate {}",
-            certificate_path.display()
+            certificate_path.expect("checked above").display()
         ));
     }
     let response = reqwest::Client::new()
@@ -623,6 +697,7 @@ pub async fn redeem(args: &[String]) -> Result<Vec<String>, String> {
         .json(&crate::invite::RedeemRequest {
             claim: claim.to_owned(),
             public_key,
+            peer_csr,
         })
         .send()
         .await
@@ -640,6 +715,42 @@ pub async fn redeem(args: &[String]) -> Result<Vec<String>, String> {
         .json::<crate::invite::RedeemResponse>()
         .await
         .map_err(|error| format!("decode claim response: {error}"))?;
+    if let Some(peer) = redeemed.peer {
+        let home = value(args, "--home")
+            .map(PathBuf::from)
+            .unwrap_or_else(myceliumd::home_dir);
+        let key = Path::new(required(args, "--peer-key")?);
+        let mut lines = crate::enroll::install_peer_material(
+            &home,
+            key,
+            &peer.node_certificate,
+            &peer.ca_certificate,
+            &peer.site,
+            &peer.peers,
+        )?;
+        if !redeemed.certificate.is_empty() {
+            let certificate_path =
+                certificate_path.ok_or("peer access claim needs --certificate")?;
+            if let Some(parent) = certificate_path.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|error| format!("create {}: {error}", parent.display()))?;
+            }
+            fs::write(certificate_path, redeemed.certificate)
+                .map_err(|error| format!("install SSH certificate: {error}"))?;
+            lines.push(format!(
+                "installed role-bound SSH certificate at {}",
+                certificate_path.display()
+            ));
+        }
+        lines.push(format!(
+            "claimed peer invitation {} as {} with roles [{}]",
+            redeemed.invitation,
+            redeemed.principal,
+            peer.roles.join(",")
+        ));
+        return Ok(lines);
+    }
+    let certificate_path = certificate_path.ok_or("access claim needs --certificate")?;
     if let Some(parent) = certificate_path.parent() {
         fs::create_dir_all(parent)
             .map_err(|error| format!("create {}: {error}", parent.display()))?;
@@ -821,10 +932,14 @@ mod tests {
             &store_path,
             &crate::invite::InviteStore {
                 invitations: vec![crate::invite::Invitation {
+                    kind: crate::invite::InvitationKind::Access,
                     id: "invite-1".into(),
                     code_hash: crate::invite::claim_hash(claim),
                     name: "buddy".into(),
                     unix_users: vec!["operator".into()],
+                    roles: Vec::new(),
+                    site: None,
+                    peers: Vec::new(),
                     expires_at: crate::invite::now().unwrap() + 900,
                     credential_ttl: 3600,
                     remaining_uses: 1,
@@ -837,6 +952,7 @@ mod tests {
             issuer: "https://issuer.example".into(),
             audience: "mycelium".into(),
             ca: Arc::new(ca),
+            enrollment_ca: None,
             client_id: "mycelium".into(),
             client_secret: "unused".into(),
             callback_url: "https://issuer.example/callback".into(),
@@ -847,6 +963,7 @@ mod tests {
         let request = crate::invite::RedeemRequest {
             claim: claim.into(),
             public_key: fs::read_to_string(user.with_extension("pub")).unwrap(),
+            peer_csr: None,
         };
         let first = redeem_invite(State(state.clone()), Json(request.clone())).await;
         assert!(first.is_ok());

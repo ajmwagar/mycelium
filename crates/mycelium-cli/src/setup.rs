@@ -10,10 +10,20 @@ pub async fn run(args: &[String]) -> Result<Vec<String>, String> {
         .flatten();
     let gateway = embedded
         .as_ref()
-        .map(|(endpoint, _)| endpoint.clone())
+        .map(|(endpoint, _, _, _)| endpoint.clone())
         .or_else(|| value(args, "--gateway").map(str::to_owned))
         .or_else(|| std::env::var("MYCELIUM_GATEWAY").ok())
         .ok_or_else(|| "setup needs a pairing claim or --gateway HTTPS-URL".to_owned())?;
+    if embedded
+        .as_ref()
+        .is_some_and(|(_, _, _, kind)| *kind == crate::invite::InvitationKind::Peer)
+    {
+        return setup_peer(
+            embedded.as_ref().expect("checked above"),
+            value(args, "--path").map(expand_home),
+        )
+        .await;
+    }
     let ssh_dir = user_home()?.join(".ssh");
     let private_key = value(args, "--key")
         .map(expand_home)
@@ -57,7 +67,7 @@ pub async fn run(args: &[String]) -> Result<Vec<String>, String> {
     let mut lines = if let Some(claim) = claim {
         let secret = embedded
             .as_ref()
-            .map_or(claim, |(_, secret)| secret.as_str());
+            .map_or(claim, |(_, secret, _, _)| secret.as_str());
         request.extend(["--claim".to_owned(), secret.to_owned()]);
         crate::oidc_gateway::redeem(&request).await?
     } else {
@@ -78,6 +88,103 @@ pub async fn run(args: &[String]) -> Result<Vec<String>, String> {
         certificate.display()
     ));
     Ok(lines)
+}
+
+async fn setup_peer(
+    claim: &(String, String, String, crate::invite::InvitationKind),
+    home: Option<PathBuf>,
+) -> Result<Vec<String>, String> {
+    let home = home.unwrap_or_else(myceliumd::home_dir);
+    let staging = home.join("enrollment-staging");
+    fs::create_dir_all(&staging)
+        .map_err(|error| format!("create {}: {error}", staging.display()))?;
+    let key = staging.join("node-key.pem");
+    let csr = staging.join("node.csr");
+    if key.exists() || csr.exists() {
+        return Err(format!(
+            "peer enrollment staging already exists at {}; remove it after checking whether an earlier enrollment completed",
+            staging.display()
+        ));
+    }
+    let key_text = path_string(&key)?;
+    let csr_text = path_string(&csr)?;
+    command(
+        "openssl",
+        &["genpkey", "-algorithm", "ED25519", "-out", &key_text],
+    )?;
+    command(
+        "openssl",
+        &[
+            "req",
+            "-new",
+            "-key",
+            &key_text,
+            "-out",
+            &csr_text,
+            "-subj",
+            &format!("/CN={}", claim.2),
+            "-addext",
+            "extendedKeyUsage=serverAuth,clientAuth",
+        ],
+    )?;
+    let ssh_dir = user_home()?.join(".ssh");
+    let ssh_key = ssh_dir.join("id_ed25519");
+    let ssh_public = PathBuf::from(format!("{}.pub", ssh_key.display()));
+    if !ssh_key.is_file() || !ssh_public.is_file() {
+        if ssh_key.exists() || ssh_public.exists() {
+            return Err(
+                "SSH identity is incomplete; expected id_ed25519 and id_ed25519.pub".into(),
+            );
+        }
+        fs::create_dir_all(&ssh_dir)
+            .map_err(|error| format!("create {}: {error}", ssh_dir.display()))?;
+        let status = Command::new("ssh-keygen")
+            .args(["-q", "-t", "ed25519", "-N", "", "-f"])
+            .arg(&ssh_key)
+            .status()
+            .map_err(|error| format!("run ssh-keygen: {error}"))?;
+        if !status.success() {
+            return Err(format!("ssh-keygen exited with {status}"));
+        }
+    }
+    let ssh_certificate = home.join("ssh/user-cert.pub");
+    let request = vec![
+        "--gateway".into(),
+        claim.0.clone(),
+        "--claim".into(),
+        claim.1.clone(),
+        "--peer-csr".into(),
+        path_string(&csr)?,
+        "--public-key".into(),
+        path_string(&ssh_public)?,
+        "--certificate".into(),
+        path_string(&ssh_certificate)?,
+        "--peer-key".into(),
+        path_string(&key)?,
+        "--home".into(),
+        path_string(&home)?,
+        "--write".into(),
+    ];
+    let result = crate::oidc_gateway::redeem(&request).await;
+    if result.is_ok() {
+        let _ = fs::remove_dir_all(&staging);
+    }
+    result
+}
+
+fn command(program: &str, args: &[&str]) -> Result<(), String> {
+    let output = Command::new(program)
+        .args(args)
+        .output()
+        .map_err(|error| format!("run {program}: {error}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{program} failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
+    }
 }
 
 fn value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {

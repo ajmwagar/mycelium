@@ -2,6 +2,11 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::path::PathBuf;
 
 pub async fn run(args: &[String]) -> Result<Vec<String>, String> {
+    let kind = match value(args, "--kind").unwrap_or("access") {
+        "access" => crate::invite::InvitationKind::Access,
+        "peer" => crate::invite::InvitationKind::Peer,
+        value => return Err(format!("unknown pairing kind `{value}`")),
+    };
     let listen = value(args, "--listen")
         .unwrap_or("0.0.0.0:8788")
         .parse::<SocketAddr>()
@@ -13,10 +18,23 @@ pub async fn run(args: &[String]) -> Result<Vec<String>, String> {
     let ca = value(args, "--ca")
         .map(PathBuf::from)
         .unwrap_or_else(|| myceliumd::home_dir().join("ssh/user_ca"));
-    if !ca.is_file() {
+    let issues_access = kind == crate::invite::InvitationKind::Access
+        || args.iter().any(|argument| argument == "--unix-user");
+    if issues_access && !ca.is_file() {
         return Err(format!(
             "SSH CA private key {} does not exist; pass --ca or select the authority MYCELIUM_HOME",
             ca.display()
+        ));
+    }
+    let enrollment_ca = value(args, "--enrollment-ca")
+        .map(PathBuf::from)
+        .unwrap_or_else(crate::enroll::default_ca);
+    if kind == crate::invite::InvitationKind::Peer
+        && (!enrollment_ca.join("ca.pem").is_file() || !enrollment_ca.join("ca-key.pem").is_file())
+    {
+        return Err(format!(
+            "mesh enrollment CA {} is missing ca.pem or ca-key.pem",
+            enrollment_ca.display()
         ));
     }
     let store = crate::invite::store_path(args);
@@ -32,11 +50,24 @@ pub async fn run(args: &[String]) -> Result<Vec<String>, String> {
         create_args.push("--write".into());
     }
     let created = crate::invite::create(&create_args)?;
-    let claim = crate::invite::encode_pair_claim(&advertise, &created.code)?;
+    let claim = crate::invite::encode_pair_claim(
+        &advertise,
+        &created.code,
+        value(args, "--name").expect("invite creation requires name"),
+        kind,
+    )?;
     println!("Pairing claim: {claim}");
     println!("Expires: {}", created.expires_at);
     println!("Waiting for one redemption at {advertise} ...");
-    crate::oidc_gateway::serve_pairing(listen, ca, store, created.id, created.expires_at).await?;
+    crate::oidc_gateway::serve_pairing(
+        listen,
+        ca,
+        enrollment_ca,
+        store,
+        created.id,
+        created.expires_at,
+    )
+    .await?;
     Ok(vec!["pairing complete; listener closed".into()])
 }
 

@@ -56,6 +56,22 @@ curl --proto '=https' --tlsv1.2 -fsS \
   sh -s -- --claim MYC1-REPLACE-WITH-THE-PAIRING-CLAIM
 ```
 
+Peer membership is separate from SSH access. A peer claim creates its private
+key on the joining machine, sends only a CSR to the temporary authority, and
+installs the returned mTLS identity plus mesh seeds:
+
+```sh
+mycelium pair --kind peer --name james --site home \
+  --peer 100.120.101.5:7443 --unix-user mames --role home-operator \
+  --advertise http://100.120.101.5:8788 --ttl 15m
+```
+
+The recipient passes the printed claim to `mycelium setup --claim ...` (or the
+installer's `--claim` option). Joining as a peer does not itself grant SSH.
+Roles are carried as signed SSH certificate principals; each host opts into
+roles with `host-bundle --allow USER=ROLE`. A host with no mapping denies all
+Mycelium certificate roles while leaving its pre-existing SSH methods intact.
+
 Requirements: a current stable Rust toolchain and the native tools required by
 the drivers you choose (for example OpenSSH and SNMP utilities).
 
@@ -336,6 +352,7 @@ mycelium access ssh krl --ca-public "$MYCELIUM_HOME/ssh/user_ca.pub" \
 mycelium access ssh host-bundle \
   --ca-public "$MYCELIUM_HOME/ssh/user_ca.pub" \
   --krl "$MYCELIUM_HOME/ssh/revoked.krl" \
+  --allow mames=home-operator \
   --path "$MYCELIUM_HOME/ssh/host-bundle" --write
 ```
 

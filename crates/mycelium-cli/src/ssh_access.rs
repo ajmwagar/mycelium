@@ -56,6 +56,10 @@ fn host_apply(args: &[String]) -> Result<Vec<String>, String> {
                 .map_err(|e| format!("back up {}: {e}", source.display()))?;
         }
     }
+    let prior_principals = managed.join("principals");
+    if prior_principals.is_dir() {
+        copy_directory_files(&prior_principals, &backup.join("principals"))?;
+    }
     fs::create_dir_all(&managed).map_err(|e| format!("create {}: {e}", managed.display()))?;
     fs::create_dir_all(drop_in.parent().expect("drop-in has parent"))
         .map_err(|e| format!("create sshd drop-in directory: {e}"))?;
@@ -71,6 +75,21 @@ fn host_apply(args: &[String]) -> Result<Vec<String>, String> {
             0o644,
         )?;
         install_mode(&bundle.join("60-mycelium-access.conf"), &drop_in, 0o644)?;
+        let principals = managed.join("principals");
+        if principals.exists() {
+            fs::remove_dir_all(&principals)
+                .map_err(|e| format!("replace {}: {e}", principals.display()))?;
+        }
+        fs::create_dir_all(&principals)
+            .map_err(|e| format!("create {}: {e}", principals.display()))?;
+        for entry in fs::read_dir(bundle.join("principals"))
+            .map_err(|e| format!("read host principals: {e}"))?
+        {
+            let entry = entry.map_err(|e| format!("read host principal entry: {e}"))?;
+            if entry.file_type().map_err(|e| e.to_string())?.is_file() {
+                install_mode(&entry.path(), &principals.join(entry.file_name()), 0o644)?;
+            }
+        }
         command("sshd", &["-t"])?;
         reload_sshd()?;
         Ok(())
@@ -84,6 +103,11 @@ fn host_apply(args: &[String]) -> Result<Vec<String>, String> {
                 let _ = fs::remove_file(destination);
             }
         }
+        let principals = managed.join("principals");
+        let _ = fs::remove_dir_all(&principals);
+        if backup.join("principals").is_dir() {
+            let _ = copy_directory_files(&backup.join("principals"), &principals);
+        }
         let _ = command("sshd", &["-t"]);
         let _ = reload_sshd();
         return Err(format!(
@@ -95,6 +119,19 @@ fn host_apply(args: &[String]) -> Result<Vec<String>, String> {
         "installed SSH trust bundle; rollback copy retained at {}",
         backup.display()
     )])
+}
+
+fn copy_directory_files(source: &Path, destination: &Path) -> Result<(), String> {
+    fs::create_dir_all(destination)
+        .map_err(|e| format!("create {}: {e}", destination.display()))?;
+    for entry in fs::read_dir(source).map_err(|e| format!("read {}: {e}", source.display()))? {
+        let entry = entry.map_err(|e| format!("read directory entry: {e}"))?;
+        if entry.file_type().map_err(|e| e.to_string())?.is_file() {
+            fs::copy(entry.path(), destination.join(entry.file_name()))
+                .map_err(|e| format!("copy principal policy: {e}"))?;
+        }
+    }
+    Ok(())
 }
 
 fn reload_sshd() -> Result<(), String> {
@@ -122,6 +159,12 @@ fn validate_host_bundle(bundle: &Path) -> Result<(), String> {
                 bundle.display()
             ));
         }
+    }
+    if !bundle.join("principals").is_dir() {
+        return Err(format!(
+            "SSH host bundle {} is missing principals directory",
+            bundle.display()
+        ));
     }
     Ok(())
 }
@@ -203,6 +246,19 @@ fn host_bundle(args: &[String]) -> Result<Vec<String>, String> {
     fs::create_dir_all(&staging)
         .map_err(|e| format!("create staging directory {}: {e}", staging.display()))?;
     let result = (|| {
+        let principals = staging.join("principals");
+        fs::create_dir_all(&principals).map_err(|e| format!("create principals directory: {e}"))?;
+        for assignment in repeated(args, "--allow") {
+            let (user, role) = assignment
+                .split_once('=')
+                .ok_or_else(|| format!("invalid --allow `{assignment}`; expected USER=ROLE"))?;
+            config_atom_value("Unix user", user)?;
+            config_atom_value("role", role)?;
+            let path = principals.join(user);
+            let mut contents = fs::read_to_string(&path).unwrap_or_default();
+            contents.push_str(&format!("mycelium-role-{role}\n"));
+            fs::write(path, contents).map_err(|e| format!("write role principal: {e}"))?;
+        }
         fs::copy(ca_public, staging.join("user_ca.pub"))
             .map_err(|e| format!("copy SSH CA public key: {e}"))?;
         fs::copy(krl, staging.join("revoked.krl"))
@@ -212,6 +268,7 @@ fn host_bundle(args: &[String]) -> Result<Vec<String>, String> {
             "# Managed by Mycelium; existing SSH authentication remains enabled.\n\
              TrustedUserCAKeys /etc/ssh/mycelium/user_ca.pub\n\
              RevokedKeys /etc/ssh/mycelium/revoked.krl\n\
+             AuthorizedPrincipalsFile /etc/ssh/mycelium/principals/%u\n\
              PubkeyAuthentication yes\n",
         )
         .map_err(|e| format!("write sshd drop-in: {e}"))?;
@@ -276,6 +333,7 @@ pub(crate) fn issue_for_invite(
     name: &str,
     serial: u64,
     unix_users: &[String],
+    roles: &[String],
     ttl: u64,
 ) -> Result<(), String> {
     if unix_users.is_empty() || ttl == 0 {
@@ -287,7 +345,9 @@ pub(crate) fn issue_for_invite(
     let temp = temporary_key_path(&public_key_path.to_string_lossy());
     fs::copy(public_key_path, &temp)
         .map_err(|error| format!("prepare certificate input {}: {error}", temp.display()))?;
-    let principals = unix_users.join(",");
+    let mut principals = unix_users.to_vec();
+    principals.extend(roles.iter().map(|role| format!("mycelium-role-{role}")));
+    let principals = principals.join(",");
     let validity = format!("+0s:+{ttl}s");
     let serial = serial.to_string();
     let identity = format!("mycelium:invite:{invitation_id}:{name}");
@@ -563,6 +623,26 @@ fn value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
         .map(String::as_str)
 }
 
+fn repeated<'a>(args: &'a [String], flag: &str) -> Vec<&'a str> {
+    args.iter()
+        .enumerate()
+        .filter(|(_, argument)| argument.as_str() == flag)
+        .filter_map(|(index, _)| args.get(index + 1).map(String::as_str))
+        .collect()
+}
+
+fn config_atom_value(name: &str, value: &str) -> Result<(), String> {
+    if value.is_empty()
+        || value.len() > 128
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._+-".contains(&byte))
+    {
+        return Err(format!("{name} contains unsafe characters"));
+    }
+    Ok(())
+}
+
 fn required<'a>(args: &'a [String], flag: &str) -> Result<&'a str, String> {
     value(args, flag).ok_or_else(|| format!("access ssh needs {flag}"))
 }
@@ -698,7 +778,53 @@ mod tests {
         ] {
             fs::write(root.join(name), "test").unwrap();
         }
+        fs::create_dir(root.join("principals")).unwrap();
         validate_host_bundle(&root).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn host_bundle_maps_roles_and_defaults_to_no_certificate_principals() {
+        let root = std::env::temp_dir().join(format!(
+            "mycelium-host-role-test-{}-{}",
+            std::process::id(),
+            now().unwrap()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let ca = root.join("ca.pub");
+        let krl = root.join("revoked.krl");
+        fs::write(&ca, "ssh-ed25519 AAAA test").unwrap();
+        fs::write(&krl, "krl").unwrap();
+        let denied = root.join("denied");
+        host_bundle(&[
+            "--ca-public".into(),
+            ca.to_string_lossy().into_owned(),
+            "--krl".into(),
+            krl.to_string_lossy().into_owned(),
+            "--path".into(),
+            denied.to_string_lossy().into_owned(),
+            "--write".into(),
+        ])
+        .unwrap();
+        assert_eq!(fs::read_dir(denied.join("principals")).unwrap().count(), 0);
+
+        let allowed = root.join("allowed");
+        host_bundle(&[
+            "--ca-public".into(),
+            ca.to_string_lossy().into_owned(),
+            "--krl".into(),
+            krl.to_string_lossy().into_owned(),
+            "--allow".into(),
+            "mames=home-operator".into(),
+            "--path".into(),
+            allowed.to_string_lossy().into_owned(),
+            "--write".into(),
+        ])
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(allowed.join("principals/mames")).unwrap(),
+            "mycelium-role-home-operator\n"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -778,6 +904,7 @@ mod tests {
             "buddy",
             42,
             &["operator".into()],
+            &["home-operator".into()],
             3600,
         )
         .unwrap();
@@ -788,6 +915,7 @@ mod tests {
             .unwrap();
         let output = String::from_utf8_lossy(&inspected.stdout);
         assert!(inspected.status.success());
+        assert!(output.contains("mycelium-role-home-operator"));
         assert!(output.contains("mycelium:invite:invite-1:buddy"));
         assert!(output.contains("operator"));
         fs::remove_dir_all(root).unwrap();

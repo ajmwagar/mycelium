@@ -45,6 +45,72 @@ pub fn init(path: &Path) -> Result<Vec<String>, ClientError> {
     )])
 }
 
+pub(crate) fn sign_csr(
+    ca: &Path,
+    csr_pem: &str,
+    expected_name: &str,
+    work_dir: &Path,
+) -> Result<String, String> {
+    validate_label("name", expected_name).map_err(|error| error.to_string())?;
+    if !ca.join("ca-key.pem").is_file() || !ca.join("ca.pem").is_file() {
+        return Err("enrollment CA is missing ca.pem or ca-key.pem".into());
+    }
+    if !csr_pem.starts_with("-----BEGIN CERTIFICATE REQUEST-----") {
+        return Err("peer CSR is not PEM encoded".into());
+    }
+    let csr = work_dir.join("node.csr");
+    let cert = work_dir.join("node.pem");
+    let extensions = work_dir.join("node-extensions.cnf");
+    std::fs::write(&csr, csr_pem).map_err(|error| format!("stage peer CSR: {error}"))?;
+    std::fs::write(
+        &extensions,
+        "[mycelium_peer]\nextendedKeyUsage=serverAuth,clientAuth\n",
+    )
+    .map_err(|error| format!("stage peer certificate extensions: {error}"))?;
+    openssl_string(&[
+        "req",
+        "-in",
+        &display(&csr).map_err(|error| error.to_string())?,
+        "-noout",
+        "-verify",
+    ])?;
+    let subject = openssl_output(&[
+        "req",
+        "-in",
+        &display(&csr).map_err(|error| error.to_string())?,
+        "-noout",
+        "-subject",
+        "-nameopt",
+        "RFC2253",
+    ])?;
+    if subject.trim() != format!("subject=CN={expected_name}") {
+        return Err(format!(
+            "peer CSR subject must be exactly CN={expected_name}; got {}",
+            subject.trim()
+        ));
+    }
+    openssl_string(&[
+        "x509",
+        "-req",
+        "-in",
+        &display(&csr).map_err(|error| error.to_string())?,
+        "-CA",
+        &display(ca.join("ca.pem")).map_err(|error| error.to_string())?,
+        "-CAkey",
+        &display(ca.join("ca-key.pem")).map_err(|error| error.to_string())?,
+        "-CAcreateserial",
+        "-extfile",
+        &display(&extensions).map_err(|error| error.to_string())?,
+        "-extensions",
+        "mycelium_peer",
+        "-out",
+        &display(&cert).map_err(|error| error.to_string())?,
+        "-days",
+        "365",
+    ])?;
+    std::fs::read_to_string(cert).map_err(|error| format!("read signed peer certificate: {error}"))
+}
+
 pub fn issue(ca: &Path, request: Issue<'_>) -> Result<Vec<String>, ClientError> {
     validate_label("name", request.name)?;
     validate_label("site", request.site)?;
@@ -216,6 +282,111 @@ pub fn install(bundle: &Path, home: &Path) -> Result<Vec<String>, ClientError> {
     ])
 }
 
+pub(crate) fn install_peer_material(
+    home: &Path,
+    key: &Path,
+    certificate_pem: &str,
+    ca_pem: &str,
+    site: &str,
+    peers: &[String],
+) -> Result<Vec<String>, String> {
+    validate_label("site", site).map_err(|error| error.to_string())?;
+    for peer in peers {
+        validate_peer(peer).map_err(|error| error.to_string())?;
+    }
+    let bin = home.join("bin/mycelium");
+    let pki = home.join("pki");
+    std::fs::create_dir_all(&pki).map_err(|error| format!("create {}: {error}", pki.display()))?;
+    std::fs::create_dir_all(bin.parent().expect("bin has a parent"))
+        .map_err(|error| format!("create binary directory: {error}"))?;
+    copy_mode(
+        &std::env::current_exe().map_err(|error| format!("locate current binary: {error}"))?,
+        &bin,
+        0o755,
+    )
+    .map_err(|error| error.to_string())?;
+    copy_mode(key, &pki.join("node-key.pem"), 0o600).map_err(|error| error.to_string())?;
+    std::fs::write(pki.join("node.pem"), certificate_pem)
+        .map_err(|error| format!("install node certificate: {error}"))?;
+    std::fs::write(pki.join("ca.pem"), ca_pem)
+        .map_err(|error| format!("install mesh CA: {error}"))?;
+    let release_keys = std::env::var("MYCELIUM_RELEASE_KEYS").unwrap_or_default();
+    let peers = peers.join(",");
+    std::fs::write(
+        home.join("node.env"),
+        resolved_env(home, site, &peers, &release_keys).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| format!("write node environment: {error}"))?;
+    let service = if cfg!(target_os = "macos") {
+        let path = user_home()
+            .map_err(|error| error.to_string())?
+            .join("Library/LaunchAgents/dev.fpl.mycelium.plist");
+        std::fs::create_dir_all(path.parent().expect("plist has a parent"))
+            .map_err(|error| format!("create launch agent directory: {error}"))?;
+        std::fs::write(
+            &path,
+            resolved_launchd(home, site, &peers, &release_keys)
+                .map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| format!("write launch agent: {error}"))?;
+        path
+    } else if cfg!(target_os = "linux") {
+        let path = user_home()
+            .map_err(|error| error.to_string())?
+            .join(".config/systemd/user/mycelium.service");
+        std::fs::create_dir_all(path.parent().expect("unit has a parent"))
+            .map_err(|error| format!("create systemd directory: {error}"))?;
+        std::fs::write(
+            &path,
+            resolved_systemd(home).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| format!("write systemd unit: {error}"))?;
+        path
+    } else {
+        return Err("peer enrollment supports Darwin and Linux".into());
+    };
+    start_peer_service(&service)?;
+    Ok(vec![
+        format!("installed peer identity under {}", home.display()),
+        format!("started peer service from {}", service.display()),
+    ])
+}
+
+fn start_peer_service(service: &Path) -> Result<(), String> {
+    if cfg!(target_os = "macos") {
+        let output = Command::new("id")
+            .arg("-u")
+            .output()
+            .map_err(|error| format!("determine user id: {error}"))?;
+        if !output.status.success() {
+            return Err("id -u failed while starting peer service".into());
+        }
+        let domain = format!("gui/{}", String::from_utf8_lossy(&output.stdout).trim());
+        let status = Command::new("launchctl")
+            .args(["bootstrap", &domain])
+            .arg(service)
+            .status()
+            .map_err(|error| format!("start launch agent: {error}"))?;
+        if !status.success() {
+            return Err(format!("launchctl bootstrap exited with {status}"));
+        }
+    } else {
+        for args in [
+            &["--user", "daemon-reload"][..],
+            &["--user", "enable", "--now", "mycelium.service"][..],
+        ] {
+            let status = Command::new("systemctl")
+                .args(args)
+                .status()
+                .map_err(|error| format!("run systemctl: {error}"))?;
+            if !status.success() {
+                return Err(format!("systemctl {} exited with {status}", args.join(" ")));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn resolved_env(home: &Path, site: &str, peers: &str, keys: &str) -> Result<String, ClientError> {
     let home = display(home)?;
     Ok(format!("MYCELIUM_HOME={home}\nMYCELIUM_SITE={site}\nMYCELIUM_PEER_LISTEN=0.0.0.0:7443\nMYCELIUM_PEERS={peers}\nMYCELIUM_PEER_CA={home}/pki/ca.pem\nMYCELIUM_PEER_CERT={home}/pki/node.pem\nMYCELIUM_PEER_KEY={home}/pki/node-key.pem\nMYCELIUM_RELEASE_KEYS={keys}\nMYCELIUM_UPDATE_CHANNEL=canary\n"))
@@ -295,6 +466,25 @@ fn openssl(args: &[&str]) -> Result<(), ClientError> {
             "openssl failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         )))
+    }
+}
+
+fn openssl_string(args: &[&str]) -> Result<(), String> {
+    openssl_output(args).map(|_| ())
+}
+
+fn openssl_output(args: &[&str]) -> Result<String, String> {
+    let output = Command::new("openssl")
+        .args(args)
+        .output()
+        .map_err(|error| format!("run openssl: {error}"))?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    } else {
+        Err(format!(
+            "openssl failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
     }
 }
 

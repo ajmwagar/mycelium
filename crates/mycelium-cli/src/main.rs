@@ -73,8 +73,9 @@ mycelium — control plane for your network appliances
 
 usage:
   mycelium setup [--gateway HTTPS-URL] [--claim CODE] [--ttl 8h] [--key PATH] [--certificate PATH]
-  mycelium pair --name NAME --unix-user USER... [--listen ADDR] [--advertise URL] [--ca PATH] [--ttl 15m] [--credential-ttl 8h]
-  mycelium invite create --name NAME --unix-user USER... [--ttl 15m] [--credential-ttl 8h] [--uses 1] --write
+  mycelium pair --kind access --name NAME --unix-user USER... [--role ROLE]... [--listen ADDR] [--advertise URL] [--ca PATH] [--ttl 15m] [--credential-ttl 8h]
+  mycelium pair --kind peer --name NAME --site SITE --peer HOST:PORT... [--unix-user USER --role ROLE]... [--ca PATH] [--enrollment-ca DIR] [--listen ADDR] [--advertise URL] [--ttl 15m]
+  mycelium invite create --kind access|peer --name NAME [--unix-user USER]... [--role ROLE]... [--site SITE] [--peer HOST:PORT]... [--ttl 15m] [--credential-ttl 8h] [--uses 1] --write
   mycelium daemon status|start|stop
   mycelium drivers
   mycelium add <host[:port]> [--name NAME] [--driver NAME] [--user U] [--password-env VAR] [--key PATH]
@@ -103,7 +104,7 @@ usage:
   mycelium access ssh ca-init --path PRIVATE-KEY --write [--json]
   mycelium access ssh issue --grant ID --public-key PATH --ca PRIVATE-KEY --path CERT --ttl 8h --write [--json]
   mycelium access ssh krl --ca-public PATH --path KRL --write [--json]
-  mycelium access ssh host-bundle --ca-public PATH --krl PATH --path DIR --write [--json]
+  mycelium access ssh host-bundle --ca-public PATH --krl PATH [--allow USER=ROLE]... --path DIR --write [--json]
   mycelium access ssh client-config --host ALIAS --hostname HOST --user USER --identity PATH --certificate PATH --path FILE --write [--json]
   mycelium access ssh host-apply --bundle DIR --write
   mycelium access oidc verify --issuer URL --audience ID --token-env VAR [--json]

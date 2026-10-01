@@ -6,12 +6,28 @@ use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum InvitationKind {
+    #[default]
+    Access,
+    Peer,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct Invitation {
+    #[serde(default)]
+    pub kind: InvitationKind,
     pub id: String,
     pub code_hash: String,
     pub name: String,
     pub unix_users: Vec<String>,
+    #[serde(default)]
+    pub roles: Vec<String>,
+    #[serde(default)]
+    pub site: Option<String>,
+    #[serde(default)]
+    pub peers: Vec<String>,
     pub expires_at: u64,
     pub credential_ttl: u64,
     pub remaining_uses: u32,
@@ -26,15 +42,30 @@ pub(crate) struct InviteStore {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct RedeemRequest {
     pub claim: String,
+    #[serde(default)]
     pub public_key: String,
+    #[serde(default)]
+    pub peer_csr: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct RedeemResponse {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub certificate: String,
     pub invitation: String,
     pub principal: String,
     pub expires_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer: Option<PeerEnrollment>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct PeerEnrollment {
+    pub ca_certificate: String,
+    pub node_certificate: String,
+    pub site: String,
+    pub peers: Vec<String>,
+    pub roles: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -49,6 +80,10 @@ pub(crate) struct CreatedInvitation {
 struct PairClaim {
     endpoint: String,
     secret: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    kind: InvitationKind,
 }
 
 pub(crate) fn run(args: &[String]) -> Result<Vec<String>, String> {
@@ -63,12 +98,26 @@ pub(crate) fn create(args: &[String]) -> Result<CreatedInvitation, String> {
     require_write(args)?;
     let name = required(args, "--name")?;
     validate_atom("name", name)?;
+    let kind = match value(args, "--kind").unwrap_or("access") {
+        "access" => InvitationKind::Access,
+        "peer" => InvitationKind::Peer,
+        value => return Err(format!("unknown invitation kind `{value}`")),
+    };
     let unix_users = repeated(args, "--unix-user");
-    if unix_users.is_empty() {
+    if kind == InvitationKind::Access && unix_users.is_empty() {
         return Err("invite create needs at least one --unix-user".into());
     }
     for user in &unix_users {
         validate_atom("Unix user", user)?;
+    }
+    let roles = repeated(args, "--role");
+    for role in &roles {
+        validate_atom("role", role)?;
+    }
+    let site = value(args, "--site").map(str::to_owned);
+    let peers = repeated(args, "--peer");
+    if kind == InvitationKind::Peer && (site.is_none() || peers.is_empty()) {
+        return Err("peer invite needs --site and at least one --peer seed".into());
     }
     let now = now()?;
     let ttl = parse_duration(value(args, "--ttl").unwrap_or("15m"))?;
@@ -96,10 +145,14 @@ pub(crate) fn create(args: &[String]) -> Result<CreatedInvitation, String> {
     let id = hex(&random_bytes::<8>());
     let serial = u64::from_be_bytes(random_bytes::<8>());
     store.invitations.push(Invitation {
+        kind,
         id: id.clone(),
         code_hash: claim_hash(&code),
         name: name.to_owned(),
         unix_users,
+        roles,
+        site,
+        peers,
         expires_at: now.saturating_add(ttl),
         credential_ttl,
         remaining_uses: uses,
@@ -123,16 +176,25 @@ fn render_created(created: CreatedInvitation) -> Result<Vec<String>, String> {
     ])
 }
 
-pub(crate) fn encode_pair_claim(endpoint: &str, secret: &str) -> Result<String, String> {
+pub(crate) fn encode_pair_claim(
+    endpoint: &str,
+    secret: &str,
+    name: &str,
+    kind: InvitationKind,
+) -> Result<String, String> {
     let payload = serde_json::to_vec(&PairClaim {
         endpoint: endpoint.to_owned(),
         secret: secret.to_owned(),
+        name: name.to_owned(),
+        kind,
     })
     .map_err(|error| format!("encode pairing claim: {error}"))?;
     Ok(format!("MYC1-{}", hex(payload)))
 }
 
-pub(crate) fn decode_pair_claim(claim: &str) -> Result<Option<(String, String)>, String> {
+pub(crate) fn decode_pair_claim(
+    claim: &str,
+) -> Result<Option<(String, String, String, InvitationKind)>, String> {
     let Some(encoded) = claim.strip_prefix("MYC1-") else {
         return Ok(None);
     };
@@ -146,7 +208,12 @@ pub(crate) fn decode_pair_claim(claim: &str) -> Result<Option<(String, String)>,
         .map_err(|_| "invalid pairing claim encoding".to_owned())?;
     let payload: PairClaim =
         serde_json::from_slice(&bytes).map_err(|error| format!("decode pairing claim: {error}"))?;
-    Ok(Some((payload.endpoint, payload.secret)))
+    Ok(Some((
+        payload.endpoint,
+        payload.secret,
+        payload.name,
+        payload.kind,
+    )))
 }
 
 pub(crate) fn store_path(args: &[String]) -> PathBuf {
@@ -337,9 +404,17 @@ mod tests {
 
     #[test]
     fn pairing_claim_carries_rendezvous_without_changing_secret() {
-        let encoded = encode_pair_claim("http://192.168.1.2:8788", "MYC-SECRET").unwrap();
+        let encoded = encode_pair_claim(
+            "http://192.168.1.2:8788",
+            "MYC-SECRET",
+            "james",
+            InvitationKind::Peer,
+        )
+        .unwrap();
         let decoded = decode_pair_claim(&encoded).unwrap().unwrap();
         assert_eq!(decoded.0, "http://192.168.1.2:8788");
         assert_eq!(decoded.1, "MYC-SECRET");
+        assert_eq!(decoded.2, "james");
+        assert_eq!(decoded.3, InvitationKind::Peer);
     }
 }
