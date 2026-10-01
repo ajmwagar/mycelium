@@ -7,6 +7,7 @@ pub struct Issue<'a> {
     pub name: &'a str,
     pub site: &'a str,
     pub address: &'a str,
+    pub additional_addresses: &'a [String],
     pub target: &'a str,
     pub binary: &'a Path,
     pub peers: &'a [String],
@@ -116,6 +117,9 @@ pub fn issue(ca: &Path, request: Issue<'_>) -> Result<Vec<String>, ClientError> 
     validate_label("site", request.site)?;
     validate_label("target", request.target)?;
     validate_address(request.address)?;
+    for address in request.additional_addresses {
+        validate_address(address)?;
+    }
     if !ca.join("ca-key.pem").is_file() || !ca.join("ca.pem").is_file() {
         return Err(usage("enrollment CA is missing ca.pem or ca-key.pem"));
     }
@@ -129,11 +133,10 @@ pub fn issue(ca: &Path, request: Issue<'_>) -> Result<Vec<String>, ClientError> 
     let key = request.output.join("node-key.pem");
     let csr = request.output.join("node.csr");
     let cert = request.output.join("node.pem");
-    let san = if request.address.parse::<std::net::IpAddr>().is_ok() {
-        format!("subjectAltName=IP:{}", request.address)
-    } else {
-        format!("subjectAltName=DNS:{}", request.address)
-    };
+    let addresses = std::iter::once(request.address)
+        .chain(request.additional_addresses.iter().map(String::as_str))
+        .collect::<std::collections::BTreeSet<_>>();
+    let san = subject_alt_name(&addresses);
     openssl(&["genpkey", "-algorithm", "ED25519", "-out", &display(&key)?])?;
     openssl(&[
         "req",
@@ -186,6 +189,7 @@ pub fn issue(ca: &Path, request: Issue<'_>) -> Result<Vec<String>, ClientError> 
             "name": request.name,
             "site": request.site,
             "address": request.address,
+            "addresses": addresses,
             "target": request.target,
             "peers": request.peers,
         }))
@@ -623,6 +627,23 @@ fn validate_address(value: &str) -> Result<(), ClientError> {
     Ok(())
 }
 
+fn subject_alt_name(addresses: &std::collections::BTreeSet<&str>) -> String {
+    format!(
+        "subjectAltName={}",
+        addresses
+            .iter()
+            .map(|address| {
+                if address.parse::<std::net::IpAddr>().is_ok() {
+                    format!("IP:{address}")
+                } else {
+                    format!("DNS:{address}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    )
+}
+
 fn display(path: impl AsRef<Path>) -> Result<String, ClientError> {
     path.as_ref()
         .to_str()
@@ -659,6 +680,19 @@ mod tests {
         assert!(validate_label("name", "x;reboot").is_err());
         assert!(validate_address("home-pi.tail.example").is_ok());
         assert!(validate_address("x $(reboot)").is_err());
+    }
+
+    #[test]
+    fn enrollment_certificate_covers_public_private_and_dns_addresses() {
+        let addresses = std::collections::BTreeSet::from([
+            "10.118.0.11",
+            "134.209.208.195",
+            "fpl-beachhead-1.internal",
+        ]);
+        assert_eq!(
+            subject_alt_name(&addresses),
+            "subjectAltName=IP:10.118.0.11,IP:134.209.208.195,DNS:fpl-beachhead-1.internal"
+        );
     }
 
     #[test]

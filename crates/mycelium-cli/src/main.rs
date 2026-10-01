@@ -117,7 +117,7 @@ usage:
   mycelium update status [--channel CHANNEL] [--json]
   mycelium update apply [--channel CHANNEL] [--path INSTALLED-BINARY] --write
   mycelium enroll init [--path CA-DIR] --write
-  mycelium enroll issue NAME --site SITE --address DNS-OR-IP --binary PATH --target TRIPLE [--peer HOST:PORT]... [--ca CA-DIR] [--path OUTPUT-DIR] --write
+  mycelium enroll issue NAME --site SITE --address DNS-OR-IP [--san DNS-OR-IP]... --binary PATH --target TRIPLE [--peer HOST:PORT]... [--ca CA-DIR] [--path OUTPUT-DIR] --write
   mycelium enroll install --bundle DIR [--path MYCELIUM-HOME] --write
   mycelium map [--json]
   mycelium annotate <node> [--name NAME] [--kind KIND] --write [--dry-run]
@@ -165,6 +165,7 @@ struct Flags {
     version: Option<String>,
     channel: Option<String>,
     address: Option<String>,
+    sans: Vec<String>,
     ca: Option<String>,
     peers: Vec<String>,
     rest: Vec<String>,
@@ -202,6 +203,7 @@ fn parse_flags(args: &[String]) -> Flags {
         version: None,
         channel: None,
         address: None,
+        sans: Vec::new(),
         ca: None,
         peers: Vec::new(),
         rest: Vec::new(),
@@ -333,6 +335,12 @@ fn parse_flags(args: &[String]) -> Flags {
             "--address" => {
                 i += 1;
                 f.address = args.get(i).cloned();
+            }
+            "--san" => {
+                i += 1;
+                if let Some(address) = args.get(i) {
+                    f.sans.push(address.clone());
+                }
             }
             "--ca" => {
                 i += 1;
@@ -674,6 +682,7 @@ async fn enroll_command(args: &[String]) -> Result<Vec<String>, ClientError> {
                     name,
                     site: &site,
                     address: &address,
+                    additional_addresses: &flags.sans,
                     target,
                     binary: std::path::Path::new(binary),
                     peers: &flags.peers,
