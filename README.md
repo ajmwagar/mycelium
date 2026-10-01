@@ -79,7 +79,7 @@ Install directly from GitHub:
 
 ```sh
 cargo install --git https://github.com/ajmwagar/mycelium.git \
-  --package mycelium-cli --locked
+  mycelium-cli --locked
 mycelium drivers
 ```
 
