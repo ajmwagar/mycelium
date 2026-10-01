@@ -197,6 +197,12 @@ mycelium enroll issue pris --site lab --address pris \
   --target x86_64-unknown-linux-gnu --binary ./mycelium \
   --peer neo.example:7443 --write
 
+# Multi-homed peers carry every address used by another peer. The first
+# address remains the inventory address; additional SANs are transport names.
+mycelium enroll issue beachhead-1 --site beachhead \
+  --address 203.0.113.10 --san 10.118.0.11 \
+  --target x86_64-unknown-linux-musl --binary ./mycelium --write
+
 # On pris, after transferring its bundle:
 mycelium enroll install --bundle ./pris --write
 systemctl --user daemon-reload
