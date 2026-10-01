@@ -31,12 +31,99 @@ pub fn run(args: &[String], state: &Value) -> Result<Vec<String>, String> {
         Some("krl") => krl(args, state),
         Some("host-bundle") => host_bundle(args),
         Some("host-apply") => host_apply(args),
+        Some("host-rollout") => host_rollout(args),
         Some("client-config") => client_config(args),
         Some(action) => Err(format!("unknown access ssh action `{action}`")),
         None => Err(
-            "access ssh needs ca-init, issue, krl, host-bundle, host-apply, or client-config"
+            "access ssh needs ca-init, issue, krl, host-bundle, host-apply, host-rollout, or client-config"
                 .into(),
         ),
+    }
+}
+
+fn host_rollout(args: &[String]) -> Result<Vec<String>, String> {
+    require_write(args)?;
+    let bundle = Path::new(required(args, "--bundle")?);
+    validate_host_bundle(bundle)?;
+    let targets = repeated(args, "--target");
+    if targets.is_empty() {
+        return Err("host-rollout needs at least one --target".into());
+    }
+    let remote_binary =
+        value(args, "--remote-bin").unwrap_or("/home/ajmwagar/.mycelium/bin/mycelium");
+    config_value_text("remote Mycelium binary", remote_binary)?;
+    let mut lines = Vec::new();
+    for (index, target) in targets.iter().enumerate() {
+        validate_rollout_target(target)?;
+        let remote_bundle = format!("/tmp/mycelium-host-bundle-{}-{index}", std::process::id());
+        command_owned(
+            "ssh",
+            vec![
+                "-o".into(),
+                "BatchMode=yes".into(),
+                (*target).into(),
+                "mkdir".into(),
+                "-p".into(),
+                remote_bundle.clone(),
+            ],
+        )?;
+        command_owned(
+            "scp",
+            vec![
+                "-q".into(),
+                "-r".into(),
+                format!("{}/.", bundle.display()),
+                format!("{target}:{remote_bundle}/"),
+            ],
+        )?;
+        command_owned(
+            "ssh",
+            vec![
+                "-o".into(),
+                "BatchMode=yes".into(),
+                (*target).into(),
+                "sudo".into(),
+                "-n".into(),
+                remote_binary.into(),
+                "access".into(),
+                "ssh".into(),
+                "host-apply".into(),
+                "--bundle".into(),
+                remote_bundle,
+                "--write".into(),
+            ],
+        )?;
+        lines.push(format!("converged SSH access policy on {target}"));
+    }
+    Ok(lines)
+}
+
+fn validate_rollout_target(target: &str) -> Result<(), String> {
+    if target.is_empty()
+        || target.len() > 320
+        || !target.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_' | b':' | b'@')
+        })
+    {
+        return Err(format!("unsafe rollout target `{target}`"));
+    }
+    Ok(())
+}
+
+fn command_owned(program: &str, args: Vec<String>) -> Result<(), String> {
+    let output = Command::new(program)
+        .args(&args)
+        .output()
+        .map_err(|error| format!("run {program}: {error}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} {} failed: {}",
+            program,
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
     }
 }
 
@@ -794,14 +881,19 @@ fn config_atom<'a>(args: &'a [String], flag: &str) -> Result<&'a str, String> {
 
 fn config_value<'a>(args: &'a [String], flag: &str) -> Result<&'a str, String> {
     let value = required(args, flag)?;
+    config_value_text(flag, value)?;
+    Ok(value)
+}
+
+fn config_value_text(name: &str, value: &str) -> Result<(), String> {
     if value.is_empty()
         || !value
             .bytes()
             .all(|byte| byte.is_ascii_graphic() && byte != b'#')
     {
-        return Err(format!("SSH config {flag} contains unsafe characters"));
+        return Err(format!("SSH config {name} contains unsafe characters"));
     }
-    Ok(value)
+    Ok(())
 }
 
 fn require_write(args: &[String]) -> Result<(), String> {

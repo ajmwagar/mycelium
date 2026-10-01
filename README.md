@@ -371,6 +371,20 @@ supplementary groups before enabling the role. Existing UID 0 accounts and
 unsafe account intents are rejected. Removing a role removes its accepted SSH
 principal; Mycelium deliberately preserves the account and home directory.
 
+After agents have the current binary, one validated bundle can converge
+multiple hosts without repeating the manual copy/apply runbook:
+
+```sh
+mycelium access ssh host-rollout \
+  --bundle "$MYCELIUM_HOME/ssh/host-bundle" \
+  --target pris --target home-pi --target agora-one \
+  --write
+```
+
+Rollout is fail-fast: each target must accept key-based bootstrap SSH and
+passwordless invocation of the narrow host-apply command. Every target still
+validates locally and retains its own rollback copy before sshd reload.
+
 Copy the bundle to an enrolled Linux or macOS host, then apply it in one command:
 
 ```sh
