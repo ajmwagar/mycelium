@@ -67,6 +67,115 @@ pub enum PeerEvent {
     Hello(PeerHello),
     Health(HostHealth),
     Release(ReleaseManifest),
+    Access(AccessRecord),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AccessStatement {
+    Grant {
+        grant_id: String,
+        principal: String,
+        serial: u64,
+        #[serde(default)]
+        roles: Vec<String>,
+        #[serde(default)]
+        scopes: Vec<String>,
+        #[serde(default)]
+        unix_users: Vec<String>,
+        #[serde(default)]
+        ssh_public_keys: Vec<String>,
+        not_before: u64,
+        not_after: u64,
+    },
+    Revoke {
+        revocation_id: String,
+        #[serde(default)]
+        grant_id: Option<String>,
+        #[serde(default)]
+        principal: Option<String>,
+        #[serde(default)]
+        serial: Option<u64>,
+        revoked_at: u64,
+        reason: String,
+    },
+}
+
+impl AccessStatement {
+    pub fn revokes(&self, grant: &AccessStatement) -> bool {
+        let Self::Revoke {
+            grant_id,
+            principal,
+            serial,
+            ..
+        } = self
+        else {
+            return false;
+        };
+        let Self::Grant {
+            grant_id: candidate_id,
+            principal: candidate_principal,
+            serial: candidate_serial,
+            ..
+        } = grant
+        else {
+            return false;
+        };
+        grant_id.as_ref().is_none_or(|value| value == candidate_id)
+            && principal
+                .as_ref()
+                .is_none_or(|value| value == candidate_principal)
+            && serial.is_none_or(|value| value == *candidate_serial)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccessRecord {
+    pub protocol_version: u16,
+    pub statement: AccessStatement,
+    pub signer: String,
+    pub signature: String,
+}
+
+#[derive(Serialize)]
+struct UnsignedAccess<'a> {
+    protocol_version: u16,
+    statement: &'a AccessStatement,
+    signer: &'a str,
+}
+
+impl AccessRecord {
+    pub fn sign(key: &SigningKey, statement: AccessStatement) -> Result<Self, serde_json::Error> {
+        let signer = encode_hex(key.verifying_key().as_bytes());
+        let bytes = serde_json::to_vec(&UnsignedAccess {
+            protocol_version: PROTOCOL_VERSION,
+            statement: &statement,
+            signer: &signer,
+        })?;
+        Ok(Self {
+            protocol_version: PROTOCOL_VERSION,
+            statement,
+            signer,
+            signature: encode_hex(&key.sign(&bytes).to_bytes()),
+        })
+    }
+
+    pub fn verify(&self) -> Result<(), String> {
+        if self.protocol_version != PROTOCOL_VERSION {
+            return Err(format!("unsupported protocol {}", self.protocol_version));
+        }
+        let key = VerifyingKey::from_bytes(&decode_array::<32>(&self.signer)?)
+            .map_err(|error| error.to_string())?;
+        let signature = Signature::from_bytes(&decode_array::<64>(&self.signature)?);
+        let bytes = serde_json::to_vec(&UnsignedAccess {
+            protocol_version: self.protocol_version,
+            statement: &self.statement,
+            signer: &self.signer,
+        })
+        .map_err(|error| error.to_string())?;
+        key.verify(&bytes, &signature)
+            .map_err(|error| error.to_string())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -297,5 +406,63 @@ mod tests {
         release.verify().unwrap();
         release.artifact_size += 1;
         assert!(release.verify().is_err());
+    }
+
+    #[test]
+    fn access_signature_covers_authorization_and_revocation_fields() {
+        let key = SigningKey::from_bytes(&[11; 32]);
+        let mut record = AccessRecord::sign(
+            &key,
+            AccessStatement::Grant {
+                grant_id: "avery-laptop".into(),
+                principal: "avery".into(),
+                serial: 42,
+                roles: vec!["operator".into()],
+                scopes: vec!["home".into()],
+                unix_users: vec!["avery".into()],
+                ssh_public_keys: vec!["ssh-ed25519 AAAA".into()],
+                not_before: 10,
+                not_after: 20,
+            },
+        )
+        .unwrap();
+        record.verify().unwrap();
+        if let AccessStatement::Grant { scopes, .. } = &mut record.statement {
+            scopes.push("prod".into());
+        }
+        assert!(record.verify().is_err());
+    }
+
+    #[test]
+    fn access_revocation_matches_all_supplied_selectors() {
+        let grant = AccessStatement::Grant {
+            grant_id: "avery-laptop".into(),
+            principal: "avery".into(),
+            serial: 42,
+            roles: vec![],
+            scopes: vec![],
+            unix_users: vec![],
+            ssh_public_keys: vec![],
+            not_before: 10,
+            not_after: 20,
+        };
+        let matching = AccessStatement::Revoke {
+            revocation_id: "lost-laptop".into(),
+            grant_id: None,
+            principal: Some("avery".into()),
+            serial: Some(42),
+            revoked_at: 15,
+            reason: "lost".into(),
+        };
+        let wrong_serial = AccessStatement::Revoke {
+            revocation_id: "wrong-serial".into(),
+            grant_id: None,
+            principal: Some("avery".into()),
+            serial: Some(43),
+            revoked_at: 15,
+            reason: "lost".into(),
+        };
+        assert!(matching.revokes(&grant));
+        assert!(!wrong_serial.revokes(&grant));
     }
 }

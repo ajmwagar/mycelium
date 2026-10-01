@@ -11,8 +11,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ed25519_dalek::SigningKey;
 use mycelium_peer_protocol::{
-    decode_hex, encode_hex, sha256_hex, FilesystemHealth, HostHealth, PeerEvent, PeerHello,
-    PeerMessage, Platform, ProcessHealth, ReleaseManifest, SignedEnvelope, PROTOCOL_VERSION,
+    decode_hex, encode_hex, sha256_hex, AccessRecord, AccessStatement, FilesystemHealth,
+    HostHealth, PeerEvent, PeerHello, PeerMessage, Platform, ProcessHealth, ReleaseManifest,
+    SignedEnvelope, PROTOCOL_VERSION,
 };
 use rand_core::OsRng;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
@@ -32,6 +33,19 @@ pub struct PeerView {
     pub hello: Option<PeerHello>,
     pub health: Option<HostHealth>,
     pub last_seen: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct AccessGrantView {
+    pub record: AccessRecord,
+    pub active: bool,
+    pub revoked_by: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct AccessStateView {
+    pub grants: Vec<AccessGrantView>,
+    pub revocations: Vec<AccessRecord>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -54,6 +68,7 @@ pub struct Mesh {
     observations: Mutex<BTreeMap<String, SignedEnvelope>>,
     allowed_origins: Option<BTreeSet<String>>,
     trusted_release_keys: BTreeSet<String>,
+    trusted_access_keys: BTreeSet<String>,
 }
 
 impl Mesh {
@@ -77,6 +92,7 @@ impl Mesh {
             observations: Mutex::new(BTreeMap::new()),
             allowed_origins: None,
             trusted_release_keys: BTreeSet::new(),
+            trusted_access_keys: BTreeSet::new(),
         })
     }
 
@@ -104,6 +120,7 @@ impl Mesh {
                 .collect::<BTreeSet<_>>()
         });
         let trusted_release_keys = csv_set("MYCELIUM_RELEASE_KEYS");
+        let trusted_access_keys = csv_set("MYCELIUM_ACCESS_KEYS");
         let observations = match std::fs::read_to_string(crate::peer_observations_path()) {
             Ok(text) => serde_json::from_str::<Vec<SignedEnvelope>>(&text)?
                 .into_iter()
@@ -112,6 +129,9 @@ impl Mesh {
                         PeerEvent::Release(release) => {
                             trusted_release_keys.contains(&release.signer)
                                 && release.verify().is_ok()
+                        }
+                        PeerEvent::Access(record) => {
+                            trusted_access_keys.contains(&record.signer) && record.verify().is_ok()
                         }
                         _ => true,
                     };
@@ -140,6 +160,7 @@ impl Mesh {
             observations: Mutex::new(observations),
             allowed_origins,
             trusted_release_keys,
+            trusted_access_keys,
         }))
     }
 
@@ -197,6 +218,7 @@ impl Mesh {
                 PeerEvent::Hello(hello) => view.hello = Some(hello.clone()),
                 PeerEvent::Health(health) => view.health = Some(health.clone()),
                 PeerEvent::Release(_) => {}
+                PeerEvent::Access(_) => {}
             }
         }
         views.into_values().collect()
@@ -212,6 +234,82 @@ impl Mesh {
                 _ => None,
             })
             .collect()
+    }
+
+    pub async fn access_records(&self) -> Vec<AccessRecord> {
+        self.observations
+            .lock()
+            .await
+            .values()
+            .filter_map(|envelope| match &envelope.event {
+                PeerEvent::Access(record) => Some(record.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub async fn access_view(&self, at: u64) -> AccessStateView {
+        let records = self.access_records().await;
+        let revocations = records
+            .iter()
+            .filter(|record| matches!(record.statement, AccessStatement::Revoke { .. }))
+            .cloned()
+            .collect::<Vec<_>>();
+        let grants = records
+            .into_iter()
+            .filter(|record| matches!(record.statement, AccessStatement::Grant { .. }))
+            .map(|record| {
+                let revoked_by = revocations
+                    .iter()
+                    .filter(|revocation| revocation.statement.revokes(&record.statement))
+                    .filter_map(|revocation| match &revocation.statement {
+                        AccessStatement::Revoke { revocation_id, .. } => {
+                            Some(revocation_id.clone())
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                let in_window = match &record.statement {
+                    AccessStatement::Grant {
+                        not_before,
+                        not_after,
+                        ..
+                    } => *not_before <= at && at < *not_after,
+                    _ => false,
+                };
+                AccessGrantView {
+                    active: in_window && revoked_by.is_empty(),
+                    record,
+                    revoked_by,
+                }
+            })
+            .collect();
+        AccessStateView {
+            grants,
+            revocations,
+        }
+    }
+
+    pub async fn publish_access(
+        &self,
+        statement_path: &Path,
+        signing_key: &Path,
+    ) -> Result<AccessRecord, AnyError> {
+        let statement: AccessStatement = serde_json::from_slice(&std::fs::read(statement_path)?)?;
+        validate_access_statement(&statement)?;
+        let key_bytes = std::fs::read(signing_key)?;
+        let key = SigningKey::from_bytes(
+            key_bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| "access signing key must be exactly 32 bytes")?,
+        );
+        let record = AccessRecord::sign(&key, statement)?;
+        if !self.trusted_access_keys.contains(&record.signer) {
+            return Err("access signer is not in MYCELIUM_ACCESS_KEYS".into());
+        }
+        self.publish(PeerEvent::Access(record.clone())).await?;
+        Ok(record)
     }
 
     pub async fn publish_release(&self, release: ReleaseManifest) -> Result<(), AnyError> {
@@ -355,6 +453,9 @@ impl Mesh {
             let event_authorized = match &envelope.event {
                 PeerEvent::Release(release) => {
                     self.trusted_release_keys.contains(&release.signer) && release.verify().is_ok()
+                }
+                PeerEvent::Access(record) => {
+                    self.trusted_access_keys.contains(&record.signer) && record.verify().is_ok()
                 }
                 _ => true,
             };
@@ -601,13 +702,21 @@ fn event_key(envelope: &SignedEnvelope) -> String {
             "{}:release:{}:{}",
             envelope.origin, release.channel, release.target
         ),
+        PeerEvent::Access(record) => match &record.statement {
+            AccessStatement::Grant { grant_id, .. } => {
+                format!("access:{}:grant:{grant_id}", record.signer)
+            }
+            AccessStatement::Revoke { revocation_id, .. } => {
+                format!("access:{}:revoke:{revocation_id}", record.signer)
+            }
+        },
     }
 }
 
 fn event_origin_matches(envelope: &SignedEnvelope) -> bool {
     match &envelope.event {
         PeerEvent::Hello(hello) => hello.node_id == envelope.origin,
-        PeerEvent::Health(_) | PeerEvent::Release(_) => true,
+        PeerEvent::Health(_) | PeerEvent::Release(_) | PeerEvent::Access(_) => true,
     }
 }
 
@@ -644,6 +753,70 @@ fn validate_release_label(name: &str, value: &str) -> Result<(), AnyError> {
             .all(|byte| byte.is_ascii_alphanumeric() || b"._+-".contains(&byte))
     {
         return Err(format!("{name} must contain 1-128 safe ASCII characters").into());
+    }
+    Ok(())
+}
+
+fn validate_access_statement(statement: &AccessStatement) -> Result<(), AnyError> {
+    match statement {
+        AccessStatement::Grant {
+            grant_id,
+            principal,
+            roles,
+            scopes,
+            unix_users,
+            ssh_public_keys,
+            not_before,
+            not_after,
+            ..
+        } => {
+            validate_release_label("grant_id", grant_id)?;
+            validate_release_label("principal", principal)?;
+            for (name, values) in [
+                ("role", roles),
+                ("scope", scopes),
+                ("unix_user", unix_users),
+            ] {
+                for value in values {
+                    validate_release_label(name, value)?;
+                }
+            }
+            if ssh_public_keys.len() > 32
+                || ssh_public_keys.iter().any(|key| {
+                    key.len() > 16_384
+                        || !(key.starts_with("ssh-ed25519 ")
+                            || key.starts_with("ecdsa-sha2-")
+                            || key.starts_with("sk-ssh-ed25519@openssh.com "))
+                })
+            {
+                return Err("grant contains an invalid SSH public key".into());
+            }
+            if not_after <= not_before {
+                return Err("grant not_after must be later than not_before".into());
+            }
+        }
+        AccessStatement::Revoke {
+            revocation_id,
+            grant_id,
+            principal,
+            serial,
+            reason,
+            ..
+        } => {
+            validate_release_label("revocation_id", revocation_id)?;
+            if grant_id.is_none() && principal.is_none() && serial.is_none() {
+                return Err("revocation needs grant_id, principal, or serial".into());
+            }
+            if let Some(value) = grant_id {
+                validate_release_label("grant_id", value)?;
+            }
+            if let Some(value) = principal {
+                validate_release_label("principal", value)?;
+            }
+            if reason.is_empty() || reason.len() > 512 || reason.contains(['\n', '\r']) {
+                return Err("revocation reason must be 1-512 characters on one line".into());
+            }
+        }
     }
     Ok(())
 }

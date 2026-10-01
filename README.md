@@ -147,6 +147,28 @@ release.key --write` validates, hashes, and signs every artifact before
 publishing any target. Peers may cache and relay every artifact, while update
 selection remains target-specific.
 
+## Distributed access state
+
+Access authorities are independent from peer and release identities. Peers
+accept access statements only from public keys listed in
+`MYCELIUM_ACCESS_KEYS`, then relay those signed statements unchanged. Grants
+can represent multiple people, devices, roles, scopes, Unix accounts, and SSH
+public keys. Revocations are durable statements rather than deletion events;
+matching revocations always make a grant inactive regardless of gossip order.
+
+```sh
+mycelium access keygen --path .mycelium/access.key --write
+export MYCELIUM_ACCESS_KEYS=<reported-signer-id>
+mycelium access publish --statement grant.json \
+  --signing-key .mycelium/access.key --write
+mycelium access publish --statement revocation.json \
+  --signing-key .mycelium/access.key --write
+mycelium access list
+```
+
+The authority private key stays off ordinary peers. Membership in the mTLS
+mesh permits transport only; it does not permit creating access statements.
+
 The TLS CA authorizes direct peers. Signed observation envelopes preserve
 their originating node identity when relayed, use monotonic sequence numbers,
 and deterministically retain the newest event per origin. Back up `peer.key`:

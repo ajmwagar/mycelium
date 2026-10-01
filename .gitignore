@@ -10,3 +10,4 @@ Cargo.lock
 .mycelium/authority/
 .mycelium/enrollments/
 .mycelium/release.key
+.mycelium/access.key

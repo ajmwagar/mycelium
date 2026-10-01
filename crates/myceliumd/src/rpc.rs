@@ -21,6 +21,13 @@ use tokio::sync::Mutex;
 
 use crate::protocol::{Request, Response};
 
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
 /// One saved device: enough to reconnect it at boot. Contains env-var
 /// *names* for secrets, never values.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -785,6 +792,48 @@ impl Daemon {
                     .await
                     .map_err(|error| MyceliumError::Validation(error.to_string()))?;
                 to_value(releases).map_err(json_err)
+            }
+            Request::AccessList => {
+                to_value(self.mesh.access_view(unix_now()).await).map_err(json_err)
+            }
+            Request::AccessKeygen { path, write } => {
+                if !write {
+                    return Err(MyceliumError::WritesNotPermitted(
+                        "access key generation requires --write".into(),
+                    ));
+                }
+                let signer = crate::peer::Mesh::generate_release_key(std::path::Path::new(&path))
+                    .map_err(|error| MyceliumError::Validation(error.to_string()))?;
+                to_value(serde_json::json!({ "path": path, "signer": signer })).map_err(json_err)
+            }
+            Request::AccessPublish {
+                statement,
+                signing_key,
+                write,
+                dry_run,
+            } => {
+                if dry_run {
+                    return to_value(serde_json::json!({
+                        "dry_run": true,
+                        "statement": statement,
+                        "signing_key": signing_key,
+                    }))
+                    .map_err(json_err);
+                }
+                if !write {
+                    return Err(MyceliumError::WritesNotPermitted(
+                        "access publication requires --write".into(),
+                    ));
+                }
+                let record = self
+                    .mesh
+                    .publish_access(
+                        std::path::Path::new(&statement),
+                        std::path::Path::new(&signing_key),
+                    )
+                    .await
+                    .map_err(|error| MyceliumError::Validation(error.to_string()))?;
+                to_value(record).map_err(json_err)
             }
             Request::TopologyAnnotate {
                 selector,

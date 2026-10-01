@@ -88,6 +88,9 @@ usage:
   mycelium releases keygen --path PATH --write [--json]
   mycelium releases publish --binary PATH --signing-key PATH --version VERSION --channel CHANNEL [--target TRIPLE] --write [--dry-run] [--json]
   mycelium releases publish-set --manifest PATH --signing-key PATH --write [--dry-run] [--json]
+  mycelium access list [--json]
+  mycelium access keygen --path PATH --write [--json]
+  mycelium access publish --statement PATH --signing-key PATH --write [--dry-run] [--json]
   mycelium update status [--channel CHANNEL] [--json]
   mycelium update apply [--channel CHANNEL] [--path INSTALLED-BINARY] --write
   mycelium enroll init [--path CA-DIR] --write
@@ -133,6 +136,7 @@ struct Flags {
     binary: Option<String>,
     bundle: Option<String>,
     manifest: Option<String>,
+    statement: Option<String>,
     signing_key: Option<String>,
     version: Option<String>,
     channel: Option<String>,
@@ -169,6 +173,7 @@ fn parse_flags(args: &[String]) -> Flags {
         binary: None,
         bundle: None,
         manifest: None,
+        statement: None,
         signing_key: None,
         version: None,
         channel: None,
@@ -284,6 +289,10 @@ fn parse_flags(args: &[String]) -> Flags {
             "--manifest" => {
                 i += 1;
                 f.manifest = args.get(i).cloned();
+            }
+            "--statement" => {
+                i += 1;
+                f.statement = args.get(i).cloned();
             }
             "--signing-key" => {
                 i += 1;
@@ -428,6 +437,7 @@ async fn run(cmd: &str, args: &[String]) -> Result<Vec<String>, ClientError> {
             }
         }
         "releases" => releases(args).await,
+        "access" => access(args).await,
         "update" => update(args).await,
         "enroll" => enroll_command(args).await,
         "annotate" => {
@@ -494,6 +504,70 @@ async fn run(cmd: &str, args: &[String]) -> Result<Vec<String>, ClientError> {
             "unknown command `{other}` (see `mycelium`)"
         ))),
     }
+}
+
+async fn access(args: &[String]) -> Result<Vec<String>, ClientError> {
+    let flags = parse_flags(args);
+    let action = flags.rest.first().map(String::as_str).unwrap_or("list");
+    let request = match action {
+        "list" => Request::AccessList,
+        "keygen" => Request::AccessKeygen {
+            path: flags.path.ok_or(err_usage("access keygen needs --path"))?,
+            write: flags.write,
+        },
+        "publish" => Request::AccessPublish {
+            statement: flags
+                .statement
+                .ok_or(err_usage("access publish needs --statement"))?,
+            signing_key: flags
+                .signing_key
+                .ok_or(err_usage("access publish needs --signing-key"))?,
+            write: flags.write,
+            dry_run: flags.dry_run,
+        },
+        other => return Err(err_usage(&format!("unknown access action `{other}`"))),
+    };
+    let mut client = connect().await?;
+    let value = client.call(&request).await?;
+    if flags.json || action != "list" {
+        return Ok(vec![if flags.json {
+            value.to_string()
+        } else {
+            serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string())
+        }]);
+    }
+    let mut lines = vec!["access records:".into()];
+    for grant in value["grants"].as_array().into_iter().flatten() {
+        let statement = &grant["record"]["statement"];
+        let kind = statement["kind"].as_str().unwrap_or("unknown");
+        let id = statement["grant_id"]
+            .as_str()
+            .or_else(|| statement["revocation_id"].as_str())
+            .unwrap_or("?");
+        let principal = statement["principal"].as_str().unwrap_or("-");
+        let state = if grant["active"].as_bool().unwrap_or(false) {
+            "active"
+        } else if grant["revoked_by"]
+            .as_array()
+            .is_some_and(|v| !v.is_empty())
+        {
+            "revoked"
+        } else {
+            "inactive"
+        };
+        lines.push(format!(
+            "  {kind} id={id} principal={principal} state={state}"
+        ));
+    }
+    for record in value["revocations"].as_array().into_iter().flatten() {
+        let statement = &record["statement"];
+        lines.push(format!(
+            "  revoke id={} principal={}",
+            statement["revocation_id"].as_str().unwrap_or("?"),
+            statement["principal"].as_str().unwrap_or("-"),
+        ));
+    }
+    Ok(lines)
 }
 
 async fn enroll_command(args: &[String]) -> Result<Vec<String>, ClientError> {
