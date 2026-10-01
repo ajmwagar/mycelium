@@ -345,8 +345,17 @@ pub(crate) fn issue_for_invite(
     let temp = temporary_key_path(&public_key_path.to_string_lossy());
     fs::copy(public_key_path, &temp)
         .map_err(|error| format!("prepare certificate input {}: {error}", temp.display()))?;
-    let mut principals = unix_users.to_vec();
-    principals.extend(roles.iter().map(|role| format!("mycelium-role-{role}")));
+    // A role-bound certificate must not also carry its Unix account as a
+    // principal: older hosts that trust the CA without AuthorizedPrincipalsFile
+    // would otherwise accept it and bypass the host's role policy.
+    let principals = if roles.is_empty() {
+        unix_users.to_vec()
+    } else {
+        roles
+            .iter()
+            .map(|role| format!("mycelium-role-{role}"))
+            .collect()
+    };
     let principals = principals.join(",");
     let validity = format!("+0s:+{ttl}s");
     let serial = serial.to_string();
