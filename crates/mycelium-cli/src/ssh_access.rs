@@ -13,10 +13,115 @@ pub fn run(args: &[String], state: &Value) -> Result<Vec<String>, String> {
         Some("issue") => issue(args, state),
         Some("krl") => krl(args, state),
         Some("host-bundle") => host_bundle(args),
+        Some("host-apply") => host_apply(args),
         Some("client-config") => client_config(args),
         Some(action) => Err(format!("unknown access ssh action `{action}`")),
-        None => Err("access ssh needs ca-init, issue, or krl".into()),
+        None => Err(
+            "access ssh needs ca-init, issue, krl, host-bundle, host-apply, or client-config"
+                .into(),
+        ),
     }
+}
+
+fn host_apply(args: &[String]) -> Result<Vec<String>, String> {
+    require_write(args)?;
+    let bundle = Path::new(required(args, "--bundle")?);
+    validate_host_bundle(bundle)?;
+    if !cfg!(target_os = "linux") {
+        return Err("SSH host bundle application currently supports Linux only".into());
+    }
+    let uid = Command::new("id")
+        .arg("-u")
+        .output()
+        .map_err(|e| format!("determine effective user: {e}"))?;
+    if !uid.status.success() || String::from_utf8_lossy(&uid.stdout).trim() != "0" {
+        return Err("SSH host bundle application needs root; run this command through sudo".into());
+    }
+
+    let ssh = Path::new("/etc/ssh");
+    let managed = ssh.join("mycelium");
+    let drop_in = ssh.join("sshd_config.d/60-mycelium-access.conf");
+    let backup = ssh.join(format!("mycelium.pre-{}", now()?));
+    fs::create_dir_all(&backup)
+        .map_err(|e| format!("create rollback directory {}: {e}", backup.display()))?;
+    let prior = [
+        (managed.join("user_ca.pub"), "user_ca.pub"),
+        (managed.join("revoked.krl"), "revoked.krl"),
+        (drop_in.clone(), "60-mycelium-access.conf"),
+    ];
+    for (source, name) in &prior {
+        if source.is_file() {
+            fs::copy(source, backup.join(name))
+                .map_err(|e| format!("back up {}: {e}", source.display()))?;
+        }
+    }
+    fs::create_dir_all(&managed).map_err(|e| format!("create {}: {e}", managed.display()))?;
+    fs::create_dir_all(drop_in.parent().expect("drop-in has parent"))
+        .map_err(|e| format!("create sshd drop-in directory: {e}"))?;
+    let install = || -> Result<(), String> {
+        install_mode(
+            &bundle.join("user_ca.pub"),
+            &managed.join("user_ca.pub"),
+            0o644,
+        )?;
+        install_mode(
+            &bundle.join("revoked.krl"),
+            &managed.join("revoked.krl"),
+            0o644,
+        )?;
+        install_mode(&bundle.join("60-mycelium-access.conf"), &drop_in, 0o644)?;
+        command("sshd", &["-t"])?;
+        if command("systemctl", &["reload", "sshd"]).is_err() {
+            command("systemctl", &["reload", "ssh"])?;
+        }
+        Ok(())
+    };
+    if let Err(error) = install() {
+        for (destination, name) in &prior {
+            let saved = backup.join(name);
+            if saved.is_file() {
+                let _ = install_mode(&saved, destination, 0o644);
+            } else {
+                let _ = fs::remove_file(destination);
+            }
+        }
+        let _ = command("sshd", &["-t"]);
+        let _ = command("systemctl", &["reload", "sshd"]);
+        return Err(format!(
+            "SSH host bundle failed and prior files were restored from {}: {error}",
+            backup.display()
+        ));
+    }
+    Ok(vec![format!(
+        "installed SSH trust bundle; rollback copy retained at {}",
+        backup.display()
+    )])
+}
+
+fn validate_host_bundle(bundle: &Path) -> Result<(), String> {
+    for name in [
+        "user_ca.pub",
+        "revoked.krl",
+        "60-mycelium-access.conf",
+        "manifest.json",
+    ] {
+        if !bundle.join(name).is_file() {
+            return Err(format!(
+                "SSH host bundle {} is missing {name}",
+                bundle.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn install_mode(source: &Path, destination: &Path, mode: u32) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    let staged = destination.with_extension(format!("mycelium-install-{}", std::process::id()));
+    fs::copy(source, &staged).map_err(|e| format!("stage {}: {e}", destination.display()))?;
+    fs::set_permissions(&staged, fs::Permissions::from_mode(mode))
+        .map_err(|e| format!("set permissions on {}: {e}", staged.display()))?;
+    fs::rename(&staged, destination).map_err(|e| format!("install {}: {e}", destination.display()))
 }
 
 fn client_config(args: &[String]) -> Result<Vec<String>, String> {
@@ -490,6 +595,29 @@ mod tests {
             key_material("ssh-ed25519 AAAA alice").unwrap(),
             "ssh-ed25519 AAAA"
         );
+    }
+
+    #[test]
+    fn host_bundle_validation_requires_the_complete_contract() {
+        let root = std::env::temp_dir().join(format!(
+            "mycelium-host-bundle-test-{}-{}",
+            std::process::id(),
+            now().unwrap()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        assert!(validate_host_bundle(&root)
+            .unwrap_err()
+            .contains("user_ca.pub"));
+        for name in [
+            "user_ca.pub",
+            "revoked.krl",
+            "60-mycelium-access.conf",
+            "manifest.json",
+        ] {
+            fs::write(root.join(name), "test").unwrap();
+        }
+        validate_host_bundle(&root).unwrap();
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

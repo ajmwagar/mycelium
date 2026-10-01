@@ -961,6 +961,41 @@ impl Daemon {
                 }))
                 .map_err(json_err)
             }
+            Request::SshPlan { selector, username } => {
+                let saved = self.saved.lock().await;
+                let device = saved
+                    .values()
+                    .find(|device| {
+                        device.meta.id.to_string().eq_ignore_ascii_case(&selector)
+                            || device.meta.address.eq_ignore_ascii_case(&selector)
+                    })
+                    .ok_or_else(|| MyceliumError::UnknownDevice(selector.clone()))?;
+                if device.meta.driver != "linux"
+                    && device.meta.driver != "darwin"
+                    && device.meta.driver != "edgeos"
+                {
+                    return Err(MyceliumError::Validation(format!(
+                        "{} uses driver `{}`, which is not an interactive SSH target",
+                        device.meta.id, device.meta.driver
+                    )));
+                }
+                let username = username
+                    .or_else(|| device.username.clone())
+                    .ok_or_else(|| {
+                        MyceliumError::Validation(format!(
+                            "{} has no SSH username; pass --user or re-add it with --user",
+                            device.meta.id
+                        ))
+                    })?;
+                to_value(serde_json::json!({
+                    "device": device.meta.id,
+                    "host": device.meta.address,
+                    "username": username,
+                    "port": 22,
+                    "identity": device.key_path,
+                }))
+                .map_err(json_err)
+            }
             Request::ConsolePlan { id } => {
                 let saved = self.saved.lock().await;
                 let device = saved
@@ -1590,6 +1625,41 @@ mod tests {
         let receipts = import_allocation_receipts(&topology, "home");
         assert_eq!(receipts.len(), 2);
         assert!(receipts.iter().all(|receipt| receipt.site == "home"));
+    }
+
+    #[tokio::test]
+    async fn ssh_plan_resolves_inventory_identity_without_secrets() {
+        let daemon = daemon_with_fake();
+        daemon.saved.lock().await.insert(
+            DeviceId::new("titan"),
+            SavedDevice {
+                meta: DeviceMeta {
+                    id: DeviceId::new("titan"),
+                    kind: mycelium_core::DeviceKind::Other,
+                    driver: "linux".into(),
+                    vendor: None,
+                    model: None,
+                    firmware: None,
+                    address: "100.83.7.116".into(),
+                },
+                target: "titan".into(),
+                username: Some("avery".into()),
+                password_env: Some("SECRET_PASSWORD".into()),
+                key_path: Some("~/.ssh/id_ed25519".into()),
+            },
+        );
+        let response = daemon
+            .dispatch(Request::SshPlan {
+                selector: "TITAN".into(),
+                username: None,
+            })
+            .await;
+        assert!(response.ok, "{response:?}");
+        let plan = response.result.unwrap();
+        assert_eq!(plan["host"], "100.83.7.116");
+        assert_eq!(plan["username"], "avery");
+        assert_eq!(plan["identity"], "~/.ssh/id_ed25519");
+        assert!(plan.get("password_env").is_none());
     }
 
     #[tokio::test]

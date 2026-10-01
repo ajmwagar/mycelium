@@ -147,6 +147,12 @@ pub enum Request {
         #[serde(default)]
         via: Option<String>,
     },
+    /// Resolve a managed device to a secret-free SSH execution plan.
+    SshPlan {
+        selector: String,
+        #[serde(default)]
+        username: Option<String>,
+    },
     /// Resolve a device's interactive out-of-band console without sending
     /// credentials over RPC.
     ConsolePlan {

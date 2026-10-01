@@ -200,7 +200,9 @@ mycelium access list
 
 OIDC-backed grants bind issuer, subject, and audience to Unix principals and
 optionally permit a valid JWT holder to certify a presented SSH key. The
-resulting certificate never outlives either the JWT or the signed grant.
+JWT must be valid during exchange. The resulting SSH certificate is an
+independent, bounded credential that never outlives its requested TTL or the
+signed grant, so an IdP outage does not immediately terminate existing access.
 
 ### Join with OIDC
 
@@ -263,6 +265,81 @@ the argv array directly without a shell and independently verifies the returned
 JWT against discovery, JWKS, issuer, and audience before sending it to the
 certificate gateway.
 
+### Enable certificate SSH on a host
+
+Once an enrolled host trusts the Mycelium SSH CA and the user has a current
+certificate at `$MYCELIUM_HOME/ssh/user-cert.pub`, normal access is one command:
+
+```sh
+mycelium ssh lab-node
+mycelium ssh lab-node -- uname -a
+```
+
+The daemon derives the destination and Unix user from inventory. The CLI uses
+only the selected identity and Mycelium certificate, so a missing certificate
+fails loudly instead of silently falling back to unrelated agent keys. Override
+paths with `--key` and `--certificate`, or set `MYCELIUM_SSH_IDENTITY` and
+`MYCELIUM_SSH_CERTIFICATE`.
+
+Host CA trust is a privileged bootstrap/reconciliation action. Mycelium
+generates the host bundle and an optional narrowly scoped client fragment; it
+does not silently modify `sshd` or `~/.ssh/config`. Keep an existing SSH session
+open while installing the bundle, validate before reload, and prove a second
+certificate-only connection before closing the original session.
+
+```sh
+# Authority: create these once, then keep the private keys off ordinary peers.
+mycelium access keygen --path "$MYCELIUM_HOME/access.key" --write
+mycelium access ssh ca-init --path "$MYCELIUM_HOME/ssh/user_ca" --write
+
+# Publish a grant prepared from docs/examples/access-grant.json, then issue.
+mycelium access publish --statement grant.json \
+  --signing-key "$MYCELIUM_HOME/access.key" --write
+mycelium access ssh issue --grant GRANT_ID \
+  --public-key ~/.ssh/id_ed25519.pub \
+  --ca "$MYCELIUM_HOME/ssh/user_ca" \
+  --path "$MYCELIUM_HOME/ssh/user-cert.pub" --ttl 8h --write
+
+# Derive the host trust bundle from the same converged authorization state.
+mycelium access ssh krl --ca-public "$MYCELIUM_HOME/ssh/user_ca.pub" \
+  --path "$MYCELIUM_HOME/ssh/revoked.krl" --write
+mycelium access ssh host-bundle \
+  --ca-public "$MYCELIUM_HOME/ssh/user_ca.pub" \
+  --krl "$MYCELIUM_HOME/ssh/revoked.krl" \
+  --path "$MYCELIUM_HOME/ssh/host-bundle" --write
+```
+
+Copy the bundle to an enrolled Linux host, then apply it in one command:
+
+```sh
+sudo -E mycelium access ssh host-apply \
+  --bundle "$MYCELIUM_HOME/ssh/host-bundle" --write
+```
+
+The command retains a rollback copy under `/etc/ssh`, runs `sshd -t`, reloads
+only a valid configuration, and restores the prior files if validation or
+reload fails. The equivalent manual break-glass procedure is documented in
+[`docs/access-control.md`](docs/access-control.md#install-or-roll-back-a-host-bundle).
+
+`mycelium ssh` does not require OpenSSH client configuration. If direct
+`ssh mycelium-lab` compatibility is useful, generate an optional alias:
+
+```sh
+mycelium access ssh client-config \
+  --host mycelium-lab --hostname lab-node.example.net --user operator \
+  --identity ~/.ssh/id_ed25519 \
+  --certificate "$MYCELIUM_HOME/ssh/user-cert.pub" \
+  --path ~/.ssh/mycelium-lab.conf --write
+
+# One-time client integration; Mycelium prints this instruction too.
+printf '%s\n' 'Include ~/.ssh/mycelium-lab.conf' >> ~/.ssh/config
+ssh -o BatchMode=yes -o PasswordAuthentication=no mycelium-lab
+```
+
+After that optional one-time `Include`, `ssh mycelium-lab` selects the
+configured key and current Mycelium certificate. Certificate renewal replaces
+the certificate at the same path; the SSH fragment does not need regeneration.
+
 The authority private key stays off ordinary peers. Membership in the mTLS
 mesh permits transport only; it does not permit creating access statements.
 See [`docs/access-control.md`](docs/access-control.md) for the OIDC verification,
@@ -313,7 +390,7 @@ neighbor tables without becoming network appliances themselves:
 
 ```sh
 mycelium add pris --driver linux --user ajmwagar
-mycelium add titan --driver linux --user avery
+mycelium add lab-node.example.net --driver linux --user operator
 mycelium scan
 ```
 
@@ -321,7 +398,7 @@ The Linux driver runs a fixed, read-only `iproute2` probe over SSH. It uses
 OpenSSH configuration and agent credentials when no password or key is given.
 Each observer hostname is also its site identity, so overlapping private
 networks are stored separately (`pris/192.168.1.0/24` and
-`titan/192.168.1.0/24`) instead of producing false address conflicts.
+`lab/192.168.1.0/24`) instead of producing false address conflicts.
 
 ## Redfish servers
 

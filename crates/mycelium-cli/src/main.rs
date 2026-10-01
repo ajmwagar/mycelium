@@ -99,6 +99,7 @@ usage:
   mycelium access ssh krl --ca-public PATH --path KRL --write [--json]
   mycelium access ssh host-bundle --ca-public PATH --krl PATH --path DIR --write [--json]
   mycelium access ssh client-config --host ALIAS --hostname HOST --user USER --identity PATH --certificate PATH --path FILE --write [--json]
+  mycelium access ssh host-apply --bundle DIR --write
   mycelium access oidc verify --issuer URL --audience ID --token-env VAR [--json]
   mycelium access oidc ssh-issue --issuer URL --audience ID --token-env VAR --public-key PATH --ca PRIVATE-KEY --path CERT [--grant ID] [--ttl 8h] --write [--json]
   mycelium access oidc gateway --listen 127.0.0.1:8787 --issuer URL --audience ID --client-id ID --client-secret-env VAR --callback-url HTTPS-URL --ca PRIVATE-KEY --write
@@ -114,6 +115,7 @@ usage:
   mycelium boot-path <device> --target <IP-or-URL>... [--json]
   mycelium nbde plan <device> --tang <IP-or-URL>... --threshold N [--json]
   mycelium tunnel <target>:<port> [--via DEVICE] [--local-port N] [--write] [--json]
+  mycelium ssh <device> [--user USER] [--key PATH] [--certificate PATH] [--port N] [--json] [-- COMMAND...]
   mycelium console <device> [--json]
   mycelium remove <id>
 
@@ -416,6 +418,7 @@ async fn run(cmd: &str, args: &[String]) -> Result<Vec<String>, ClientError> {
             Ok(render_call(&v))
         }
         "plan" => plan(args).await,
+        "ssh" => ssh(args).await,
         "scan" => {
             let f = parse_flags(args);
             let mut c = connect().await?;
@@ -521,8 +524,12 @@ async fn run(cmd: &str, args: &[String]) -> Result<Vec<String>, ClientError> {
 
 async fn access(args: &[String]) -> Result<Vec<String>, ClientError> {
     if args.first().is_some_and(|value| value == "ssh") {
-        let mut client = connect().await?;
-        let state = client.call(&Request::AccessList).await?;
+        let state = if args.get(1).is_some_and(|value| value == "host-apply") {
+            serde_json::json!({})
+        } else {
+            let mut client = connect().await?;
+            client.call(&Request::AccessList).await?
+        };
         return ssh_access::run(&args[1..], &state).map_err(access_error);
     }
     if args.first().is_some_and(|value| value == "oidc") {
@@ -1056,6 +1063,183 @@ fn unix_now() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+async fn ssh(args: &[String]) -> Result<Vec<String>, ClientError> {
+    let options = SshOptions::parse(args)?;
+    let mut client = connect().await?;
+    let plan = client
+        .call(&Request::SshPlan {
+            selector: options.device.clone(),
+            username: options.user.clone(),
+        })
+        .await?;
+    let identity = options
+        .identity
+        .or_else(|| plan["identity"].as_str().map(expand_home))
+        .or_else(|| std::env::var("MYCELIUM_SSH_IDENTITY").ok().map(expand_home))
+        .unwrap_or_else(|| expand_home("~/.ssh/id_ed25519"));
+    let certificate = options
+        .certificate
+        .or_else(|| {
+            std::env::var("MYCELIUM_SSH_CERTIFICATE")
+                .ok()
+                .map(expand_home)
+        })
+        .unwrap_or_else(|| {
+            myceliumd::home_dir()
+                .join("ssh/user-cert.pub")
+                .to_string_lossy()
+                .into()
+        });
+    require_readable("SSH identity", &identity)?;
+    require_readable("Mycelium SSH certificate", &certificate)?;
+    let host = plan["host"]
+        .as_str()
+        .ok_or(err_usage("SSH plan has no host"))?;
+    let username = plan["username"]
+        .as_str()
+        .ok_or(err_usage("SSH plan has no username"))?;
+    let port = options
+        .port
+        .unwrap_or_else(|| plan["port"].as_u64().unwrap_or(22) as u16);
+    let argv = ssh_argv(
+        host,
+        username,
+        port,
+        &identity,
+        &certificate,
+        &options.extra,
+    );
+    if options.json {
+        return Ok(vec![serde_json::json!({
+            "device": plan["device"],
+            "host": host,
+            "username": username,
+            "port": port,
+            "identity": identity,
+            "certificate": certificate,
+            "argv": argv,
+        })
+        .to_string()]);
+    }
+    let status = std::process::Command::new("ssh")
+        .args(&argv)
+        .status()
+        .map_err(|error| err_usage(&format!("could not run SSH: {error}")))?;
+    if !status.success() {
+        return Err(err_usage(&format!("SSH exited with {status}")));
+    }
+    Ok(Vec::new())
+}
+
+#[derive(Debug, PartialEq)]
+struct SshOptions {
+    device: String,
+    user: Option<String>,
+    identity: Option<String>,
+    certificate: Option<String>,
+    port: Option<u16>,
+    json: bool,
+    extra: Vec<String>,
+}
+
+impl SshOptions {
+    fn parse(args: &[String]) -> Result<Self, ClientError> {
+        let device = args
+            .first()
+            .filter(|value| !value.starts_with('-'))
+            .cloned()
+            .ok_or(err_usage("ssh needs a device"))?;
+        let mut parsed = Self {
+            device,
+            user: None,
+            identity: None,
+            certificate: None,
+            port: None,
+            json: false,
+            extra: Vec::new(),
+        };
+        let mut index = 1;
+        while index < args.len() {
+            let flag = &args[index];
+            if flag == "--" {
+                parsed.extra.extend_from_slice(&args[index + 1..]);
+                break;
+            }
+            let take = |index: &mut usize, name: &str| -> Result<String, ClientError> {
+                *index += 1;
+                args.get(*index)
+                    .cloned()
+                    .ok_or(err_usage(&format!("ssh needs a value for {name}")))
+            };
+            match flag.as_str() {
+                "--user" => parsed.user = Some(take(&mut index, flag)?),
+                "--key" => parsed.identity = Some(expand_home(&take(&mut index, flag)?)),
+                "--certificate" => parsed.certificate = Some(expand_home(&take(&mut index, flag)?)),
+                "--port" => {
+                    let value = take(&mut index, flag)?;
+                    let port = value
+                        .parse::<u16>()
+                        .map_err(|_| err_usage("SSH port must be an integer from 1 to 65535"))?;
+                    if port == 0 {
+                        return Err(err_usage("SSH port must be an integer from 1 to 65535"));
+                    }
+                    parsed.port = Some(port);
+                }
+                "--json" => parsed.json = true,
+                other => {
+                    return Err(err_usage(&format!(
+                        "unknown ssh option `{other}`; pass a remote command after --"
+                    )))
+                }
+            }
+            index += 1;
+        }
+        Ok(parsed)
+    }
+}
+
+fn ssh_argv(
+    host: &str,
+    username: &str,
+    port: u16,
+    identity: &str,
+    certificate: &str,
+    extra: &[String],
+) -> Vec<String> {
+    let mut argv = vec![
+        "-o".into(),
+        "IdentitiesOnly=yes".into(),
+        "-o".into(),
+        format!("IdentityFile={identity}"),
+        "-o".into(),
+        format!("CertificateFile={certificate}"),
+        "-p".into(),
+        port.to_string(),
+    ];
+    argv.push(format!("{username}@{host}"));
+    argv.extend_from_slice(extra);
+    argv
+}
+
+fn require_readable(label: &str, path: &str) -> Result<(), ClientError> {
+    std::fs::File::open(path).map(|_| ()).map_err(|error| err_usage(&format!(
+        "{label} `{path}` is unavailable: {error}; issue a certificate with `mycelium access oidc join` or pass an explicit path"
+    )))
+}
+
+fn expand_home(value: impl AsRef<str>) -> String {
+    let value = value.as_ref();
+    if value == "~" || value.starts_with("~/") {
+        if let Some(home) = std::env::var_os("HOME") {
+            return std::path::PathBuf::from(home)
+                .join(value.trim_start_matches("~/"))
+                .to_string_lossy()
+                .into();
+        }
+    }
+    value.to_owned()
 }
 
 async fn console(args: &[String]) -> Result<Vec<String>, ClientError> {
@@ -2068,4 +2252,40 @@ fn render_tunnel_plan(plan: &serde_json::Value) -> Vec<String> {
         ),
         "run with --write to open the foreground tunnel; Ctrl-C closes it".into(),
     ]
+}
+
+#[cfg(test)]
+mod ssh_command_tests {
+    use super::*;
+
+    #[test]
+    fn ssh_options_keep_remote_command_after_separator() {
+        let args = [
+            "titan",
+            "--user",
+            "avery",
+            "--port",
+            "2222",
+            "--",
+            "printf",
+            "connected",
+        ]
+        .map(str::to_owned);
+        let parsed = SshOptions::parse(&args).unwrap();
+        assert_eq!(parsed.device, "titan");
+        assert_eq!(parsed.user.as_deref(), Some("avery"));
+        assert_eq!(parsed.port, Some(2222));
+        assert_eq!(parsed.extra, ["printf", "connected"]);
+    }
+
+    #[test]
+    fn ssh_argv_uses_only_explicit_identity_material() {
+        let argv = ssh_argv("titan", "avery", 22, "/key", "/cert", &[]);
+        assert!(argv
+            .windows(2)
+            .any(|pair| pair == ["-o", "IdentitiesOnly=yes"]));
+        assert!(argv.contains(&"IdentityFile=/key".into()));
+        assert!(argv.contains(&"CertificateFile=/cert".into()));
+        assert_eq!(argv.last().map(String::as_str), Some("avery@titan"));
+    }
 }

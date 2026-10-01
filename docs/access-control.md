@@ -126,8 +126,15 @@ does not disable existing authentication methods in this first slice.
 
 ### Install or roll back a host bundle
 
-The bundle command does not mutate the host. A Linux deployment driver—or a
-human following this runbook—installs it transactionally:
+On an enrolled Linux host, apply the bundle transactionally:
+
+```sh
+sudo -E mycelium access ssh host-apply --bundle /path/to/host-bundle --write
+```
+
+This retains a rollback copy, validates with `sshd -t`, reloads only after
+validation, and restores prior files if installation fails. The equivalent
+manual procedure is:
 
 ```sh
 bundle=.mycelium/ssh/host-bundle
@@ -161,7 +168,16 @@ non-zero when it is revoked.
 
 ### Configure the user's SSH client
 
-Generate a narrowly scoped client fragment after issuing the certificate:
+The normal client path needs no OpenSSH configuration:
+
+```sh
+mycelium ssh mycelium-lab
+mycelium ssh mycelium-lab -- hostname
+```
+
+Mycelium resolves the host and Unix user from inventory and selects the managed
+identity and certificate. Generate a narrowly scoped client fragment only when
+direct `ssh` compatibility is desired:
 
 ```sh
 mycelium access ssh client-config \
