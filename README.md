@@ -1,31 +1,68 @@
-# mycelium
-A sensing framework for your networks. Home, Cloud, anywhere.
+# Mycelium
 
-Mesh / AI control over home IoT devices and networkign applicances.
+**A distributed control plane for the networks and hardware you already own.**
 
-No more Port Forwarding, Manual VLAN tagging, or firewall rules.
+Mycelium discovers physical topology, normalizes devices from different vendors,
+and coordinates health, releases, and bounded access without requiring a central
+controller. It is Rust-first, scriptable, and designed to fail closed around
+mutating operations.
 
-Secure by default, and only with justification.
+> Mycelium is usable today, but it is still pre-1.0. Read operations are the
+> safest place to begin. Every mutation requires an explicit `--write`, and
+> supported operations offer `--dry-run` so the proposed action is visible first.
 
-# Architechture
+## What works today
 
-1. Rust Core / Lua Plugins
+| Area | Current support |
+| --- | --- |
+| Discovery | SNMP, mDNS/DNS-SD, SSDP/UPnP, Linux, Darwin, and Tailscale observations |
+| Topology | Multi-site/LAN inventory, physical switch-port attachment, services, routes, and link transport |
+| Hardware | NETGEAR FastPath, EdgeOS, UniFi AP/controller, Redfish/iLO, Linux, and Darwin drivers |
+| Desired state | Stable logical networks, imported allocations, drift reports, VLAN and forwarding primitives |
+| Peer mesh | Signed observations, mTLS transport, health streaming, and target-aware P2P updates |
+| Access | Signed grants/revocations, OIDC verification, short-lived OpenSSH certificates, and KRL generation |
+| Early boot | PXE/NBDE reachability planning for Tang/Clevis deployments |
 
-2. Integrate / Interop / Don't replace unless nessecary
+Replacement firmware remains experimental research and is not part of the
+supported host build.
 
-3. Anti-Abondonware, generalize the common, implement everywhere.
+## Quick start
 
-4. Secure by default. Intelligent. Restraint is good.
+Requirements: a current stable Rust toolchain and the native tools required by
+the drivers you choose (for example OpenSSH and SNMP utilities).
 
-5. Multi-LAN/WAN
+```sh
+git clone https://github.com/ajmwagar/mycelium.git
+cd mycelium
+cargo build --release -p mycelium-cli
 
-# UX
+# The CLI starts its local daemon on demand.
+./target/release/mycelium drivers
+./target/release/mycelium devices
+./target/release/mycelium topology
+```
 
-A control plane / CLI for your home network.
+Add read-only observation points, scan, and inspect the unified map:
 
-Integrate across, brands, support iPMi, bare metal integration across the board.
+```sh
+mycelium add pris --driver linux --user ajmwagar
+mycelium add 192.168.1.2 --driver snmp --password-env SNMP_COMMUNITY
+mycelium scan
+mycelium map
+```
 
-Network Topology Mapping / Viewing
+Credentials are referenced by environment-variable name and are not persisted
+in inventory. Use a dedicated `MYCELIUM_HOME` when evaluating against a test
+network.
+
+## Design
+
+- One shared representation; vendor drivers translate capabilities at the edge.
+- Integrate existing systems instead of replacing or reimplementing them.
+- Derive topology and configuration from observed source data whenever possible.
+- Keep workflows deterministic; Lua plugins run through bounded host APIs.
+- Require explicit authorization for mutations and preserve a human-readable plan.
+- Treat overlapping private address space as site-scoped, not globally unique.
 
 ## Early-boot paths and NBDE
 
@@ -62,22 +99,6 @@ mycelium tunnel 192.168.99.12:80 --local-port 8080 --write
 The daemon returns SSH arguments and an environment-variable name only. The
 secret stays in the CLI environment and is passed to `sshpass` via `SSHPASS`,
 never argv. `--via DEVICE` overrides inference when multiple paths are valid.
-
-SEIM (FIPS Compliant Syslogs)?
-
-## Initial Targets
-
-EdgeRunner Routers, ER-10X EdgeRunner Edge?
-
-wifi management (guest networks)
-
-NETGEAR Switch
-
-Dell iPMIE
-
-Ubiquti APs.
-
-Pi-Hole?
 
 ## Peer mesh
 
@@ -283,8 +304,17 @@ The saved inventory contains the environment-variable name, never the AP
 password. UniFi network-wide configuration remains controller-owned; the AP
 driver is for observation, recovery, and explicit adoption operations.
 
-# Initial Features
+## Development
 
-DNS Management, DHCP Management, VLAN Management (rules, etc.)
+```sh
+cargo check --workspace
+cargo test --workspace
+```
 
-SEIM / Intrusion Management / Exfiltration monitoring.
+Small, focused pull requests are welcome. Please include tests for behavioral
+changes and keep device mutations behind the existing plan/`--write` boundary.
+
+## License
+
+Licensed at your option under either the [Apache License, Version 2.0](LICENSE-APACHE)
+or the [MIT license](LICENSE).
