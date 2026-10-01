@@ -12,6 +12,9 @@ pub enum Request {
     /// driver probes in order and the first match attaches.
     DeviceAdd {
         target: String,
+        /// Stable operator-facing name, independent of probed hostnames.
+        #[serde(default)]
+        name: Option<String>,
         #[serde(default)]
         driver: Option<String>,
         #[serde(default)]

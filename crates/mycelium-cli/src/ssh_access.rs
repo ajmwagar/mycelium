@@ -27,8 +27,8 @@ fn host_apply(args: &[String]) -> Result<Vec<String>, String> {
     require_write(args)?;
     let bundle = Path::new(required(args, "--bundle")?);
     validate_host_bundle(bundle)?;
-    if !cfg!(target_os = "linux") {
-        return Err("SSH host bundle application currently supports Linux only".into());
+    if !cfg!(any(target_os = "linux", target_os = "macos")) {
+        return Err("SSH host bundle application currently supports Linux and macOS only".into());
     }
     let uid = Command::new("id")
         .arg("-u")
@@ -71,9 +71,7 @@ fn host_apply(args: &[String]) -> Result<Vec<String>, String> {
         )?;
         install_mode(&bundle.join("60-mycelium-access.conf"), &drop_in, 0o644)?;
         command("sshd", &["-t"])?;
-        if command("systemctl", &["reload", "sshd"]).is_err() {
-            command("systemctl", &["reload", "ssh"])?;
-        }
+        reload_sshd()?;
         Ok(())
     };
     if let Err(error) = install() {
@@ -86,7 +84,7 @@ fn host_apply(args: &[String]) -> Result<Vec<String>, String> {
             }
         }
         let _ = command("sshd", &["-t"]);
-        let _ = command("systemctl", &["reload", "sshd"]);
+        let _ = reload_sshd();
         return Err(format!(
             "SSH host bundle failed and prior files were restored from {}: {error}",
             backup.display()
@@ -96,6 +94,18 @@ fn host_apply(args: &[String]) -> Result<Vec<String>, String> {
         "installed SSH trust bundle; rollback copy retained at {}",
         backup.display()
     )])
+}
+
+fn reload_sshd() -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        if command("systemctl", &["reload", "sshd"]).is_err() {
+            command("systemctl", &["reload", "ssh"])?;
+        }
+    }
+    // launchd invokes sshd for each inbound macOS connection, so the next
+    // connection picks up the validated configuration without a restart.
+    Ok(())
 }
 
 fn validate_host_bundle(bundle: &Path) -> Result<(), String> {

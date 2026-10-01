@@ -311,7 +311,7 @@ mycelium access ssh host-bundle \
   --path "$MYCELIUM_HOME/ssh/host-bundle" --write
 ```
 
-Copy the bundle to an enrolled Linux host, then apply it in one command:
+Copy the bundle to an enrolled Linux or macOS host, then apply it in one command:
 
 ```sh
 sudo -E mycelium access ssh host-apply \

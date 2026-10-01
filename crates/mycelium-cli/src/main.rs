@@ -71,7 +71,7 @@ mycelium — control plane for your network appliances
 usage:
   mycelium daemon status|start|stop
   mycelium drivers
-  mycelium add <host[:port]> [--driver NAME] [--user U] [--password-env VAR] [--key PATH]
+  mycelium add <host[:port]> [--name NAME] [--driver NAME] [--user U] [--password-env VAR] [--key PATH]
   mycelium devices [--json]
   mycelium describe <id> [--json]
   mycelium call <id> <capability> [--param k=v ...] [--write] [--dry-run]
@@ -369,6 +369,7 @@ async fn run(cmd: &str, args: &[String]) -> Result<Vec<String>, ClientError> {
             let v = c
                 .call(&Request::DeviceAdd {
                     target: target.clone(),
+                    name: f.name,
                     driver: f.driver,
                     username: f.user,
                     password_env: f.password_env,

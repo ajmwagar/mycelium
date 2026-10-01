@@ -34,6 +34,8 @@ fn unix_now() -> u64 {
 pub struct SavedDevice {
     pub meta: DeviceMeta,
     pub target: String,
+    #[serde(default)]
+    pub name: Option<String>,
     pub username: Option<String>,
     pub password_env: Option<String>,
     pub key_path: Option<String>,
@@ -275,6 +277,7 @@ impl Daemon {
                 .map_err(json_err),
             Request::DeviceAdd {
                 target,
+                name,
                 driver,
                 username,
                 password_env,
@@ -315,6 +318,7 @@ impl Daemon {
                             SavedDevice {
                                 meta: meta.clone(),
                                 target: target.clone(),
+                                name: name.clone(),
                                 username: creds.username.clone(),
                                 password_env: password_env.clone(),
                                 key_path: creds.key_path.clone(),
@@ -972,6 +976,10 @@ impl Daemon {
                             .unwrap_or(&id);
                         id.eq_ignore_ascii_case(&selector)
                             || inferred_name.eq_ignore_ascii_case(&selector)
+                            || device
+                                .name
+                                .as_deref()
+                                .is_some_and(|name| name.eq_ignore_ascii_case(&selector))
                             || device.meta.address.eq_ignore_ascii_case(&selector)
                     })
                     .ok_or_else(|| MyceliumError::UnknownDevice(selector.clone()))?;
@@ -1656,6 +1664,7 @@ mod tests {
                     address: "100.83.7.116".into(),
                 },
                 target: "100.83.7.116@gateway".into(),
+                name: Some("compute".into()),
                 username: Some("operator".into()),
                 password_env: Some("SECRET_PASSWORD".into()),
                 key_path: Some("~/.ssh/id_ed25519".into()),
@@ -1663,7 +1672,7 @@ mod tests {
         );
         let response = daemon
             .dispatch(Request::SshPlan {
-                selector: "LAB-NODE".into(),
+                selector: "COMPUTE".into(),
                 username: None,
             })
             .await;
@@ -1690,6 +1699,7 @@ mod tests {
         let resp = d
             .dispatch(Request::DeviceAdd {
                 target: "fakehost.local".into(),
+                name: None,
                 driver: None,
                 username: Some("u".into()),
                 password_env: None,
@@ -1728,6 +1738,7 @@ mod tests {
         let resp = d
             .dispatch(Request::DeviceAdd {
                 target: "nope".into(),
+                name: None,
                 driver: None,
                 username: None,
                 password_env: None,
