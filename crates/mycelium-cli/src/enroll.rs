@@ -337,6 +337,18 @@ pub(crate) fn repair_peer_service(
             ));
         }
     }
+    let managed_binary = home.join("bin/mycelium");
+    let current_binary = std::env::current_exe()
+        .map_err(|error| format!("locate current Mycelium binary: {error}"))?;
+    if current_binary != managed_binary {
+        std::fs::create_dir_all(
+            managed_binary
+                .parent()
+                .expect("managed binary has a parent"),
+        )
+        .map_err(|error| format!("create managed binary directory: {error}"))?;
+        copy_mode(&current_binary, &managed_binary, 0o755).map_err(|error| error.to_string())?;
+    }
     let mut environment = std::fs::read_to_string(home.join("node.env"))
         .map_err(|error| format!("read node environment: {error}"))?;
     if let Some(site) = site_override {
