@@ -3,6 +3,12 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub async fn run(args: &[String]) -> Result<Vec<String>, String> {
+    if args.iter().any(|argument| argument == "--repair") {
+        let home = value(args, "--path")
+            .map(expand_home)
+            .unwrap_or_else(myceliumd::home_dir);
+        return crate::enroll::repair_peer_service(&home);
+    }
     let claim = value(args, "--claim");
     let embedded = claim
         .map(crate::invite::decode_pair_claim)

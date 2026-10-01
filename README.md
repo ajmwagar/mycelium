@@ -72,6 +72,14 @@ Roles are carried as signed SSH certificate principals; each host opts into
 roles with `host-bundle --allow USER=ROLE`. A host with no mapping denies all
 Mycelium certificate roles while leaving its pre-existing SSH methods intact.
 
+Setup does not report success until the managed service owns the local daemon
+socket and listens on port 7443. An already-enrolled machine can reconstruct
+and verify its native service without consuming another claim:
+
+```sh
+mycelium setup --repair
+```
+
 Requirements: a current stable Rust toolchain and the native tools required by
 the drivers you choose (for example OpenSSH and SNMP utilities).
 

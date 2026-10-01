@@ -317,7 +317,53 @@ pub(crate) fn install_peer_material(
         resolved_env(home, site, &peers, &release_keys).map_err(|error| error.to_string())?,
     )
     .map_err(|error| format!("write node environment: {error}"))?;
-    let service = if cfg!(target_os = "macos") {
+    let service = write_peer_service(home, site, &peers, &release_keys)?;
+    start_peer_service(&service, home)?;
+    Ok(vec![
+        format!("installed peer identity under {}", home.display()),
+        format!("started peer service from {}", service.display()),
+    ])
+}
+
+pub(crate) fn repair_peer_service(home: &Path) -> Result<Vec<String>, String> {
+    for required in ["node.env", "pki/ca.pem", "pki/node.pem", "pki/node-key.pem"] {
+        if !home.join(required).is_file() {
+            return Err(format!(
+                "cannot repair peer service: {} is missing",
+                home.join(required).display()
+            ));
+        }
+    }
+    let environment = std::fs::read_to_string(home.join("node.env"))
+        .map_err(|error| format!("read node environment: {error}"))?;
+    let setting = |name: &str| -> Result<&str, String> {
+        environment
+            .lines()
+            .find_map(|line| line.strip_prefix(&format!("{name}=")))
+            .ok_or_else(|| format!("node environment is missing {name}"))
+    };
+    let site = setting("MYCELIUM_SITE")?;
+    let peers = setting("MYCELIUM_PEERS")?;
+    let release_keys = setting("MYCELIUM_RELEASE_KEYS").unwrap_or("");
+    validate_label("site", site).map_err(|error| error.to_string())?;
+    for peer in peers.split(',').filter(|peer| !peer.is_empty()) {
+        validate_peer(peer).map_err(|error| error.to_string())?;
+    }
+    let service = write_peer_service(home, site, peers, release_keys)?;
+    start_peer_service(&service, home)?;
+    Ok(vec![format!(
+        "repaired and verified peer service from {}",
+        service.display()
+    )])
+}
+
+fn write_peer_service(
+    home: &Path,
+    site: &str,
+    peers: &str,
+    release_keys: &str,
+) -> Result<PathBuf, String> {
+    if cfg!(target_os = "macos") {
         let path = user_home()
             .map_err(|error| error.to_string())?
             .join("Library/LaunchAgents/dev.fpl.mycelium.plist");
@@ -325,11 +371,10 @@ pub(crate) fn install_peer_material(
             .map_err(|error| format!("create launch agent directory: {error}"))?;
         std::fs::write(
             &path,
-            resolved_launchd(home, site, &peers, &release_keys)
-                .map_err(|error| error.to_string())?,
+            resolved_launchd(home, site, peers, release_keys).map_err(|error| error.to_string())?,
         )
         .map_err(|error| format!("write launch agent: {error}"))?;
-        path
+        Ok(path)
     } else if cfg!(target_os = "linux") {
         let path = user_home()
             .map_err(|error| error.to_string())?
@@ -341,18 +386,23 @@ pub(crate) fn install_peer_material(
             resolved_systemd(home).map_err(|error| error.to_string())?,
         )
         .map_err(|error| format!("write systemd unit: {error}"))?;
-        path
+        Ok(path)
     } else {
-        return Err("peer enrollment supports Darwin and Linux".into());
-    };
-    start_peer_service(&service)?;
-    Ok(vec![
-        format!("installed peer identity under {}", home.display()),
-        format!("started peer service from {}", service.display()),
-    ])
+        Err("peer enrollment supports Darwin and Linux".into())
+    }
 }
 
-fn start_peer_service(service: &Path) -> Result<(), String> {
+fn start_peer_service(service: &Path, home: &Path) -> Result<(), String> {
+    // A CLI-autostarted daemon has no enrolled environment and otherwise wins
+    // the Unix socket race against the managed service.
+    let _ = Command::new(
+        std::env::current_exe().map_err(|error| format!("locate current binary: {error}"))?,
+    )
+    .args(["daemon", "stop"])
+    .env("MYCELIUM_NO_AUTOSTART", "1")
+    .env("MYCELIUM_HOME", home)
+    .status();
+    std::thread::sleep(std::time::Duration::from_millis(300));
     if cfg!(target_os = "macos") {
         let output = Command::new("id")
             .arg("-u")
@@ -362,6 +412,9 @@ fn start_peer_service(service: &Path) -> Result<(), String> {
             return Err("id -u failed while starting peer service".into());
         }
         let domain = format!("gui/{}", String::from_utf8_lossy(&output.stdout).trim());
+        let _ = Command::new("launchctl")
+            .args(["bootout", &format!("{domain}/dev.fpl.mycelium")])
+            .status();
         let status = Command::new("launchctl")
             .args(["bootstrap", &domain])
             .arg(service)
@@ -384,7 +437,23 @@ fn start_peer_service(service: &Path) -> Result<(), String> {
             }
         }
     }
-    Ok(())
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let socket = home.join("myceliumd.sock");
+    loop {
+        let socket_ready = socket.exists();
+        let listener_ready = std::net::TcpStream::connect("127.0.0.1:7443").is_ok();
+        if socket_ready && listener_ready {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(format!(
+                "managed peer service did not create {} and listen on 127.0.0.1:7443 within 10 seconds; inspect {}",
+                socket.display(),
+                home.join("daemon.log").display()
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
 }
 
 fn resolved_env(home: &Path, site: &str, peers: &str, keys: &str) -> Result<String, ClientError> {

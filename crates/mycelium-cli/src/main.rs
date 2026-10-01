@@ -73,6 +73,7 @@ mycelium — control plane for your network appliances
 
 usage:
   mycelium setup [--gateway HTTPS-URL] [--claim CODE] [--ttl 8h] [--key PATH] [--certificate PATH]
+  mycelium setup --repair [--path MYCELIUM-HOME]
   mycelium pair --kind access --name NAME --unix-user USER... [--role ROLE]... [--listen ADDR] [--advertise URL] [--ca PATH] [--ttl 15m] [--credential-ttl 8h]
   mycelium pair --kind peer --name NAME --site SITE --peer HOST:PORT... [--unix-user USER --role ROLE]... [--ca PATH] [--enrollment-ca DIR] [--listen ADDR] [--advertise URL] [--ttl 15m]
   mycelium invite create --kind access|peer --name NAME [--unix-user USER]... [--role ROLE]... [--site SITE] [--peer HOST:PORT]... [--ttl 15m] [--credential-ttl 8h] [--uses 1] --write
