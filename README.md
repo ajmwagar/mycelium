@@ -61,7 +61,7 @@ key on the joining machine, sends only a CSR to the temporary authority, and
 installs the returned mTLS identity plus mesh seeds:
 
 ```sh
-mycelium pair --kind peer --name james --site home \
+mycelium pair --kind peer --name james --site mames-house \
   --peer 100.120.101.5:7443 --unix-user mames --role home-operator \
   --advertise http://100.120.101.5:8788 --ttl 15m
 ```

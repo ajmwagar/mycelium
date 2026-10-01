@@ -4,7 +4,7 @@
   "principal": "oidc:https://identity.example#user-42",
   "serial": 20260001,
   "roles": ["operator"],
-  "scopes": ["site:home", "site:lab"],
+  "scopes": ["site:wagar-house", "site:lab"],
   "unix_users": ["avery"],
   "ssh_public_keys": [
     "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEexampleReplaceWithTheExactAuthorizedPublicKey"

@@ -982,38 +982,90 @@ impl Daemon {
                                 .is_some_and(|name| name.eq_ignore_ascii_case(&selector))
                             || device.meta.address.eq_ignore_ascii_case(&selector)
                     })
+                    .cloned();
+                drop(saved);
+                if let Some(device) = device {
+                    if device.meta.driver != "linux"
+                        && device.meta.driver != "darwin"
+                        && device.meta.driver != "edgeos"
+                    {
+                        return Err(MyceliumError::Validation(format!(
+                            "{} uses driver `{}`, which is not an interactive SSH target",
+                            device.meta.id, device.meta.driver
+                        )));
+                    }
+                    let username =
+                        username
+                            .or_else(|| device.username.clone())
+                            .ok_or_else(|| {
+                                MyceliumError::Validation(format!(
+                                    "{} has no SSH username; pass --user or re-add it with --user",
+                                    device.meta.id
+                                ))
+                            })?;
+                    let target = Target::parse(&device.target)?;
+                    let Target::Host { host, port, jump } = target else {
+                        return Err(MyceliumError::Validation(format!(
+                            "{} is a subnet target, not an interactive SSH host",
+                            device.meta.id
+                        )));
+                    };
+                    return to_value(serde_json::json!({
+                        "device": device.meta.id,
+                        "host": host,
+                        "username": username,
+                        "port": port.unwrap_or(22),
+                        "jump": jump,
+                        "identity": device.key_path,
+                        "source": "inventory",
+                    }))
+                    .map_err(json_err);
+                }
+
+                let peer = self
+                    .mesh
+                    .views()
+                    .await
+                    .into_iter()
+                    .find(|peer| {
+                        peer.origin.eq_ignore_ascii_case(&selector)
+                            || peer.hello.as_ref().is_some_and(|hello| {
+                                hello.node_id.eq_ignore_ascii_case(&selector)
+                                    || hello.hostname.eq_ignore_ascii_case(&selector)
+                            })
+                    })
                     .ok_or_else(|| MyceliumError::UnknownDevice(selector.clone()))?;
-                if device.meta.driver != "linux"
-                    && device.meta.driver != "darwin"
-                    && device.meta.driver != "edgeos"
+                let hello = peer.hello.ok_or_else(|| {
+                    MyceliumError::Validation(format!(
+                        "peer `{selector}` has not published its identity"
+                    ))
+                })?;
+                if peer
+                    .health
+                    .as_ref()
+                    .is_none_or(|health| !health.ssh_listening)
                 {
                     return Err(MyceliumError::Validation(format!(
-                        "{} uses driver `{}`, which is not an interactive SSH target",
-                        device.meta.id, device.meta.driver
+                        "peer `{}` is not reporting an SSH listener",
+                        hello.hostname
                     )));
                 }
                 let username = username
-                    .or_else(|| device.username.clone())
+                    .or_else(|| std::env::var("MYCELIUM_SSH_USER").ok())
                     .ok_or_else(|| {
                         MyceliumError::Validation(format!(
-                            "{} has no SSH username; pass --user or re-add it with --user",
-                            device.meta.id
+                            "peer `{}` has no local SSH username mapping; pass --user",
+                            hello.hostname
                         ))
                     })?;
-                let target = Target::parse(&device.target)?;
-                let Target::Host { host, port, jump } = target else {
-                    return Err(MyceliumError::Validation(format!(
-                        "{} is a subnet target, not an interactive SSH host",
-                        device.meta.id
-                    )));
-                };
                 to_value(serde_json::json!({
-                    "device": device.meta.id,
-                    "host": host,
+                    "device": hello.node_id,
+                    "host": hello.hostname,
                     "username": username,
-                    "port": port.unwrap_or(22),
-                    "jump": jump,
-                    "identity": device.key_path,
+                    "port": 22,
+                    "jump": null,
+                    "identity": null,
+                    "source": "peer",
                 }))
                 .map_err(json_err)
             }
@@ -1683,6 +1735,23 @@ mod tests {
         assert_eq!(plan["jump"], "gateway");
         assert_eq!(plan["identity"], "~/.ssh/id_ed25519");
         assert!(plan.get("password_env").is_none());
+    }
+
+    #[tokio::test]
+    async fn ssh_plan_falls_back_to_a_healthy_mesh_peer() {
+        let daemon = daemon_with_fake();
+        daemon.mesh.publish_ssh_peer_for_test("home-pi", true).await;
+        let response = daemon
+            .dispatch(Request::SshPlan {
+                selector: "HOME-PI".into(),
+                username: Some("mames".into()),
+            })
+            .await;
+        assert!(response.ok, "{response:?}");
+        let plan = response.result.unwrap();
+        assert_eq!(plan["host"], "home-pi");
+        assert_eq!(plan["username"], "mames");
+        assert_eq!(plan["source"], "peer");
     }
 
     #[tokio::test]

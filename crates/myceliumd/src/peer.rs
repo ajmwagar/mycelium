@@ -96,6 +96,30 @@ impl Mesh {
         })
     }
 
+    #[cfg(test)]
+    pub async fn publish_ssh_peer_for_test(&self, hostname: &str, ssh_listening: bool) {
+        let mut hello = self.hello.clone();
+        hello.hostname = hostname.into();
+        self.publish(PeerEvent::Hello(hello)).await.unwrap();
+        self.publish(PeerEvent::Health(HostHealth {
+            observed_at: now(),
+            uptime_seconds: 1,
+            load_average: [0.0; 3],
+            logical_cpus: 1,
+            memory_total_bytes: 1,
+            memory_available_bytes: 1,
+            swap_total_bytes: 0,
+            swap_free_bytes: 0,
+            filesystems: Vec::new(),
+            process_leaders: Vec::new(),
+            ssh_listening,
+            established_ssh_sessions: 0,
+            platform_metrics: BTreeMap::new(),
+        }))
+        .await
+        .unwrap();
+    }
+
     pub fn boot() -> Result<Arc<Self>, AnyError> {
         let key = load_or_create_key(&crate::peer_key_path())?;
         let node_id = encode_hex(key.verifying_key().as_bytes());
