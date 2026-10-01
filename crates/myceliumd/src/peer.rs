@@ -48,6 +48,14 @@ pub struct AccessStateView {
     pub revocations: Vec<AccessRecord>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct SeededArtifact {
+    pub artifact_digest: String,
+    pub artifact_size: u64,
+    pub already_present: bool,
+    pub releases: Vec<ReleaseManifest>,
+}
+
 #[derive(Debug, Deserialize)]
 struct ReleaseSetFile {
     version: String,
@@ -443,6 +451,46 @@ impl Mesh {
             self.publish_release(release.clone()).await?;
         }
         Ok(releases)
+    }
+
+    /// Add authorized artifact bytes to the local content-addressed cache.
+    /// The converged, verified release manifest is the authority; seeding does
+    /// not create metadata and does not require possession of a signing key.
+    pub async fn seed_artifact(
+        &self,
+        binary: &Path,
+        digest: &str,
+    ) -> Result<SeededArtifact, AnyError> {
+        validate_digest(digest)?;
+        let releases = self
+            .releases()
+            .await
+            .into_iter()
+            .filter(|release| release.artifact_digest == digest)
+            .collect::<Vec<_>>();
+        if releases.is_empty() {
+            return Err("artifact has no trusted release manifest".into());
+        }
+        for release in &releases {
+            release
+                .verify()
+                .map_err(|error| format!("release signature: {error}"))?;
+        }
+        let expected_size = releases[0].artifact_size;
+        if releases
+            .iter()
+            .any(|release| release.artifact_size != expected_size)
+        {
+            return Err("trusted release manifests disagree on artifact size".into());
+        }
+        let already_present =
+            seed_artifact_file(binary, &artifact_path(digest)?, digest, expected_size)?;
+        Ok(SeededArtifact {
+            artifact_digest: digest.to_owned(),
+            artifact_size: expected_size,
+            already_present,
+            releases,
+        })
     }
 
     pub fn generate_release_key(path: &Path) -> Result<String, AnyError> {
@@ -877,6 +925,45 @@ fn artifact_path(digest: &str) -> Result<std::path::PathBuf, AnyError> {
     Ok(crate::artifacts_dir().join(digest))
 }
 
+fn seed_artifact_file(
+    source: &Path,
+    destination: &Path,
+    digest: &str,
+    expected_size: u64,
+) -> Result<bool, AnyError> {
+    let verify = |path: &Path| -> Result<(), AnyError> {
+        let bytes = std::fs::read(path)?;
+        if bytes.len() as u64 != expected_size || sha256_hex(&bytes) != digest {
+            return Err(format!(
+                "{} does not match signed artifact size and digest",
+                path.display()
+            )
+            .into());
+        }
+        Ok(())
+    };
+    if destination.is_file() {
+        verify(destination)?;
+        return Ok(true);
+    }
+    verify(source)?;
+    let parent = destination
+        .parent()
+        .ok_or("artifact cache path has no parent")?;
+    std::fs::create_dir_all(parent)?;
+    let temp = destination.with_extension(format!(
+        "seed-{}-{}",
+        std::process::id(),
+        SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
+    ));
+    std::fs::copy(source, &temp)?;
+    if let Err(error) = std::fs::rename(&temp, destination) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(error.into());
+    }
+    Ok(false)
+}
+
 fn partial_artifact_path(digest: &str) -> Result<std::path::PathBuf, AnyError> {
     validate_digest(digest)?;
     Ok(crate::artifacts_dir().join(format!("{digest}.part")))
@@ -1225,6 +1312,19 @@ fn parse_darwin_swap(text: &str) -> (u64, u64) {
 mod tests {
     use super::*;
 
+    fn test_dir(name: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "mycelium-{name}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
     fn oidc_grant(principal: &str) -> AccessStatement {
         AccessStatement::Grant {
             grant_id: "grant-1".into(),
@@ -1260,6 +1360,41 @@ mod tests {
             linux_listen_drops("TcpExt: Foo ListenOverflows ListenDrops\nTcpExt: 1 7 9\n"),
             Some((7, 9))
         );
+    }
+
+    #[test]
+    fn seeded_artifact_is_verified_and_idempotent() {
+        let dir = test_dir("seed");
+        let source = dir.join("binary");
+        let destination = dir.join("cache").join("artifact");
+        let bytes = b"same ARM64 release bytes";
+        std::fs::write(&source, bytes).unwrap();
+        let digest = sha256_hex(bytes);
+
+        assert!(!seed_artifact_file(&source, &destination, &digest, bytes.len() as u64).unwrap());
+        assert!(seed_artifact_file(&source, &destination, &digest, bytes.len() as u64).unwrap());
+        assert_eq!(std::fs::read(&destination).unwrap(), bytes);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn seeded_artifact_rejects_unmatching_bytes() {
+        let dir = test_dir("seed-mismatch");
+        let source = dir.join("binary");
+        let destination = dir.join("cache").join("artifact");
+        std::fs::write(&source, b"wrong bytes").unwrap();
+        let expected = b"authorized bytes";
+
+        let error = seed_artifact_file(
+            &source,
+            &destination,
+            &sha256_hex(expected),
+            expected.len() as u64,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("does not match signed artifact"));
+        assert!(!destination.exists());
+        std::fs::remove_dir_all(dir).unwrap();
     }
     #[cfg(target_os = "macos")]
     #[test]

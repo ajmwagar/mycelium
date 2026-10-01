@@ -100,6 +100,7 @@ usage:
   mycelium releases keygen --path PATH --write [--json]
   mycelium releases publish --binary PATH --signing-key PATH --version VERSION --channel CHANNEL [--target TRIPLE] --write [--dry-run] [--json]
   mycelium releases publish-set --manifest PATH --signing-key PATH --write [--dry-run] [--json]
+  mycelium releases seed --binary PATH --digest SHA256 --write [--dry-run] [--json]
   mycelium access list [--json]
   mycelium access keygen --path PATH --write [--json]
   mycelium access publish --statement PATH --signing-key PATH --write [--dry-run] [--json]
@@ -165,6 +166,7 @@ struct Flags {
     binary: Option<String>,
     bundle: Option<String>,
     manifest: Option<String>,
+    digest: Option<String>,
     statement: Option<String>,
     signing_key: Option<String>,
     version: Option<String>,
@@ -205,6 +207,7 @@ fn parse_flags(args: &[String]) -> Flags {
         binary: None,
         bundle: None,
         manifest: None,
+        digest: None,
         statement: None,
         signing_key: None,
         version: None,
@@ -330,6 +333,10 @@ fn parse_flags(args: &[String]) -> Flags {
             "--manifest" => {
                 i += 1;
                 f.manifest = args.get(i).cloned();
+            }
+            "--digest" => {
+                i += 1;
+                f.digest = args.get(i).cloned();
             }
             "--statement" => {
                 i += 1;
@@ -758,6 +765,16 @@ async fn releases(args: &[String]) -> Result<Vec<String>, ClientError> {
             signing_key: flags
                 .signing_key
                 .ok_or(err_usage("releases publish-set needs --signing-key"))?,
+            write: flags.write,
+            dry_run: flags.dry_run,
+        },
+        "seed" => Request::ReleaseSeed {
+            binary: flags
+                .binary
+                .ok_or(err_usage("releases seed needs --binary"))?,
+            digest: flags
+                .digest
+                .ok_or(err_usage("releases seed needs --digest"))?,
             write: flags.write,
             dry_run: flags.dry_run,
         },

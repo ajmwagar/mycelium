@@ -130,6 +130,14 @@ pub enum Request {
         #[serde(default)]
         dry_run: bool,
     },
+    ReleaseSeed {
+        binary: String,
+        digest: String,
+        #[serde(default)]
+        write: bool,
+        #[serde(default)]
+        dry_run: bool,
+    },
     AccessList,
     AccessKeygen {
         path: String,

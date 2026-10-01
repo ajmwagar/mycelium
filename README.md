@@ -486,6 +486,22 @@ missing locally. They then fetch bounded chunks from any connected peer,
 resume by offset, and promote the artifact only after verifying its signed
 size and SHA-256 digest.
 
+Any peer that already has an exact published binary can seed it without a
+release signing key. The digest must already belong to a trusted, converged
+release manifest; target, version, channel, and size are derived from that
+manifest rather than supplied again:
+
+```sh
+mycelium releases seed \
+  --binary ./mycelium \
+  --digest <published-sha256> \
+  --write
+```
+
+The verified bytes enter the content-addressed cache and are immediately
+available to connected peers. This lets, for example, an ARM64 Linux Pi and
+DGX share one build when the signed target triple and bytes are identical.
+
 ```sh
 mycelium update status --channel canary
 mycelium update apply --channel canary --write

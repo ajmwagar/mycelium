@@ -882,6 +882,32 @@ impl Daemon {
                     .map_err(|error| MyceliumError::Validation(error.to_string()))?;
                 to_value(releases).map_err(json_err)
             }
+            Request::ReleaseSeed {
+                binary,
+                digest,
+                write,
+                dry_run,
+            } => {
+                if dry_run {
+                    return to_value(serde_json::json!({
+                        "dry_run": true,
+                        "binary": binary,
+                        "digest": digest,
+                    }))
+                    .map_err(json_err);
+                }
+                if !write {
+                    return Err(MyceliumError::WritesNotPermitted(
+                        "release seeding requires --write".into(),
+                    ));
+                }
+                let seeded = self
+                    .mesh
+                    .seed_artifact(std::path::Path::new(&binary), &digest)
+                    .await
+                    .map_err(|error| MyceliumError::Validation(error.to_string()))?;
+                to_value(seeded).map_err(json_err)
+            }
             Request::AccessList => {
                 to_value(self.mesh.access_view(unix_now()).await).map_err(json_err)
             }
