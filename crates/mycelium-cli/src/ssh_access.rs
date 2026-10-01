@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use mycelium_peer_protocol::AccessStatement;
@@ -265,6 +266,72 @@ fn ca_init(args: &[String]) -> Result<Vec<String>, String> {
 
 fn issue(args: &[String], state: &Value) -> Result<Vec<String>, String> {
     issue_bound(args, state, None, None, None)
+}
+
+pub(crate) fn issue_for_invite(
+    public_key_path: &Path,
+    ca: &Path,
+    output: &Path,
+    invitation_id: &str,
+    name: &str,
+    serial: u64,
+    unix_users: &[String],
+    ttl: u64,
+) -> Result<(), String> {
+    if unix_users.is_empty() || ttl == 0 {
+        return Err("invitation has no Unix principals or credential lifetime".into());
+    }
+    let public_key = fs::read_to_string(public_key_path)
+        .map_err(|error| format!("read SSH public key {}: {error}", public_key_path.display()))?;
+    key_material(&public_key)?;
+    let temp = temporary_key_path(&public_key_path.to_string_lossy());
+    fs::copy(public_key_path, &temp)
+        .map_err(|error| format!("prepare certificate input {}: {error}", temp.display()))?;
+    let principals = unix_users.join(",");
+    let validity = format!("+0s:+{ttl}s");
+    let serial = serial.to_string();
+    let identity = format!("mycelium:invite:{invitation_id}:{name}");
+    let result = command(
+        "ssh-keygen",
+        &[
+            "-q",
+            "-s",
+            path_str(ca)?,
+            "-I",
+            &identity,
+            "-n",
+            &principals,
+            "-V",
+            &validity,
+            "-z",
+            &serial,
+            path_str(&temp)?,
+        ],
+    );
+    let generated = PathBuf::from(format!(
+        "{}-cert.pub",
+        temp.to_string_lossy()
+            .strip_suffix(".pub")
+            .unwrap_or(&temp.to_string_lossy())
+    ));
+    if let Err(error) = result {
+        let _ = fs::remove_file(&temp);
+        let _ = fs::remove_file(&generated);
+        return Err(error);
+    }
+    if let Some(parent) = output.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("create {}: {error}", parent.display()))?;
+    }
+    fs::rename(&generated, output)
+        .map_err(|error| format!("install certificate {}: {error}", output.display()))?;
+    let _ = fs::remove_file(&temp);
+    Ok(())
+}
+
+fn path_str(path: &Path) -> Result<&str, String> {
+    path.to_str()
+        .ok_or_else(|| format!("path is not UTF-8: {}", path.display()))
 }
 
 pub(crate) fn issue_for_oidc(
@@ -565,9 +632,14 @@ fn now() -> Result<u64, String> {
 }
 
 fn temporary_key_path(seed: &str) -> PathBuf {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
     std::env::temp_dir().join(format!(
-        "mycelium-ssh-{}-{}",
+        "mycelium-ssh-{}-{nonce}-{}-{}",
         std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed),
         Path::new(seed)
             .file_name()
             .and_then(|v| v.to_str())
@@ -666,6 +738,58 @@ mod tests {
         assert!(config.contains("User buddy\n"));
         assert!(config.contains("Port 2222\n"));
         assert!(config.contains("CertificateFile ~/.ssh/id_ed25519-cert.pub\n"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn invitation_issues_a_bounded_openssh_certificate() {
+        if Command::new("ssh-keygen").arg("-h").output().is_err() {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!(
+            "mycelium-invite-ssh-test-{}-{}",
+            std::process::id(),
+            now().unwrap()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let ca = root.join("ca");
+        let user = root.join("user");
+        let certificate = root.join("user-cert.pub");
+        for key in [&ca, &user] {
+            command(
+                "ssh-keygen",
+                &[
+                    "-q",
+                    "-t",
+                    "ed25519",
+                    "-N",
+                    "",
+                    "-f",
+                    path_str(key).unwrap(),
+                ],
+            )
+            .unwrap();
+        }
+        issue_for_invite(
+            &user.with_extension("pub"),
+            &ca,
+            &certificate,
+            "invite-1",
+            "buddy",
+            42,
+            &["operator".into()],
+            3600,
+        )
+        .unwrap();
+        let inspected = Command::new("ssh-keygen")
+            .args(["-L", "-f"])
+            .arg(&certificate)
+            .output()
+            .unwrap();
+        let output = String::from_utf8_lossy(&inspected.stdout);
+        assert!(inspected.status.success());
+        assert!(output.contains("mycelium:invite:invite-1:buddy"));
+        assert!(output.contains("operator"));
         fs::remove_dir_all(root).unwrap();
     }
 

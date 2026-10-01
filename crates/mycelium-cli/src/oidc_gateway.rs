@@ -22,6 +22,8 @@ struct GatewayState {
     client_id: Arc<str>,
     client_secret: Arc<str>,
     callback_url: Arc<str>,
+    invite_store: Arc<PathBuf>,
+    invite_lock: Arc<Mutex<()>>,
     pending: Arc<Mutex<HashMap<String, Pending>>>,
 }
 
@@ -109,6 +111,7 @@ pub async fn serve(args: &[String]) -> Result<Vec<String>, String> {
         format!("OIDC client secret environment variable `{client_secret_env}` is not set")
     })?;
     let callback_url = required(args, "--callback-url")?.to_owned();
+    let invite_store = crate::invite::store_path(args);
     if !ca.is_file() {
         return Err(format!(
             "SSH CA private key {} does not exist",
@@ -125,6 +128,8 @@ pub async fn serve(args: &[String]) -> Result<Vec<String>, String> {
         client_id: client_id.into(),
         client_secret: client_secret.into(),
         callback_url: callback_url.into(),
+        invite_store: Arc::new(invite_store),
+        invite_lock: Arc::new(Mutex::new(())),
         pending: Arc::new(Mutex::new(HashMap::new())),
     };
     let app = Router::new()
@@ -133,12 +138,78 @@ pub async fn serve(args: &[String]) -> Result<Vec<String>, String> {
         .route("/v1/oidc/start", post(start))
         .route("/v1/oidc/callback", get(callback))
         .route("/v1/oidc/status/{id}", get(status))
+        .route("/v1/invite/redeem", post(redeem_invite))
         .with_state(state);
     eprintln!("mycelium OIDC gateway listening on http://{listen}; HTTPS termination is required");
     axum::serve(listener, app)
         .await
         .map_err(|e| format!("serve OIDC gateway: {e}"))?;
     Ok(Vec::new())
+}
+
+async fn redeem_invite(
+    State(state): State<GatewayState>,
+    Json(request): Json<crate::invite::RedeemRequest>,
+) -> Result<Json<crate::invite::RedeemResponse>, (StatusCode, Json<ErrorResponse>)> {
+    if request.claim.len() > 128 || request.public_key.len() > 16 * 1024 {
+        return Err(api_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "request too large",
+        ));
+    }
+    let _guard = state
+        .invite_lock
+        .lock()
+        .map_err(|_| api_error(StatusCode::INTERNAL_SERVER_ERROR, "invite lock poisoned"))?;
+    let now = crate::invite::now()
+        .map_err(|error| api_error(StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    let mut store = crate::invite::load(&state.invite_store)
+        .map_err(|error| api_error(StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    let claim_hash = crate::invite::claim_hash(&request.claim);
+    let index = store
+        .invitations
+        .iter()
+        .position(|invite| invite.code_hash == claim_hash)
+        .ok_or_else(|| api_error(StatusCode::UNAUTHORIZED, "invalid claim"))?;
+    let invitation = store.invitations[index].clone();
+    if invitation.expires_at <= now || invitation.remaining_uses == 0 {
+        return Err(api_error(StatusCode::GONE, "claim expired or consumed"));
+    }
+    let root = temporary_root();
+    fs::create_dir_all(&root)
+        .map_err(|error| api_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    let public_key = root.join("user.pub");
+    let certificate = root.join("user-cert.pub");
+    let ttl = invitation.credential_ttl;
+    let result = (|| {
+        fs::write(&public_key, request.public_key.as_bytes())
+            .map_err(|error| format!("stage SSH public key: {error}"))?;
+        crate::ssh_access::issue_for_invite(
+            &public_key,
+            &state.ca,
+            &certificate,
+            &invitation.id,
+            &invitation.name,
+            invitation
+                .serial
+                .wrapping_add(invitation.remaining_uses as u64),
+            &invitation.unix_users,
+            ttl,
+        )?;
+        fs::read_to_string(&certificate)
+            .map_err(|error| format!("read issued SSH certificate: {error}"))
+    })();
+    let _ = fs::remove_dir_all(&root);
+    let certificate = result.map_err(|error| api_error(StatusCode::FORBIDDEN, error))?;
+    store.invitations[index].remaining_uses -= 1;
+    crate::invite::save(&state.invite_store, &store)
+        .map_err(|error| api_error(StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    Ok(Json(crate::invite::RedeemResponse {
+        certificate,
+        invitation: invitation.id,
+        principal: invitation.name,
+        expires_at: now.saturating_add(ttl),
+    }))
 }
 
 async fn issue(
@@ -482,6 +553,65 @@ pub async fn join(args: &[String]) -> Result<Vec<String>, String> {
     )])
 }
 
+pub async fn redeem(args: &[String]) -> Result<Vec<String>, String> {
+    require_write(args)?;
+    let gateway = required(args, "--gateway")?.trim_end_matches('/');
+    validate_gateway_url(gateway)?;
+    let claim = required(args, "--claim")?;
+    let public_key_path = required(args, "--public-key")?;
+    let public_key = fs::read_to_string(public_key_path)
+        .map_err(|error| format!("read SSH public key {public_key_path}: {error}"))?;
+    let certificate_path = Path::new(required(args, "--certificate")?);
+    if certificate_path.exists() {
+        return Err(format!(
+            "refusing to replace existing SSH certificate {}",
+            certificate_path.display()
+        ));
+    }
+    let response = reqwest::Client::new()
+        .post(format!("{gateway}/v1/invite/redeem"))
+        .json(&crate::invite::RedeemRequest {
+            claim: claim.to_owned(),
+            public_key,
+        })
+        .send()
+        .await
+        .map_err(|error| format!("redeem Mycelium claim: {error}"))?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let error = response
+            .json::<ErrorResponse>()
+            .await
+            .map(|body| body.error)
+            .unwrap_or_else(|_| "gateway returned an unreadable error".into());
+        return Err(format!("claim gateway returned {status}: {error}"));
+    }
+    let redeemed = response
+        .json::<crate::invite::RedeemResponse>()
+        .await
+        .map_err(|error| format!("decode claim response: {error}"))?;
+    if let Some(parent) = certificate_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("create {}: {error}", parent.display()))?;
+    }
+    let staging = certificate_path.with_extension("mycelium-staging");
+    fs::write(&staging, redeemed.certificate)
+        .map_err(|error| format!("write staged certificate {}: {error}", staging.display()))?;
+    fs::rename(&staging, certificate_path).map_err(|error| {
+        format!(
+            "install SSH certificate {}: {error}",
+            certificate_path.display()
+        )
+    })?;
+    Ok(vec![format!(
+        "claimed invitation {} as {}; wrote {} (credential expires at {})",
+        redeemed.invitation,
+        redeemed.principal,
+        certificate_path.display(),
+        redeemed.expires_at
+    )])
+}
+
 fn credential_process(args: &[String], name: &str) -> Result<(String, CredentialProvider), String> {
     let path = value(args, "--providers")
         .map(PathBuf::from)
@@ -616,6 +746,64 @@ mod tests {
         let (token, provider) = credential_process(&args, "test").unwrap();
         assert_eq!(token, "jwt");
         assert_eq!(provider.audience, "mycelium");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn invitation_is_consumed_only_once() {
+        let root = temporary_root();
+        fs::create_dir_all(&root).unwrap();
+        let ca = root.join("ca");
+        let user = root.join("user");
+        for key in [&ca, &user] {
+            let status = std::process::Command::new("ssh-keygen")
+                .args(["-q", "-t", "ed25519", "-N", "", "-f"])
+                .arg(key)
+                .status()
+                .unwrap();
+            assert!(status.success());
+        }
+        let claim = "MYC-AAAA-BBBB-CCCC-DDDD-EEEE-FFFF-0000-1111";
+        let store_path = root.join("invites.json");
+        crate::invite::save(
+            &store_path,
+            &crate::invite::InviteStore {
+                invitations: vec![crate::invite::Invitation {
+                    id: "invite-1".into(),
+                    code_hash: crate::invite::claim_hash(claim),
+                    name: "buddy".into(),
+                    unix_users: vec!["operator".into()],
+                    expires_at: crate::invite::now().unwrap() + 900,
+                    credential_ttl: 3600,
+                    remaining_uses: 1,
+                    serial: 42,
+                }],
+            },
+        )
+        .unwrap();
+        let state = GatewayState {
+            issuer: "https://issuer.example".into(),
+            audience: "mycelium".into(),
+            ca: Arc::new(ca),
+            client_id: "mycelium".into(),
+            client_secret: "unused".into(),
+            callback_url: "https://issuer.example/callback".into(),
+            invite_store: Arc::new(store_path.clone()),
+            invite_lock: Arc::new(Mutex::new(())),
+            pending: Arc::new(Mutex::new(HashMap::new())),
+        };
+        let request = crate::invite::RedeemRequest {
+            claim: claim.into(),
+            public_key: fs::read_to_string(user.with_extension("pub")).unwrap(),
+        };
+        let first = redeem_invite(State(state.clone()), Json(request.clone())).await;
+        assert!(first.is_ok());
+        let second = redeem_invite(State(state), Json(request)).await;
+        assert_eq!(second.unwrap_err().0, StatusCode::GONE);
+        assert_eq!(
+            crate::invite::load(&store_path).unwrap().invitations[0].remaining_uses,
+            0
+        );
         fs::remove_dir_all(root).unwrap();
     }
 }

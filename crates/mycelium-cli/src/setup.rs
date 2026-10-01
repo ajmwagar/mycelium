@@ -10,7 +10,6 @@ pub async fn run(args: &[String]) -> Result<Vec<String>, String> {
             "setup needs --gateway HTTPS-URL (or the MYCELIUM_GATEWAY environment variable)"
                 .to_owned()
         })?;
-    let ttl = value(args, "--ttl").unwrap_or("8h");
     let ssh_dir = user_home()?.join(".ssh");
     let private_key = value(args, "--key")
         .map(expand_home)
@@ -42,24 +41,30 @@ pub async fn run(args: &[String]) -> Result<Vec<String>, String> {
         }
     }
 
-    let mut join = vec![
-        "join".to_owned(),
+    let mut request = vec![
         "--gateway".to_owned(),
         gateway,
         "--public-key".to_owned(),
         path_string(&public_key)?,
         "--certificate".to_owned(),
         path_string(&certificate)?,
-        "--ttl".to_owned(),
-        ttl.to_owned(),
         "--write".to_owned(),
     ];
-    copy_option(args, "--grant", &mut join);
-    copy_option(args, "--provider", &mut join);
-    copy_option(args, "--providers", &mut join);
-    copy_option(args, "--token-env", &mut join);
-
-    let mut lines = crate::oidc_gateway::join(&join).await?;
+    let mut lines = if let Some(claim) = value(args, "--claim") {
+        request.extend(["--claim".to_owned(), claim.to_owned()]);
+        crate::oidc_gateway::redeem(&request).await?
+    } else {
+        request.extend([
+            "join".to_owned(),
+            "--ttl".to_owned(),
+            value(args, "--ttl").unwrap_or("8h").to_owned(),
+        ]);
+        copy_option(args, "--grant", &mut request);
+        copy_option(args, "--provider", &mut request);
+        copy_option(args, "--providers", &mut request);
+        copy_option(args, "--token-env", &mut request);
+        crate::oidc_gateway::join(&request).await?
+    };
     lines.push(format!(
         "setup complete; SSH identity: {}, certificate: {}",
         private_key.display(),

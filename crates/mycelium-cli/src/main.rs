@@ -6,6 +6,7 @@
 //! applying it.
 
 mod enroll;
+mod invite;
 mod oidc;
 mod oidc_gateway;
 mod setup;
@@ -70,7 +71,8 @@ const USAGE: &str = "\
 mycelium — control plane for your network appliances
 
 usage:
-  mycelium setup --gateway HTTPS-URL [--ttl 8h] [--key PATH] [--certificate PATH]
+  mycelium setup --gateway HTTPS-URL [--claim CODE] [--ttl 8h] [--key PATH] [--certificate PATH]
+  mycelium invite create --name NAME --unix-user USER... [--ttl 15m] [--credential-ttl 8h] [--uses 1] --write
   mycelium daemon status|start|stop
   mycelium drivers
   mycelium add <host[:port]> [--name NAME] [--driver NAME] [--user U] [--password-env VAR] [--key PATH]
@@ -104,7 +106,7 @@ usage:
   mycelium access ssh host-apply --bundle DIR --write
   mycelium access oidc verify --issuer URL --audience ID --token-env VAR [--json]
   mycelium access oidc ssh-issue --issuer URL --audience ID --token-env VAR --public-key PATH --ca PRIVATE-KEY --path CERT [--grant ID] [--ttl 8h] --write [--json]
-  mycelium access oidc gateway --listen 127.0.0.1:8787 --issuer URL --audience ID --client-id ID --client-secret-env VAR --callback-url HTTPS-URL --ca PRIVATE-KEY --write
+  mycelium access oidc gateway --listen 127.0.0.1:8787 --issuer URL --audience ID --client-id ID --client-secret-env VAR --callback-url HTTPS-URL --ca PRIVATE-KEY [--invite-store PATH] --write
   mycelium access oidc join --gateway HTTPS-URL --public-key PATH --certificate PATH [--grant ID] [--ttl 8h] --write
     [--provider NAME] [--providers PATH]
   mycelium update status [--channel CHANNEL] [--json]
@@ -347,6 +349,7 @@ fn parse_flags(args: &[String]) -> Flags {
 async fn run(cmd: &str, args: &[String]) -> Result<Vec<String>, ClientError> {
     match cmd {
         "setup" => setup::run(args).await.map_err(access_error),
+        "invite" => invite::run(args).map_err(access_error),
         "daemon" => daemon(args).await,
         "help" | "--help" | "-h" => Ok(usage()),
         "drivers" => {
