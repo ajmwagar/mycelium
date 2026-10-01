@@ -331,6 +331,7 @@ certificate at `$MYCELIUM_HOME/ssh/user-cert.pub`, normal access is one command:
 ```sh
 mycelium ssh lab-node
 mycelium ssh lab-node -- uname -a
+mycelium exec lab-node -- systemctl is-active mycelium
 ```
 
 The daemon derives the destination, Unix user, port, and optional ProxyJump
@@ -340,6 +341,8 @@ from inventory targets such as `host:2222@gateway`. The CLI prefers
 certificate, so missing material fails loudly instead of silently falling back
 to unrelated agent keys. Override paths with `--key` and `--certificate`, or
 set `MYCELIUM_SSH_IDENTITY` and `MYCELIUM_SSH_CERTIFICATE`.
+`mycelium exec` requires a command and enables SSH batch mode, making the same
+derived route suitable for scripts, health checks, and one-shot agents.
 
 Host CA trust is a privileged bootstrap/reconciliation action. Mycelium
 generates the host bundle and an optional narrowly scoped client fragment; it

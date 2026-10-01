@@ -125,6 +125,7 @@ usage:
   mycelium nbde plan <device> --tang <IP-or-URL>... --threshold N [--json]
   mycelium tunnel <target>:<port> [--via DEVICE] [--local-port N] [--write] [--json]
   mycelium ssh <device> [--user USER] [--key PATH] [--certificate PATH] [--port N] [--json] [-- COMMAND...]
+  mycelium exec <device> [--user USER] [--key PATH] [--certificate PATH] [--port N] [--json] -- COMMAND...
   mycelium console <device> [--json]
   mycelium remove <id>
 
@@ -439,7 +440,8 @@ async fn run(cmd: &str, args: &[String]) -> Result<Vec<String>, ClientError> {
             Ok(render_call(&v))
         }
         "plan" => plan(args).await,
-        "ssh" => ssh(args).await,
+        "ssh" => ssh(args, false).await,
+        "exec" => ssh(args, true).await,
         "scan" => {
             let f = parse_flags(args);
             let mut c = connect().await?;
@@ -1087,8 +1089,11 @@ fn unix_now() -> u64 {
         .as_secs()
 }
 
-async fn ssh(args: &[String]) -> Result<Vec<String>, ClientError> {
+async fn ssh(args: &[String], command_required: bool) -> Result<Vec<String>, ClientError> {
     let options = SshOptions::parse(args)?;
+    if command_required && options.extra.is_empty() {
+        return Err(err_usage("exec needs a command after --"));
+    }
     let mut client = connect().await?;
     let plan = client
         .call(&Request::SshPlan {
@@ -1142,6 +1147,7 @@ async fn ssh(args: &[String]) -> Result<Vec<String>, ClientError> {
         jump,
         &identity,
         &certificate,
+        command_required,
         &options.extra,
     );
     if options.json {
@@ -1241,6 +1247,7 @@ fn ssh_argv(
     jump: Option<&str>,
     identity: &str,
     certificate: &str,
+    batch_mode: bool,
     extra: &[String],
 ) -> Vec<String> {
     let mut argv = vec![
@@ -1253,6 +1260,9 @@ fn ssh_argv(
         "-p".into(),
         port.to_string(),
     ];
+    if batch_mode {
+        argv.extend(["-o".into(), "BatchMode=yes".into()]);
+    }
     if let Some(jump) = jump {
         argv.extend(["-J".into(), jump.into()]);
     }
@@ -2325,6 +2335,7 @@ mod ssh_command_tests {
             Some("gateway"),
             "/key",
             "/cert",
+            false,
             &[],
         );
         assert!(argv
@@ -2334,5 +2345,22 @@ mod ssh_command_tests {
         assert!(argv.contains(&"CertificateFile=/cert".into()));
         assert!(argv.windows(2).any(|pair| pair == ["-J", "gateway"]));
         assert_eq!(argv.last().map(String::as_str), Some("operator@lab-node"));
+    }
+
+    #[test]
+    fn exec_argv_is_batch_mode_and_keeps_the_remote_command() {
+        let argv = ssh_argv(
+            "dgx-spark",
+            "operator",
+            22,
+            Some("pris"),
+            "/key",
+            "/cert",
+            true,
+            &["uname".into(), "-a".into()],
+        );
+        assert!(argv.windows(2).any(|pair| pair == ["-o", "BatchMode=yes"]));
+        assert!(argv.windows(2).any(|pair| pair == ["-J", "pris"]));
+        assert_eq!(&argv[argv.len() - 2..], ["uname", "-a"]);
     }
 }
