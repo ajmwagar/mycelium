@@ -189,6 +189,8 @@ mycelium access list
 
 The authority private key stays off ordinary peers. Membership in the mTLS
 mesh permits transport only; it does not permit creating access statements.
+See [`docs/access-control.md`](docs/access-control.md) for the OIDC verification,
+SSH certificate issuance, host installation, validation, and rollback runbook.
 
 The TLS CA authorizes direct peers. Signed observation envelopes preserve
 their originating node identity when relayed, use monotonic sequence numbers,

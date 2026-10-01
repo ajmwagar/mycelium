@@ -757,6 +757,29 @@ fn validate_release_label(name: &str, value: &str) -> Result<(), AnyError> {
     Ok(())
 }
 
+fn validate_access_principal(value: &str) -> Result<(), AnyError> {
+    // Principals are opaque identity-provider identifiers, not local labels.
+    // In particular, the OIDC adapter emits `oidc:<issuer>#<subject>` values.
+    if value.is_empty() || value.len() > 512 || !value.bytes().all(|byte| byte.is_ascii_graphic()) {
+        return Err(
+            "principal must contain 1-512 printable ASCII characters without whitespace".into(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_access_selector(name: &str, value: &str) -> Result<(), AnyError> {
+    if value.is_empty()
+        || value.len() > 128
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._+:-/".contains(&byte))
+    {
+        return Err(format!("{name} must contain 1-128 safe ASCII selector characters").into());
+    }
+    Ok(())
+}
+
 fn validate_access_statement(statement: &AccessStatement) -> Result<(), AnyError> {
     match statement {
         AccessStatement::Grant {
@@ -771,15 +794,14 @@ fn validate_access_statement(statement: &AccessStatement) -> Result<(), AnyError
             ..
         } => {
             validate_release_label("grant_id", grant_id)?;
-            validate_release_label("principal", principal)?;
-            for (name, values) in [
-                ("role", roles),
-                ("scope", scopes),
-                ("unix_user", unix_users),
-            ] {
+            validate_access_principal(principal)?;
+            for (name, values) in [("role", roles), ("scope", scopes)] {
                 for value in values {
-                    validate_release_label(name, value)?;
+                    validate_access_selector(name, value)?;
                 }
+            }
+            for value in unix_users {
+                validate_release_label("unix_user", value)?;
             }
             if ssh_public_keys.len() > 32
                 || ssh_public_keys.iter().any(|key| {
@@ -811,7 +833,7 @@ fn validate_access_statement(statement: &AccessStatement) -> Result<(), AnyError
                 validate_release_label("grant_id", value)?;
             }
             if let Some(value) = principal {
-                validate_release_label("principal", value)?;
+                validate_access_principal(value)?;
             }
             if reason.is_empty() || reason.len() > 512 || reason.contains(['\n', '\r']) {
                 return Err("revocation reason must be 1-512 characters on one line".into());
@@ -1173,6 +1195,34 @@ fn parse_darwin_swap(text: &str) -> (u64, u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn oidc_grant(principal: &str) -> AccessStatement {
+        AccessStatement::Grant {
+            grant_id: "grant-1".into(),
+            principal: principal.into(),
+            serial: 1,
+            roles: vec!["operator".into()],
+            scopes: vec!["site:home".into()],
+            unix_users: vec!["avery".into()],
+            ssh_public_keys: vec![],
+            not_before: 1,
+            not_after: 2,
+        }
+    }
+
+    #[test]
+    fn access_validation_accepts_normalized_oidc_principal() {
+        validate_access_statement(&oidc_grant("oidc:https://identity.example#subject-42")).unwrap();
+    }
+
+    #[test]
+    fn access_validation_rejects_principal_with_whitespace() {
+        assert!(validate_access_statement(&oidc_grant(
+            "oidc:https://identity.example#bad\nsubject"
+        ))
+        .is_err());
+    }
+
     #[test]
     fn listen_drop_parser_maps_header_to_values() {
         assert_eq!(

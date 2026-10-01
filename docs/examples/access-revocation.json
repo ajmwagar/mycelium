@@ -1,0 +1,9 @@
+{
+  "kind": "revoke",
+  "revocation_id": "avery-laptop-2026-01-retired",
+  "grant_id": "avery-laptop-2026-01",
+  "principal": null,
+  "serial": null,
+  "revoked_at": 1792195200,
+  "reason": "Device retired"
+}

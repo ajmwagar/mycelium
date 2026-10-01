@@ -465,4 +465,16 @@ mod tests {
         assert!(matching.revokes(&grant));
         assert!(!wrong_serial.revokes(&grant));
     }
+
+    #[test]
+    fn documented_access_statements_match_the_protocol() {
+        let grant: AccessStatement =
+            serde_json::from_str(include_str!("../../../docs/examples/access-grant.json")).unwrap();
+        let revocation: AccessStatement = serde_json::from_str(include_str!(
+            "../../../docs/examples/access-revocation.json"
+        ))
+        .unwrap();
+        assert!(matches!(grant, AccessStatement::Grant { .. }));
+        assert!(revocation.revokes(&grant));
+    }
 }
