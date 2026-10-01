@@ -12,6 +12,7 @@ mod oidc_gateway;
 mod pair;
 mod setup;
 mod ssh_access;
+mod wireguard;
 
 use mycelium_core::{
     ActionPlan, ActionRisk, AllocationReceipt, BootReachability, DiscoveryProtocol, LogicalNetwork,
@@ -118,6 +119,9 @@ usage:
     [--provider NAME] [--providers PATH]
   mycelium update status [--channel CHANNEL] [--fleet] [--json]
   mycelium update apply [--channel CHANNEL] [--path INSTALLED-BINARY] --write
+  mycelium wireguard plan LEFT RIGHT --left-subnet CIDR... --right-subnet CIDR...
+    [--left-endpoint HOST:PORT] [--right-endpoint HOST:PORT]
+    [--left-key PUBLIC-KEY] [--right-key PUBLIC-KEY] [--interface NAME] [--json]
   mycelium enroll init [--path CA-DIR] --write
   mycelium enroll issue NAME --site SITE --address DNS-OR-IP [--san DNS-OR-IP]... --binary PATH --target TRIPLE [--peer HOST:PORT]... [--ca CA-DIR] [--path OUTPUT-DIR] --write
   mycelium enroll install --bundle DIR [--path MYCELIUM-HOME] --write
@@ -503,6 +507,7 @@ async fn run(cmd: &str, args: &[String]) -> Result<Vec<String>, ClientError> {
         "releases" => releases(args).await,
         "access" => access(args).await,
         "update" => update(args).await,
+        "wireguard" => wireguard_command(args).await,
         "enroll" => enroll_command(args).await,
         "annotate" => {
             let f = parse_flags(args);
@@ -805,6 +810,104 @@ async fn releases(args: &[String]) -> Result<Vec<String>, ClientError> {
             serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string())
         ])
     }
+}
+
+async fn wireguard_command(args: &[String]) -> Result<Vec<String>, ClientError> {
+    if args.first().map(String::as_str) != Some("plan") {
+        return Err(err_usage("wireguard currently supports `plan`"));
+    }
+    let left_selector = args
+        .get(1)
+        .filter(|value| !value.starts_with('-'))
+        .ok_or_else(|| err_usage("wireguard plan needs LEFT and RIGHT gateway selectors"))?;
+    let right_selector = args
+        .get(2)
+        .filter(|value| !value.starts_with('-'))
+        .ok_or_else(|| err_usage("wireguard plan needs LEFT and RIGHT gateway selectors"))?;
+    let values = |flag: &str| -> Vec<String> {
+        args.windows(2)
+            .filter(|pair| pair[0] == flag)
+            .map(|pair| pair[1].clone())
+            .collect()
+    };
+    let value = |flag: &str| values(flag).into_iter().last();
+    let prefixes = |flag: &str| -> Result<Vec<wireguard::Prefix>, ClientError> {
+        values(flag)
+            .iter()
+            .map(|prefix| wireguard::parse_prefix(prefix).map_err(|error| err_usage(&error)))
+            .collect()
+    };
+    let left_prefixes = prefixes("--left-subnet")?;
+    let right_prefixes = prefixes("--right-subnet")?;
+    let mut client = connect().await?;
+    let peers = client.call(&Request::PeerList).await?;
+    let resolve = |selector: &str| -> Result<wireguard::GatewayIdentity, ClientError> {
+        let matching = peers
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|peer| peer.get("hello"))
+            .filter(|hello| {
+                hello["hostname"].as_str() == Some(selector)
+                    || hello["node_id"]
+                        .as_str()
+                        .is_some_and(|node_id| node_id.starts_with(selector))
+            })
+            .collect::<Vec<_>>();
+        if matching.len() != 1 {
+            return Err(err_usage(&format!(
+                "gateway selector `{selector}` matched {} peer identities",
+                matching.len()
+            )));
+        }
+        let hello = matching[0];
+        Ok(wireguard::GatewayIdentity {
+            node_id: hello["node_id"].as_str().unwrap_or_default().into(),
+            hostname: hello["hostname"].as_str().unwrap_or_default().into(),
+            site: hello["site"].as_str().unwrap_or_default().into(),
+        })
+    };
+    let plan = wireguard::plan_link(
+        value("--interface").unwrap_or_else(|| "mycelium0".into()),
+        wireguard::GatewayBinding {
+            identity: resolve(left_selector)?,
+            public_key: value("--left-key"),
+            endpoint: value("--left-endpoint"),
+            advertised_prefixes: left_prefixes,
+        },
+        wireguard::GatewayBinding {
+            identity: resolve(right_selector)?,
+            public_key: value("--right-key"),
+            endpoint: value("--right-endpoint"),
+            advertised_prefixes: right_prefixes,
+        },
+    )
+    .map_err(|error| err_usage(&error))?;
+    if args.iter().any(|arg| arg == "--json") {
+        return Ok(vec![serde_json::to_string(&plan).map_err(|error| {
+            err_usage(&format!("serialize WireGuard plan: {error}"))
+        })?]);
+    }
+    let mut lines = vec![format!(
+        "WireGuard link {}: {} ({}) <-> {} ({})",
+        plan.interface,
+        plan.left.local.hostname,
+        plan.left.local.site,
+        plan.right.local.hostname,
+        plan.right.local.site
+    )];
+    lines.push(format!(
+        "  status: {}",
+        if plan.ready { "ready" } else { "blocked" }
+    ));
+    for blocker in &plan.blockers {
+        lines.push(format!("  blocker: {blocker}"));
+    }
+    lines.push(format!(
+        "  topology: {} planned WireGuard bindings",
+        plan.topology_bindings.len()
+    ));
+    Ok(lines)
 }
 
 async fn update(args: &[String]) -> Result<Vec<String>, ClientError> {

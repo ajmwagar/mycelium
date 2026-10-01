@@ -232,6 +232,7 @@ pub struct NodeAnnotation {
 #[serde(rename_all = "snake_case")]
 pub enum MeshProtocol {
     Tailscale,
+    WireGuard,
     #[default]
     Unknown,
 }
