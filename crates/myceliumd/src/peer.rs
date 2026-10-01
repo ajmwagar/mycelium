@@ -471,6 +471,11 @@ impl Mesh {
                                 complete,
                                 &self.releases().await,
                             )?;
+                            if !complete {
+                                if let Some(request) = self.next_artifact_request().await? {
+                                    send(&mut writer, &request).await?;
+                                }
+                            }
                         }
                         PeerMessage::Hello(_) | PeerMessage::Ping { .. } => {}
                     }
