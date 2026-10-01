@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -6,7 +6,23 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use mycelium_peer_protocol::AccessStatement;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct HostAccountIntent {
+    name: String,
+    state: String,
+    password_locked: bool,
+    supplementary_groups: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct HostBundleManifest {
+    version: u32,
+    #[serde(default)]
+    accounts: Vec<HostAccountIntent>,
+}
 
 pub fn run(args: &[String], state: &Value) -> Result<Vec<String>, String> {
     match args.first().map(String::as_str) {
@@ -28,6 +44,7 @@ fn host_apply(args: &[String]) -> Result<Vec<String>, String> {
     require_write(args)?;
     let bundle = Path::new(required(args, "--bundle")?);
     validate_host_bundle(bundle)?;
+    let manifest = load_host_manifest(bundle)?;
     if !cfg!(any(target_os = "linux", target_os = "macos")) {
         return Err("SSH host bundle application currently supports Linux and macOS only".into());
     }
@@ -63,7 +80,8 @@ fn host_apply(args: &[String]) -> Result<Vec<String>, String> {
     fs::create_dir_all(&managed).map_err(|e| format!("create {}: {e}", managed.display()))?;
     fs::create_dir_all(drop_in.parent().expect("drop-in has parent"))
         .map_err(|e| format!("create sshd drop-in directory: {e}"))?;
-    let install = || -> Result<(), String> {
+    let mut created_accounts = Vec::new();
+    let mut install = || -> Result<(), String> {
         install_mode(
             &bundle.join("user_ca.pub"),
             &managed.join("user_ca.pub"),
@@ -90,6 +108,7 @@ fn host_apply(args: &[String]) -> Result<Vec<String>, String> {
                 install_mode(&entry.path(), &principals.join(entry.file_name()), 0o644)?;
             }
         }
+        created_accounts = reconcile_host_accounts(&manifest.accounts)?;
         command("sshd", &["-t"])?;
         reload_sshd()?;
         Ok(())
@@ -110,15 +129,90 @@ fn host_apply(args: &[String]) -> Result<Vec<String>, String> {
         }
         let _ = command("sshd", &["-t"]);
         let _ = reload_sshd();
+        rollback_created_accounts(&created_accounts);
         return Err(format!(
             "SSH host bundle failed and prior files were restored from {}: {error}",
             backup.display()
         ));
     }
-    Ok(vec![format!(
-        "installed SSH trust bundle; rollback copy retained at {}",
-        backup.display()
-    )])
+    Ok(vec![
+        format!(
+            "installed SSH trust bundle; rollback copy retained at {}",
+            backup.display()
+        ),
+        format!(
+            "reconciled {} managed account(s); created {}",
+            manifest.accounts.len(),
+            created_accounts.len()
+        ),
+    ])
+}
+
+fn load_host_manifest(bundle: &Path) -> Result<HostBundleManifest, String> {
+    serde_json::from_slice(
+        &fs::read(bundle.join("manifest.json"))
+            .map_err(|error| format!("read host bundle manifest: {error}"))?,
+    )
+    .map_err(|error| format!("parse host bundle manifest: {error}"))
+}
+
+fn reconcile_host_accounts(accounts: &[HostAccountIntent]) -> Result<Vec<String>, String> {
+    let mut created = Vec::new();
+    for account in accounts {
+        validate_managed_account(account)?;
+        let lookup = Command::new("id")
+            .args(["-u", &account.name])
+            .output()
+            .map_err(|error| format!("look up account {}: {error}", account.name))?;
+        if lookup.status.success() {
+            let uid = String::from_utf8_lossy(&lookup.stdout).trim().to_owned();
+            if uid == "0" {
+                return Err(format!(
+                    "refusing to bind managed access role to UID 0 account `{}`",
+                    account.name
+                ));
+            }
+            continue;
+        }
+        if !cfg!(target_os = "linux") {
+            return Err(format!(
+                "managed account `{}` is missing; automatic creation currently supports Linux only",
+                account.name
+            ));
+        }
+        command(
+            "useradd",
+            &["--create-home", "--shell", "/bin/bash", &account.name],
+        )?;
+        created.push(account.name.clone());
+        if let Err(error) = command("passwd", &["--lock", &account.name]) {
+            rollback_created_accounts(&created);
+            return Err(error);
+        }
+    }
+    Ok(created)
+}
+
+fn rollback_created_accounts(accounts: &[String]) {
+    for account in accounts.iter().rev() {
+        // Preserve the newly created home directory: rollback removes only the
+        // account record and never recursively deletes user data.
+        let _ = Command::new("userdel").arg(account).status();
+    }
+}
+
+fn validate_managed_account(account: &HostAccountIntent) -> Result<(), String> {
+    config_atom_value("managed account", &account.name)?;
+    if account.state != "present"
+        || !account.password_locked
+        || !account.supplementary_groups.is_empty()
+    {
+        return Err(format!(
+            "managed account `{}` must be present, password-locked, and have no supplementary groups",
+            account.name
+        ));
+    }
+    Ok(())
 }
 
 fn copy_directory_files(source: &Path, destination: &Path) -> Result<(), String> {
@@ -245,19 +339,17 @@ fn host_bundle(args: &[String]) -> Result<Vec<String>, String> {
     }
     fs::create_dir_all(&staging)
         .map_err(|e| format!("create staging directory {}: {e}", staging.display()))?;
+    let role_mappings = role_mappings(args)?;
     let result = (|| {
         let principals = staging.join("principals");
         fs::create_dir_all(&principals).map_err(|e| format!("create principals directory: {e}"))?;
-        for assignment in repeated(args, "--allow") {
-            let (user, role) = assignment
-                .split_once('=')
-                .ok_or_else(|| format!("invalid --allow `{assignment}`; expected USER=ROLE"))?;
-            config_atom_value("Unix user", user)?;
-            config_atom_value("role", role)?;
-            let path = principals.join(user);
-            let mut contents = fs::read_to_string(&path).unwrap_or_default();
-            contents.push_str(&format!("mycelium-role-{role}\n"));
-            fs::write(path, contents).map_err(|e| format!("write role principal: {e}"))?;
+        for (user, roles) in &role_mappings {
+            let contents = roles
+                .iter()
+                .map(|role| format!("mycelium-role-{role}\n"))
+                .collect::<String>();
+            fs::write(principals.join(user), contents)
+                .map_err(|e| format!("write role principal: {e}"))?;
         }
         fs::copy(ca_public, staging.join("user_ca.pub"))
             .map_err(|e| format!("copy SSH CA public key: {e}"))?;
@@ -272,9 +364,22 @@ fn host_bundle(args: &[String]) -> Result<Vec<String>, String> {
              PubkeyAuthentication yes\n",
         )
         .map_err(|e| format!("write sshd drop-in: {e}"))?;
+        let manifest = HostBundleManifest {
+            version: 2,
+            accounts: role_mappings
+                .keys()
+                .map(|name| HostAccountIntent {
+                    name: name.clone(),
+                    state: "present".into(),
+                    password_locked: true,
+                    supplementary_groups: Vec::new(),
+                })
+                .collect(),
+        };
         fs::write(
             staging.join("manifest.json"),
-            "{\n  \"version\": 1,\n  \"install\": {\n    \"user_ca.pub\": \"/etc/ssh/mycelium/user_ca.pub\",\n    \"revoked.krl\": \"/etc/ssh/mycelium/revoked.krl\",\n    \"60-mycelium-access.conf\": \"/etc/ssh/sshd_config.d/60-mycelium-access.conf\"\n  },\n  \"validate\": [\"sshd\", \"-t\"],\n  \"reload_after_validation\": true\n}\n",
+            serde_json::to_vec_pretty(&manifest)
+                .map_err(|e| format!("encode host bundle manifest: {e}"))?,
         )
         .map_err(|e| format!("write host bundle manifest: {e}"))?;
         if let Some(parent) = destination.parent() {
@@ -291,6 +396,25 @@ fn host_bundle(args: &[String]) -> Result<Vec<String>, String> {
         "wrote SSH host bundle {}; validate with `sshd -t` before installation",
         destination.display()
     )])
+}
+
+fn role_mappings(args: &[String]) -> Result<BTreeMap<String, BTreeSet<String>>, String> {
+    let mut mappings = BTreeMap::<String, BTreeSet<String>>::new();
+    for assignment in repeated(args, "--allow") {
+        let (user, role) = assignment
+            .split_once('=')
+            .ok_or_else(|| format!("invalid --allow `{assignment}`; expected USER=ROLE"))?;
+        config_atom_value("Unix user", user)?;
+        config_atom_value("role", role)?;
+        if user == "root" {
+            return Err("refusing to manage SSH role access for the root account".into());
+        }
+        mappings
+            .entry(user.to_owned())
+            .or_default()
+            .insert(role.to_owned());
+    }
+    Ok(mappings)
 }
 
 fn ca_init(args: &[String]) -> Result<Vec<String>, String> {
@@ -833,6 +957,16 @@ mod tests {
         assert_eq!(
             fs::read_to_string(allowed.join("principals/mames")).unwrap(),
             "mycelium-role-home-operator\n"
+        );
+        let manifest = load_host_manifest(&allowed).unwrap();
+        assert_eq!(
+            manifest.accounts,
+            vec![HostAccountIntent {
+                name: "mames".into(),
+                state: "present".into(),
+                password_locked: true,
+                supplementary_groups: Vec::new(),
+            }]
         );
         fs::remove_dir_all(root).unwrap();
     }

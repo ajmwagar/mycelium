@@ -364,6 +364,13 @@ mycelium access ssh host-bundle \
   --path "$MYCELIUM_HOME/ssh/host-bundle" --write
 ```
 
+Each `--allow USER=ROLE` is both an authorization projection and a local
+account requirement. On Linux, `host-apply` creates a missing unprivileged
+account with a home directory, `/bin/bash`, a locked password, and no
+supplementary groups before enabling the role. Existing UID 0 accounts and
+unsafe account intents are rejected. Removing a role removes its accepted SSH
+principal; Mycelium deliberately preserves the account and home directory.
+
 Copy the bundle to an enrolled Linux or macOS host, then apply it in one command:
 
 ```sh
