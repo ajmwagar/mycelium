@@ -1438,6 +1438,11 @@ async fn scp(args: &[String]) -> Result<Vec<String>, ClientError> {
         output["direction"] = serde_json::json!(if uploading { "upload" } else { "download" });
         return Ok(vec![output.to_string()]);
     }
+    eprintln!(
+        "mycelium: SCP {} through {}; waiting for remote write acknowledgements",
+        if uploading { "upload" } else { "download" },
+        resolved.jump.as_deref().unwrap_or(&resolved.host),
+    );
     let status = std::process::Command::new("scp")
         .args(&argv)
         .status()
@@ -1445,6 +1450,7 @@ async fn scp(args: &[String]) -> Result<Vec<String>, ClientError> {
     if !status.success() {
         return Err(err_usage(&format!("SCP exited with {status}")));
     }
+    eprintln!("mycelium: SCP complete");
     Ok(Vec::new())
 }
 
@@ -1459,11 +1465,21 @@ fn scp_argv(
         "-o".into(),
         "BatchMode=yes".into(),
         "-o".into(),
+        "ConnectTimeout=15".into(),
+        "-o".into(),
         "IdentitiesOnly=yes".into(),
         "-o".into(),
         format!("IdentityFile={}", resolved.identity),
         "-o".into(),
         format!("CertificateFile={}", resolved.certificate),
+        "-o".into(),
+        "ServerAliveInterval=15".into(),
+        "-o".into(),
+        "ServerAliveCountMax=3".into(),
+        "-X".into(),
+        "nrequests=8".into(),
+        "-X".into(),
+        "buffer=65536".into(),
         "-P".into(),
         resolved.port.to_string(),
     ];
@@ -2659,6 +2675,11 @@ mod ssh_command_tests {
         assert!(argv.windows(2).any(|pair| pair == ["-J", "pris"]));
         assert!(argv.windows(2).any(|pair| pair == ["-P", "2222"]));
         assert!(argv.contains(&"BatchMode=yes".into()));
+        assert!(argv.contains(&"ConnectTimeout=15".into()));
+        assert!(argv.contains(&"ServerAliveInterval=15".into()));
+        assert!(argv.contains(&"ServerAliveCountMax=3".into()));
+        assert!(argv.windows(2).any(|pair| pair == ["-X", "nrequests=8"]));
+        assert!(argv.windows(2).any(|pair| pair == ["-X", "buffer=65536"]));
         assert_eq!(
             argv.last().map(String::as_str),
             Some("fpladmin@192.168.1.48:/tmp/agent")
