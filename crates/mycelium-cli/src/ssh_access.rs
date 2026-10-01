@@ -691,6 +691,7 @@ fn issue_bound(
     let AccessStatement::Grant {
         principal,
         serial,
+        roles,
         unix_users,
         ssh_public_keys,
         oidc_audiences,
@@ -746,7 +747,18 @@ fn issue_bound(
     let temp = temporary_key_path(public_key_path);
     fs::copy(public_key_path, &temp)
         .map_err(|e| format!("prepare certificate input {}: {e}", temp.display()))?;
-    let principals = unix_users.join(",");
+    // Match invitation-issued certificates: a role-bound identity must not
+    // also carry its Unix account as a principal, because older hosts that
+    // only trust the CA could otherwise bypass the host's role mapping.
+    let principals = if roles.is_empty() {
+        unix_users.join(",")
+    } else {
+        roles
+            .iter()
+            .map(|role| format!("mycelium-role-{role}"))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
     let validity = format!("+0s:+{ttl}s");
     let serial = serial.to_string();
     let identity = format!("mycelium:{grant_id}:{principal}");
@@ -1203,7 +1215,7 @@ mod tests {
                 "revoked_by": [],
                 "record": { "statement": {
                     "kind": "grant", "grant_id": "grant-1", "principal": "oidc:https://issuer.example#user-42",
-                    "serial": 42, "roles": [], "scopes": ["site:home"], "unix_users": ["avery"],
+                    "serial": 42, "roles": ["network-admin"], "scopes": ["site:home"], "unix_users": ["avery"],
                     "ssh_public_keys": [public_key], "oidc_audiences": ["mycelium"],
                     "oidc_ssh_key_exchange": false,
                     "not_before": timestamp - 1, "not_after": timestamp + 3600
@@ -1230,6 +1242,14 @@ mod tests {
         .collect::<Vec<_>>();
         issue(&issue_args, &state).unwrap();
         assert!(cert.exists());
+        let inspected = Command::new("ssh-keygen")
+            .args(["-L", "-f"])
+            .arg(&cert)
+            .output()
+            .unwrap();
+        let inspected = String::from_utf8_lossy(&inspected.stdout);
+        assert!(inspected.contains("mycelium-role-network-admin"));
+        assert!(!inspected.lines().any(|line| line.trim() == "avery"));
         let oidc_cert = root.join("oidc-user-cert.pub");
         let oidc_args = vec![
             "ssh-issue",
