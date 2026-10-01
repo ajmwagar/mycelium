@@ -808,7 +808,7 @@ async fn update(args: &[String]) -> Result<Vec<String>, ClientError> {
     let flags = parse_flags(args);
     let action = flags.rest.first().map(String::as_str).unwrap_or("status");
     let channel = flags.channel.unwrap_or_else(|| "canary".into());
-    let target = local_target();
+    let targets = mycelium_peer_protocol::local_compatible_targets();
     let mut client = connect().await?;
     let value = client.call(&Request::ReleaseList).await?;
     let release = value
@@ -818,10 +818,20 @@ async fn update(args: &[String]) -> Result<Vec<String>, ClientError> {
         .filter_map(|value| {
             serde_json::from_value::<mycelium_peer_protocol::ReleaseManifest>(value.clone()).ok()
         })
-        .filter(|release| release.channel == channel && release.target == target)
-        .max_by(|left, right| left.version.cmp(&right.version));
+        .filter(|release| release.channel == channel && targets.contains(&release.target))
+        .max_by_key(|release| {
+            let preference = targets
+                .iter()
+                .position(|target| target == &release.target)
+                .map(|index| targets.len() - index)
+                .unwrap_or_default();
+            (release.version.clone(), preference)
+        });
     let Some(release) = release else {
-        return Err(err_usage(&format!("no `{channel}` release for {target}")));
+        return Err(err_usage(&format!(
+            "no `{channel}` release for compatible targets {}",
+            targets.join(", ")
+        )));
     };
     release
         .verify()
@@ -841,7 +851,7 @@ async fn update(args: &[String]) -> Result<Vec<String>, ClientError> {
                 "release {} channel={} target={} artifact={}",
                 status["release"]["version"].as_str().unwrap_or("?"),
                 channel,
-                target,
+                status["release"]["target"].as_str().unwrap_or("?"),
                 if available { "ready" } else { "downloading" },
             )])
         };
@@ -874,17 +884,9 @@ async fn update(args: &[String]) -> Result<Vec<String>, ClientError> {
     Ok(vec![format!(
         "activated {} for {} from {}",
         release.version,
-        target,
+        release.target,
         artifact.display()
     )])
-}
-
-fn local_target() -> String {
-    #[cfg(target_os = "macos")]
-    let os = "apple-darwin";
-    #[cfg(target_os = "linux")]
-    let os = "unknown-linux-gnu";
-    format!("{}-{os}", std::env::consts::ARCH)
 }
 
 async fn activate_update(

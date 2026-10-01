@@ -170,6 +170,12 @@ health, signs observations with a persistent Ed25519 identity in
 `$MYCELIUM_HOME/peer.key`, and answers `mycelium peers` from its locally
 converged view. There is no required controller.
 
+Successful scans also publish a signed, schema-versioned snapshot of the
+observer's local topology. Other peers merge those snapshots when rendering
+`mycelium topology` or `mycelium map`; they do not persist or re-publish the
+merged view, so discovery from multiple LAN vantage points converges without
+recursive gossip amplification. Scan credentials and execution remain local.
+
 Direct peer links are optional and mutually authenticated. Configure any node
 as a listener, a dialer, or both:
 
@@ -219,6 +225,13 @@ new daemon fails its health check.
 Compilation belongs to the external build pipeline (for example Fab). The
 pipeline hands Mycelium a JSON release-set manifest whose relative binary paths
 are resolved from the manifest's directory:
+
+The checked-in Fab workflow builds static-musl artifacts for both Linux
+architectures. Linux peers treat musl and GNU releases as compatible while
+preferring musl at the same version, allowing an existing GNU installation to
+migrate onto the portable artifact. Fab emits `dist/release-set.json` and
+`dist/SHA256SUMS`; release signing and publication remain an offline authority
+operation.
 
 ```json
 {

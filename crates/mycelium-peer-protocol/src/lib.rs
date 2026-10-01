@@ -8,6 +8,36 @@ use sha2::{Digest, Sha256};
 
 pub const PROTOCOL_VERSION: u16 = 1;
 
+/// The Rust target of the currently running binary. Publication uses this
+/// when the build pipeline does not provide an explicit target.
+pub fn local_build_target() -> String {
+    #[cfg(target_os = "macos")]
+    let os = "apple-darwin";
+    #[cfg(all(target_os = "linux", target_env = "musl"))]
+    let os = "unknown-linux-musl";
+    #[cfg(all(target_os = "linux", not(target_env = "musl")))]
+    let os = "unknown-linux-gnu";
+    format!("{}-{os}", std::env::consts::ARCH)
+}
+
+/// Release targets executable by this host, in preference order. Linux can
+/// migrate from a dynamically linked GNU build to a portable static musl
+/// build; Darwin remains ABI-specific.
+pub fn local_compatible_targets() -> Vec<String> {
+    compatible_targets(std::env::consts::ARCH, std::env::consts::OS)
+}
+
+fn compatible_targets(architecture: &str, os: &str) -> Vec<String> {
+    match os {
+        "linux" => vec![
+            format!("{architecture}-unknown-linux-musl"),
+            format!("{architecture}-unknown-linux-gnu"),
+        ],
+        "macos" => vec![format!("{architecture}-apple-darwin")],
+        other => vec![format!("{architecture}-{other}")],
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Platform {
@@ -66,8 +96,18 @@ pub struct HostHealth {
 pub enum PeerEvent {
     Hello(PeerHello),
     Health(HostHealth),
+    Topology(TopologySnapshot),
     Release(ReleaseManifest),
     Access(AccessRecord),
+}
+
+/// A signed, schema-versioned topology snapshot. The topology schema remains
+/// owned by `mycelium-core`; the transport protocol only carries opaque JSON,
+/// avoiding a dependency from the peer contract back into the control plane.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TopologySnapshot {
+    pub schema_version: u16,
+    pub topology: serde_json::Value,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -382,6 +422,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn linux_hosts_prefer_portable_musl_but_accept_gnu() {
+        assert_eq!(
+            compatible_targets("x86_64", "linux"),
+            ["x86_64-unknown-linux-musl", "x86_64-unknown-linux-gnu"]
+        );
+        assert_eq!(
+            compatible_targets("aarch64", "linux"),
+            ["aarch64-unknown-linux-musl", "aarch64-unknown-linux-gnu"]
+        );
+    }
+
+    #[test]
     fn forwarded_envelopes_remain_origin_authenticated() {
         let key = SigningKey::from_bytes(&[7; 32]);
         let event = PeerEvent::Hello(PeerHello {
@@ -414,6 +466,26 @@ mod tests {
         release.verify().unwrap();
         release.artifact_size += 1;
         assert!(release.verify().is_err());
+    }
+
+    #[test]
+    fn envelope_signature_covers_topology_snapshot() {
+        let key = SigningKey::from_bytes(&[10; 32]);
+        let mut envelope = SignedEnvelope::sign(
+            &key,
+            1,
+            2,
+            PeerEvent::Topology(TopologySnapshot {
+                schema_version: 1,
+                topology: serde_json::json!({"nodes": {}}),
+            }),
+        )
+        .unwrap();
+        envelope.verify().unwrap();
+        if let PeerEvent::Topology(snapshot) = &mut envelope.event {
+            snapshot.topology = serde_json::json!({"nodes": {"injected": {}}});
+        }
+        assert!(envelope.verify().is_err());
     }
 
     #[test]

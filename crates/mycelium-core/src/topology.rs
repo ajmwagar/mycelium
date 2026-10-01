@@ -432,6 +432,74 @@ impl Topology {
         Self::default()
     }
 
+    /// Merge a separately signed observer snapshot into a read model. Local
+    /// state is not mutated by peer snapshots, preventing gossip feedback.
+    pub fn merge_snapshot(&mut self, other: Self) {
+        for (id, node) in other.nodes {
+            match self.nodes.entry(id) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(node);
+                }
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    merge_node(entry.get_mut(), node);
+                }
+            }
+        }
+        for (id, segment) in other.segments {
+            match self.segments.entry(id) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(segment);
+                }
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    let current = entry.get_mut();
+                    current.origins.extend(segment.origins);
+                    if current.gw.is_none() {
+                        current.gw = segment.gw;
+                    }
+                    if current.subnet.is_none() {
+                        current.subnet = segment.subnet;
+                    }
+                    if current.domain_name.is_none() {
+                        current.domain_name = segment.domain_name;
+                    }
+                    if current.vlan.is_none() {
+                        current.vlan = segment.vlan;
+                    }
+                }
+            }
+        }
+        for lease in other.leases {
+            if !self.leases.contains(&lease) {
+                self.leases.push(lease);
+            }
+        }
+        for (key, advertisement) in other.advertisements {
+            match self.advertisements.entry(key) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(advertisement);
+                }
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    let current = entry.get_mut();
+                    current.first_seen = current.first_seen.min(advertisement.first_seen);
+                    current.last_seen = current.last_seen.max(advertisement.last_seen);
+                    current.addresses.extend(advertisement.addresses);
+                    current.txt.extend(advertisement.txt);
+                    current.origins.extend(advertisement.origins);
+                }
+            }
+        }
+        for conflict in other.conflicts {
+            if !self.conflicts.contains(&conflict) {
+                self.conflicts.push(conflict);
+            }
+        }
+        for origin in other.updated_from {
+            if !self.updated_from.contains(&origin) {
+                self.updated_from.push(origin);
+            }
+        }
+    }
+
     pub fn observe_all(&mut self, obs: impl IntoIterator<Item = Observation>) -> TopologyReport {
         let mut report = TopologyReport::default();
         for o in obs {
@@ -1070,6 +1138,38 @@ mod tests {
         let nas = &topo.nodes["aa:bb:cc:dd:ee:01"];
         assert_eq!(nas.origins.len(), 2);
         assert!(nas.hostnames.contains("nas"));
+    }
+
+    #[test]
+    fn peer_snapshots_merge_distinct_vantage_points() {
+        let mut laptop = Topology::empty();
+        laptop.observe_all([Observation::Neighbor {
+            mac: MacAddress::parse("02:00:00:00:00:10"),
+            ip: "192.168.10.10".parse().unwrap(),
+            hostname: Some("laptop-visible".into()),
+            port: None,
+            origin: Origin::new("laptop", "arp").at_site("wagar-house"),
+        }]);
+        let mut pi = Topology::empty();
+        pi.observe_all([Observation::Neighbor {
+            mac: MacAddress::parse("02:00:00:00:00:20"),
+            ip: "192.168.10.20".parse().unwrap(),
+            hostname: Some("pi-visible".into()),
+            port: None,
+            origin: Origin::new("home-pi", "arp").at_site("wagar-house"),
+        }]);
+
+        pi.merge_snapshot(laptop);
+
+        assert_eq!(pi.nodes.len(), 2);
+        assert!(pi
+            .nodes
+            .values()
+            .any(|node| node.hostnames.contains("laptop-visible")));
+        assert!(pi
+            .nodes
+            .values()
+            .any(|node| node.hostnames.contains("pi-visible")));
     }
 
     #[test]

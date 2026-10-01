@@ -460,6 +460,13 @@ impl Daemon {
                 };
                 warnings.extend(self.fingerprint_services().await);
                 self.persist_topology().await?;
+                let topology_snapshot = self.topology.lock().await.clone();
+                self.mesh
+                    .publish_topology(&topology_snapshot)
+                    .await
+                    .map_err(|error| {
+                        MyceliumError::Validation(format!("publish topology snapshot: {error}"))
+                    })?;
                 to_value(serde_json::json!({
                     "report": report,
                     "warnings": warnings,
@@ -469,8 +476,18 @@ impl Daemon {
                 .map_err(json_err)
             }
             Request::Topology => {
-                let topo = self.topology.lock().await;
-                to_value(&*topo).map_err(json_err)
+                let mut topology = self.topology.lock().await.clone();
+                for snapshot in self.mesh.topology_snapshots().await {
+                    if snapshot.schema_version != 1 {
+                        continue;
+                    }
+                    let remote =
+                        serde_json::from_value::<Topology>(snapshot.topology).map_err(|error| {
+                            MyceliumError::Parse(format!("peer topology snapshot: {error}"))
+                        })?;
+                    topology.merge_snapshot(remote);
+                }
+                to_value(topology).map_err(json_err)
             }
             Request::DiscoveryScopeList => {
                 let scopes = self

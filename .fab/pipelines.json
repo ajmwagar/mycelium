@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "pipelines": [
+    {
+      "id": "mycelium-portable-linux-release-set",
+      "project": "mycelium",
+      "githubRepo": "ajmwagar/mycelium",
+      "gitUrl": "https://github.com/ajmwagar/mycelium.git",
+      "branch": "master",
+      "watchPaths": [
+        ".fab/pipelines.json",
+        "Cargo.lock",
+        "Cargo.toml",
+        "crates/"
+      ],
+      "pipeline": {
+        "type": "workflow",
+        "name": "mycelium-portable-linux-release-set",
+        "image": "ghcr.io/rust-cross/cargo-zigbuild:sha-f36f2f2@sha256:b78ed08400fc95a0926ca8ecc31f930bc62583c712eb48ee945605eb97559b3a",
+        "artifactDir": "dist",
+        "steps": [
+          {
+            "name": "Install deterministic Rust targets",
+            "run": "rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl"
+          },
+          {
+            "name": "Test release and selection contracts",
+            "run": "cargo test --locked -p mycelium-peer-protocol -p myceliumd -p mycelium-cli"
+          },
+          {
+            "name": "Build portable Linux release set",
+            "run": "cargo zigbuild --release --locked -p mycelium-cli --target x86_64-unknown-linux-musl --target aarch64-unknown-linux-musl"
+          },
+          {
+            "name": "Assemble publish-set input",
+            "run": "mkdir -p dist && install -m 0755 target/x86_64-unknown-linux-musl/release/mycelium dist/mycelium-linux-x86_64 && install -m 0755 target/aarch64-unknown-linux-musl/release/mycelium dist/mycelium-linux-arm64 && version=$(sed -n 's/^version = \"\\([^\"]*\\)\"/\\1/p' Cargo.toml | head -n 1) && test -n \"${version}\" && printf '{\n  \"version\": \"%s-canary.%s\",\n  \"channel\": \"canary\",\n  \"artifacts\": [\n    { \"target\": \"aarch64-unknown-linux-musl\", \"binary\": \"mycelium-linux-arm64\" },\n    { \"target\": \"x86_64-unknown-linux-musl\", \"binary\": \"mycelium-linux-x86_64\" }\n  ]\n}\n' \"${version}\" \"${FAB_COMMIT_SHA}\" > dist/release-set.json && sha256sum dist/mycelium-linux-arm64 dist/mycelium-linux-x86_64 > dist/SHA256SUMS"
+          }
+        ]
+      }
+    }
+  ]
+}

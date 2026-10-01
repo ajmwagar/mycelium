@@ -11,9 +11,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ed25519_dalek::SigningKey;
 use mycelium_peer_protocol::{
-    decode_hex, encode_hex, sha256_hex, AccessRecord, AccessStatement, FilesystemHealth,
-    HostHealth, PeerEvent, PeerHello, PeerMessage, Platform, ProcessHealth, ReleaseManifest,
-    SignedEnvelope, PROTOCOL_VERSION,
+    decode_hex, encode_hex, local_build_target, local_compatible_targets, sha256_hex, AccessRecord,
+    AccessStatement, FilesystemHealth, HostHealth, PeerEvent, PeerHello, PeerMessage, Platform,
+    ProcessHealth, ReleaseManifest, SignedEnvelope, TopologySnapshot, PROTOCOL_VERSION,
 };
 use rand_core::OsRng;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
@@ -249,6 +249,7 @@ impl Mesh {
             match &envelope.event {
                 PeerEvent::Hello(hello) => view.hello = Some(hello.clone()),
                 PeerEvent::Health(health) => view.health = Some(health.clone()),
+                PeerEvent::Topology(_) => {}
                 PeerEvent::Release(_) => {}
                 PeerEvent::Access(_) => {}
             }
@@ -266,6 +267,30 @@ impl Mesh {
                 _ => None,
             })
             .collect()
+    }
+
+    pub async fn topology_snapshots(&self) -> Vec<TopologySnapshot> {
+        self.observations
+            .lock()
+            .await
+            .values()
+            .filter(|envelope| envelope.origin != self.hello.node_id)
+            .filter_map(|envelope| match &envelope.event {
+                PeerEvent::Topology(snapshot) => Some(snapshot.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub async fn publish_topology(
+        &self,
+        topology: &mycelium_core::Topology,
+    ) -> Result<(), AnyError> {
+        self.publish(PeerEvent::Topology(TopologySnapshot {
+            schema_version: 1,
+            topology: serde_json::to_value(topology)?,
+        }))
+        .await
     }
 
     pub async fn access_records(&self) -> Vec<AccessRecord> {
@@ -364,7 +389,7 @@ impl Mesh {
     ) -> Result<ReleaseManifest, AnyError> {
         validate_release_label("version", &version)?;
         validate_release_label("channel", &channel)?;
-        let target = target.unwrap_or_else(local_target);
+        let target = target.unwrap_or_else(local_build_target);
         validate_release_label("target", &target)?;
         let bytes = std::fs::read(binary)?;
         let key_bytes = std::fs::read(signing_key)?;
@@ -671,14 +696,21 @@ impl Mesh {
     }
 
     async fn next_artifact_request(&self) -> Result<Option<PeerMessage>, AnyError> {
-        let target = local_target();
+        let targets = local_compatible_targets();
         let channel = std::env::var("MYCELIUM_UPDATE_CHANNEL").unwrap_or_else(|_| "canary".into());
         let release = self
             .releases()
             .await
             .into_iter()
-            .filter(|release| release.target == target && release.channel == channel)
-            .max_by(|left, right| left.version.cmp(&right.version));
+            .filter(|release| targets.contains(&release.target) && release.channel == channel)
+            .max_by_key(|release| {
+                let preference = targets
+                    .iter()
+                    .position(|target| target == &release.target)
+                    .map(|index| targets.len() - index)
+                    .unwrap_or_default();
+                (release.version.clone(), preference)
+            });
         let Some(release) = release else {
             return Ok(None);
         };
@@ -770,6 +802,7 @@ fn event_key(envelope: &SignedEnvelope) -> String {
     match &envelope.event {
         PeerEvent::Hello(_) => format!("{}:hello", envelope.origin),
         PeerEvent::Health(_) => format!("{}:health", envelope.origin),
+        PeerEvent::Topology(_) => format!("{}:topology", envelope.origin),
         PeerEvent::Release(release) => format!(
             "{}:release:{}:{}",
             envelope.origin, release.channel, release.target
@@ -788,7 +821,10 @@ fn event_key(envelope: &SignedEnvelope) -> String {
 fn event_origin_matches(envelope: &SignedEnvelope) -> bool {
     match &envelope.event {
         PeerEvent::Hello(hello) => hello.node_id == envelope.origin,
-        PeerEvent::Health(_) | PeerEvent::Release(_) | PeerEvent::Access(_) => true,
+        PeerEvent::Health(_)
+        | PeerEvent::Topology(_)
+        | PeerEvent::Release(_)
+        | PeerEvent::Access(_) => true,
     }
 }
 
@@ -800,14 +836,6 @@ fn csv_set(name: &str) -> BTreeSet<String> {
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
         .collect()
-}
-
-fn local_target() -> String {
-    #[cfg(target_os = "macos")]
-    let os = "apple-darwin";
-    #[cfg(target_os = "linux")]
-    let os = "unknown-linux-gnu";
-    format!("{}-{os}", std::env::consts::ARCH)
 }
 
 fn validate_digest(digest: &str) -> Result<(), AnyError> {
