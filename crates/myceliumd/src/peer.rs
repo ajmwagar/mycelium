@@ -25,6 +25,12 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 
+const HEALTH_INTERVAL: Duration = Duration::from_secs(60);
+const DIGEST_INTERVAL: Duration = Duration::from_secs(15);
+const ARTIFACT_REQUEST_INTERVAL: Duration = Duration::from_secs(1);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const MAX_OBSERVATIONS_PER_MESSAGE: usize = 64;
+
 type AnyError = Box<dyn Error + Send + Sync>;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -210,7 +216,7 @@ impl Mesh {
                     Ok(Err(error)) => eprintln!("myceliumd: collect local health: {error}"),
                     Err(error) => eprintln!("myceliumd: health task: {error}"),
                 }
-                tokio::time::sleep(Duration::from_secs(30)).await;
+                tokio::time::sleep(HEALTH_INTERVAL).await;
             }
         });
 
@@ -603,9 +609,10 @@ impl Mesh {
     async fn dial_forever(self: Arc<Self>, seed: String, connector: TlsConnector) {
         let mut delay = Duration::from_secs(1);
         loop {
-            match self.dial(&seed, connector.clone()).await {
-                Ok(()) => delay = Duration::from_secs(1),
-                Err(error) => eprintln!("myceliumd: peer seed {seed}: {error}"),
+            match tokio::time::timeout(CONNECT_TIMEOUT, self.dial(&seed, connector.clone())).await {
+                Ok(Ok(())) => delay = Duration::from_secs(1),
+                Ok(Err(error)) => eprintln!("myceliumd: peer seed {seed}: {error}"),
+                Err(_) => eprintln!("myceliumd: peer seed {seed}: connection timed out"),
             }
             tokio::time::sleep(delay).await;
             delay = (delay * 2).min(Duration::from_secs(60));
@@ -630,7 +637,10 @@ impl Mesh {
         let (reader, mut writer) = tokio::io::split(stream);
         send(&mut writer, &PeerMessage::Hello(self.hello.clone())).await?;
         let mut lines = BufReader::new(reader).lines();
-        let mut interval = tokio::time::interval(Duration::from_secs(5));
+        let mut digest_interval = tokio::time::interval(DIGEST_INTERVAL);
+        digest_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut artifact_interval = tokio::time::interval(ARTIFACT_REQUEST_INTERVAL);
+        artifact_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
                 result = lines.next_line() => {
@@ -650,7 +660,13 @@ impl Mesh {
                                 .map(|(_, envelope)| envelope.clone())
                                 .collect::<Vec<_>>();
                             if !newer.is_empty() {
-                                send(&mut writer, &PeerMessage::Observations(newer)).await?;
+                                for chunk in newer.chunks(MAX_OBSERVATIONS_PER_MESSAGE) {
+                                    send(
+                                        &mut writer,
+                                        &PeerMessage::Observations(chunk.to_vec()),
+                                    )
+                                    .await?;
+                                }
                             }
                         }
                         PeerMessage::Hello(hello) if hello.protocol_version != PROTOCOL_VERSION => {
@@ -678,7 +694,7 @@ impl Mesh {
                         PeerMessage::Hello(_) | PeerMessage::Ping { .. } => {}
                     }
                 }
-                _ = interval.tick() => {
+                _ = digest_interval.tick() => {
                     let digest = self
                         .observations
                         .lock()
@@ -687,6 +703,8 @@ impl Mesh {
                         .map(|(key, envelope)| (key.clone(), envelope.sequence))
                         .collect();
                     send(&mut writer, &PeerMessage::Digest(digest)).await?;
+                }
+                _ = artifact_interval.tick() => {
                     if let Some(request) = self.next_artifact_request().await? {
                         send(&mut writer, &request).await?;
                     }
