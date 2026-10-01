@@ -55,7 +55,13 @@ fn host_rollout(args: &[String]) -> Result<Vec<String>, String> {
     let mut lines = Vec::new();
     for (index, target) in targets.iter().enumerate() {
         validate_rollout_target(target)?;
-        let remote_bundle = format!("/tmp/mycelium-host-bundle-{}-{index}", std::process::id());
+        let bundle_name = bundle
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| "host bundle path needs a UTF-8 directory name".to_string())?;
+        config_value_text("host bundle directory name", bundle_name)?;
+        let remote_parent = format!("/tmp/mycelium-host-rollout-{}-{index}", std::process::id());
+        let remote_bundle = format!("{remote_parent}/{bundle_name}");
         command_owned(
             "ssh",
             vec![
@@ -64,7 +70,7 @@ fn host_rollout(args: &[String]) -> Result<Vec<String>, String> {
                 (*target).into(),
                 "mkdir".into(),
                 "-p".into(),
-                remote_bundle.clone(),
+                remote_parent.clone(),
             ],
         )?;
         command_owned(
@@ -73,8 +79,8 @@ fn host_rollout(args: &[String]) -> Result<Vec<String>, String> {
                 "-q".into(),
                 "-O".into(),
                 "-r".into(),
-                format!("{}/.", bundle.display()),
-                format!("{target}:{remote_bundle}/"),
+                bundle.display().to_string(),
+                format!("{target}:{remote_parent}/"),
             ],
         )?;
         command_owned(
