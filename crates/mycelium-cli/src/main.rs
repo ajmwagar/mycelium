@@ -744,8 +744,13 @@ async fn activate_update(
     if !check.status.success() {
         return Err(err_usage("candidate binary failed self-check"));
     }
-    let _ = client.request(&Request::Shutdown).await;
-    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    let supervisor = active_supervisor();
+    if let Some(supervisor) = supervisor {
+        supervisor.stop()?;
+    } else {
+        let _ = client.request(&Request::Shutdown).await;
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
     if previous.exists() {
         std::fs::remove_file(&previous).map_err(ClientError::Io)?;
     }
@@ -754,14 +759,17 @@ async fn activate_update(
         let _ = std::fs::rename(&previous, destination);
         return Err(ClientError::Io(error));
     }
-    spawn_daemon_from(destination)?;
+    start_daemon(supervisor, destination)?;
     if wait_for_daemon().await.is_ok() {
         return Ok(());
     }
 
+    if let Some(supervisor) = supervisor {
+        let _ = supervisor.stop();
+    }
     let _ = std::fs::rename(destination, &failed);
     std::fs::rename(&previous, destination).map_err(ClientError::Io)?;
-    spawn_daemon_from(destination)?;
+    start_daemon(supervisor, destination)?;
     wait_for_daemon().await.map_err(|_| {
         ClientError::Protocol(
             "candidate failed health check; rollback daemon also failed to start".into(),
@@ -770,6 +778,105 @@ async fn activate_update(
     Err(ClientError::Protocol(
         "candidate failed health check and was rolled back".into(),
     ))
+}
+
+#[derive(Clone, Copy)]
+enum Supervisor {
+    Systemd,
+    Launchd,
+}
+
+impl Supervisor {
+    fn stop(self) -> Result<(), ClientError> {
+        let status = match self {
+            Self::Systemd => std::process::Command::new("systemctl")
+                .args(["--user", "stop", "mycelium"])
+                .status(),
+            Self::Launchd => std::process::Command::new("launchctl")
+                .args(["bootout", &format!("gui/{}/dev.fpl.mycelium", uid()?)])
+                .status(),
+        }
+        .map_err(ClientError::Io)?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(err_usage("failed to stop the Mycelium service supervisor"))
+        }
+    }
+
+    fn start(self) -> Result<(), ClientError> {
+        let status = match self {
+            Self::Systemd => std::process::Command::new("systemctl")
+                .args(["--user", "start", "mycelium"])
+                .status(),
+            Self::Launchd => std::process::Command::new("launchctl")
+                .args([
+                    "bootstrap",
+                    &format!("gui/{}", uid()?),
+                    &display_path(
+                        &std::env::var_os("HOME")
+                            .map(std::path::PathBuf::from)
+                            .ok_or_else(|| err_usage("HOME is not set"))?
+                            .join("Library/LaunchAgents/dev.fpl.mycelium.plist"),
+                    )?,
+                ])
+                .status(),
+        }
+        .map_err(ClientError::Io)?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(err_usage("failed to start the Mycelium service supervisor"))
+        }
+    }
+}
+
+fn active_supervisor() -> Option<Supervisor> {
+    if cfg!(target_os = "linux")
+        && std::process::Command::new("systemctl")
+            .args(["--user", "is-active", "--quiet", "mycelium"])
+            .status()
+            .is_ok_and(|status| status.success())
+    {
+        return Some(Supervisor::Systemd);
+    }
+    let uid = uid().ok()?;
+    if cfg!(target_os = "macos")
+        && std::process::Command::new("launchctl")
+            .args(["print", &format!("gui/{uid}/dev.fpl.mycelium")])
+            .status()
+            .is_ok_and(|status| status.success())
+    {
+        return Some(Supervisor::Launchd);
+    }
+    None
+}
+
+fn uid() -> Result<String, ClientError> {
+    let output = std::process::Command::new("id")
+        .arg("-u")
+        .output()
+        .map_err(ClientError::Io)?;
+    if !output.status.success() {
+        return Err(err_usage("failed to determine the current user id"));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+fn start_daemon(
+    supervisor: Option<Supervisor>,
+    binary: &std::path::Path,
+) -> Result<(), ClientError> {
+    match supervisor {
+        Some(supervisor) => supervisor.start(),
+        None => spawn_daemon_from(binary),
+    }
+}
+
+fn display_path(path: &std::path::Path) -> Result<String, ClientError> {
+    path.to_str()
+        .map(str::to_owned)
+        .ok_or_else(|| err_usage("service path is not UTF-8"))
 }
 
 fn spawn_daemon_from(binary: &std::path::Path) -> Result<(), ClientError> {
