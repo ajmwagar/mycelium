@@ -163,6 +163,9 @@ impl Mesh {
             Ok(text) => serde_json::from_str::<Vec<SignedEnvelope>>(&text)?
                 .into_iter()
                 .filter(|envelope| {
+                    if matches!(envelope.event, PeerEvent::Unknown) {
+                        return false;
+                    }
                     let release_allowed = match &envelope.event {
                         PeerEvent::Release(release) => {
                             trusted_release_keys.contains(&release.signer)
@@ -274,6 +277,7 @@ impl Mesh {
                 PeerEvent::Topology(_) => {}
                 PeerEvent::Release(_) => {}
                 PeerEvent::Access(_) => {}
+                PeerEvent::Unknown => {}
             }
         }
         views.into_values().collect()
@@ -564,6 +568,9 @@ impl Mesh {
         let mut changed = false;
         let mut observations = self.observations.lock().await;
         for envelope in incoming {
+            if matches!(envelope.event, PeerEvent::Unknown) {
+                continue;
+            }
             let authorized = envelope.origin == self.hello.node_id
                 || self
                     .allowed_origins
@@ -852,6 +859,7 @@ fn event_key(envelope: &SignedEnvelope) -> String {
                 format!("access:{}:revoke:{revocation_id}", record.signer)
             }
         },
+        PeerEvent::Unknown => format!("{}:unknown", envelope.origin),
     }
 }
 
@@ -862,6 +870,7 @@ fn event_origin_matches(envelope: &SignedEnvelope) -> bool {
         | PeerEvent::Topology(_)
         | PeerEvent::Release(_)
         | PeerEvent::Access(_) => true,
+        PeerEvent::Unknown => false,
     }
 }
 

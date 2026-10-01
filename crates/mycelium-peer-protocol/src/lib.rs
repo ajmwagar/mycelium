@@ -91,7 +91,7 @@ pub struct HostHealth {
     pub platform_metrics: BTreeMap<String, String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum PeerEvent {
     Hello(PeerHello),
@@ -99,6 +99,44 @@ pub enum PeerEvent {
     Topology(TopologySnapshot),
     Release(ReleaseManifest),
     Access(AccessRecord),
+    /// A future event kind this binary does not understand. Receivers discard
+    /// it without rejecting the other independently signed observations.
+    Unknown,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+enum KnownPeerEvent {
+    Hello(PeerHello),
+    Health(HostHealth),
+    Topology(TopologySnapshot),
+    Release(ReleaseManifest),
+    Access(AccessRecord),
+}
+
+impl<'de> Deserialize<'de> for PeerEvent {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let known = matches!(
+            value.get("kind").and_then(serde_json::Value::as_str),
+            Some("hello" | "health" | "topology" | "release" | "access")
+        );
+        if !known {
+            return Ok(Self::Unknown);
+        }
+        let event: KnownPeerEvent =
+            serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+        Ok(match event {
+            KnownPeerEvent::Hello(value) => Self::Hello(value),
+            KnownPeerEvent::Health(value) => Self::Health(value),
+            KnownPeerEvent::Topology(value) => Self::Topology(value),
+            KnownPeerEvent::Release(value) => Self::Release(value),
+            KnownPeerEvent::Access(value) => Self::Access(value),
+        })
+    }
 }
 
 /// A signed, schema-versioned topology snapshot. The topology schema remains
@@ -486,6 +524,16 @@ mod tests {
             snapshot.topology = serde_json::json!({"nodes": {"injected": {}}});
         }
         assert!(envelope.verify().is_err());
+    }
+
+    #[test]
+    fn unknown_peer_events_are_parseable_for_forward_compatibility() {
+        let event: PeerEvent = serde_json::from_value(serde_json::json!({
+            "kind": "future_capability",
+            "value": {"schema_version": 7, "payload": "opaque"}
+        }))
+        .unwrap();
+        assert_eq!(event, PeerEvent::Unknown);
     }
 
     #[test]
