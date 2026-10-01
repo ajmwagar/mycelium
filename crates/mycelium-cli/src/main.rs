@@ -116,7 +116,7 @@ usage:
   mycelium access oidc gateway --listen 127.0.0.1:8787 --issuer URL --audience ID --client-id ID --client-secret-env VAR --callback-url HTTPS-URL --ca PRIVATE-KEY [--invite-store PATH] --write
   mycelium access oidc join --gateway HTTPS-URL --public-key PATH --certificate PATH [--grant ID] [--ttl 8h] --write
     [--provider NAME] [--providers PATH]
-  mycelium update status [--channel CHANNEL] [--json]
+  mycelium update status [--channel CHANNEL] [--fleet] [--json]
   mycelium update apply [--channel CHANNEL] [--path INSTALLED-BINARY] --write
   mycelium enroll init [--path CA-DIR] --write
   mycelium enroll issue NAME --site SITE --address DNS-OR-IP [--san DNS-OR-IP]... --binary PATH --target TRIPLE [--peer HOST:PORT]... [--ca CA-DIR] [--path OUTPUT-DIR] --write
@@ -140,6 +140,7 @@ environment:
 
 struct Flags {
     json: bool,
+    fleet: bool,
     write: bool,
     dry_run: bool,
     driver: Option<String>,
@@ -181,6 +182,7 @@ struct Flags {
 fn parse_flags(args: &[String]) -> Flags {
     let mut f = Flags {
         json: false,
+        fleet: false,
         write: false,
         dry_run: false,
         driver: None,
@@ -222,6 +224,7 @@ fn parse_flags(args: &[String]) -> Flags {
     while i < args.len() {
         match args[i].as_str() {
             "--json" => f.json = true,
+            "--fleet" => f.fleet = true,
             "--write" => f.write = true,
             "--dry-run" => f.dry_run = true,
             "--driver" => {
@@ -810,6 +813,10 @@ async fn update(args: &[String]) -> Result<Vec<String>, ClientError> {
     let channel = flags.channel.unwrap_or_else(|| "canary".into());
     let targets = mycelium_peer_protocol::local_compatible_targets();
     let mut client = connect().await?;
+    if action == "status" && flags.fleet {
+        let peers = client.call(&Request::PeerList).await?;
+        return render_fleet_update_status(&peers, flags.json);
+    }
     let value = client.call(&Request::ReleaseList).await?;
     let release = value
         .as_array()
@@ -839,21 +846,41 @@ async fn update(args: &[String]) -> Result<Vec<String>, ClientError> {
     let artifact = myceliumd::artifacts_dir().join(&release.artifact_digest);
     let available = artifact.is_file();
     if action == "status" {
+        let state = myceliumd::read_update_state();
+        let installed_digest = std::env::current_exe()
+            .ok()
+            .and_then(|path| std::fs::read(path).ok())
+            .map(|bytes| mycelium_peer_protocol::sha256_hex(&bytes));
         let status = serde_json::json!({
             "release": release,
             "artifact": artifact,
             "available": available,
+            "installed_digest": installed_digest,
+            "activation": state,
         });
         return if flags.json {
             Ok(vec![status.to_string()])
         } else {
-            Ok(vec![format!(
-                "release {} channel={} target={} artifact={}",
-                status["release"]["version"].as_str().unwrap_or("?"),
-                channel,
-                status["release"]["target"].as_str().unwrap_or("?"),
-                if available { "ready" } else { "downloading" },
-            )])
+            Ok(vec![
+                format!(
+                    "release {} channel={} target={} artifact={}",
+                    status["release"]["version"].as_str().unwrap_or("?"),
+                    channel,
+                    status["release"]["target"].as_str().unwrap_or("?"),
+                    if available { "ready" } else { "downloading" },
+                ),
+                format!(
+                    "installed={} activation={} error={}",
+                    status["installed_digest"].as_str().unwrap_or("unknown"),
+                    status["activation"]["activation_state"]
+                        .as_str()
+                        .filter(|v| !v.is_empty())
+                        .unwrap_or("unrecorded"),
+                    status["activation"]["last_error"]
+                        .as_str()
+                        .unwrap_or("none"),
+                ),
+            ])
         };
     }
     if action != "apply" {
@@ -880,13 +907,77 @@ async fn update(args: &[String]) -> Result<Vec<String>, ClientError> {
         Some(path) => std::path::PathBuf::from(path),
         None => std::env::current_exe().map_err(ClientError::Io)?,
     };
-    activate_update(&mut client, &artifact, &destination).await?;
+    let activation = activate_update(&mut client, &artifact, &destination).await;
+    let mut state = myceliumd::UpdateState {
+        release_version: Some(release.version.clone()),
+        release_digest: Some(release.artifact_digest.clone()),
+        release_target: Some(release.target.clone()),
+        activation_state: if activation.is_ok() {
+            "active"
+        } else {
+            "failed"
+        }
+        .into(),
+        activated_at: activation.is_ok().then(unix_now),
+        last_error: activation.as_ref().err().map(ToString::to_string),
+    };
+    if let Err(error) = myceliumd::write_update_state(&state) {
+        state.last_error = Some(format!("could not persist update state: {error}"));
+        return Err(ClientError::Io(error));
+    }
+    activation?;
     Ok(vec![format!(
         "activated {} for {} from {}",
         release.version,
         release.target,
         artifact.display()
     )])
+}
+
+fn render_fleet_update_status(
+    peers: &serde_json::Value,
+    json: bool,
+) -> Result<Vec<String>, ClientError> {
+    let rows: Vec<_> = peers
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|peer| {
+            let metrics = &peer["health"]["platform_metrics"];
+            serde_json::json!({
+                "node_id": peer["hello"]["node_id"],
+                "hostname": peer["hello"]["hostname"],
+                "daemon_version": peer["hello"]["daemon_version"],
+                "last_seen": peer["last_seen"],
+                "installed_digest": metrics["mycelium_update.installed_digest"],
+                "staged_digest": metrics["mycelium_update.staged_digest"],
+                "staged_version": metrics["mycelium_update.staged_version"],
+                "staged_state": metrics["mycelium_update.staged_state"],
+                "release_version": metrics["mycelium_update.release_version"],
+                "release_target": metrics["mycelium_update.release_target"],
+                "activation_state": metrics["mycelium_update.activation_state"],
+                "last_error": metrics["mycelium_update.last_error"],
+            })
+        })
+        .collect();
+    if json {
+        return Ok(vec![serde_json::Value::Array(rows).to_string()]);
+    }
+    let mut lines = vec!["fleet update status:".into()];
+    for row in rows {
+        lines.push(format!(
+            "  {} daemon={} installed={} state={} staged={} staged_state={} digest={} error={}",
+            row["hostname"].as_str().unwrap_or("?"),
+            row["daemon_version"].as_str().unwrap_or("?"),
+            row["release_version"].as_str().unwrap_or("unrecorded"),
+            row["activation_state"].as_str().unwrap_or("unrecorded"),
+            row["staged_version"].as_str().unwrap_or("none"),
+            row["staged_state"].as_str().unwrap_or("unknown"),
+            row["installed_digest"].as_str().unwrap_or("unknown"),
+            row["last_error"].as_str().unwrap_or("none"),
+        ));
+    }
+    Ok(lines)
 }
 
 async fn activate_update(

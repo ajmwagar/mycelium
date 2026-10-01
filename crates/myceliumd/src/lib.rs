@@ -23,6 +23,18 @@ pub mod rpc;
 
 use std::path::PathBuf;
 
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct UpdateState {
+    pub release_version: Option<String>,
+    pub release_digest: Option<String>,
+    pub release_target: Option<String>,
+    pub activation_state: String,
+    pub activated_at: Option<u64>,
+    pub last_error: Option<String>,
+}
+
 /// Resolve the state dir. Inferred, not configured, unless overridden.
 pub fn home_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("MYCELIUM_HOME") {
@@ -75,6 +87,28 @@ pub fn peer_observations_path() -> PathBuf {
 
 pub fn artifacts_dir() -> PathBuf {
     home_dir().join("artifacts")
+}
+
+pub fn update_state_path() -> PathBuf {
+    home_dir().join("update-state.json")
+}
+
+pub fn read_update_state() -> UpdateState {
+    std::fs::read(update_state_path())
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+pub fn write_update_state(state: &UpdateState) -> std::io::Result<()> {
+    let path = update_state_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let temporary = path.with_extension("json.tmp");
+    let bytes = serde_json::to_vec_pretty(state).map_err(std::io::Error::other)?;
+    std::fs::write(&temporary, bytes)?;
+    std::fs::rename(temporary, path)
 }
 
 pub fn plugins_dir() -> PathBuf {

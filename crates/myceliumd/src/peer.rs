@@ -208,7 +208,23 @@ impl Mesh {
         tokio::spawn(async move {
             loop {
                 match tokio::task::spawn_blocking(collect_health).await {
-                    Ok(Ok(health)) => {
+                    Ok(Ok(mut health)) => {
+                        if let Some(release) = collector.preferred_release().await {
+                            let ready = artifact_path(&release.artifact_digest)
+                                .map(|path| path.is_file())
+                                .unwrap_or(false);
+                            health.platform_metrics.insert(
+                                "mycelium_update.staged_digest".into(),
+                                release.artifact_digest,
+                            );
+                            health
+                                .platform_metrics
+                                .insert("mycelium_update.staged_version".into(), release.version);
+                            health.platform_metrics.insert(
+                                "mycelium_update.staged_state".into(),
+                                if ready { "ready" } else { "downloading" }.into(),
+                            );
+                        }
                         if let Err(error) = collector.publish(PeerEvent::Health(health)).await {
                             eprintln!("myceliumd: publish local health: {error}");
                         }
@@ -714,21 +730,7 @@ impl Mesh {
     }
 
     async fn next_artifact_request(&self) -> Result<Option<PeerMessage>, AnyError> {
-        let targets = local_compatible_targets();
-        let channel = std::env::var("MYCELIUM_UPDATE_CHANNEL").unwrap_or_else(|_| "canary".into());
-        let release = self
-            .releases()
-            .await
-            .into_iter()
-            .filter(|release| targets.contains(&release.target) && release.channel == channel)
-            .max_by_key(|release| {
-                let preference = targets
-                    .iter()
-                    .position(|target| target == &release.target)
-                    .map(|index| targets.len() - index)
-                    .unwrap_or_default();
-                (release.version.clone(), preference)
-            });
+        let release = self.preferred_release().await;
         let Some(release) = release else {
             return Ok(None);
         };
@@ -747,6 +749,23 @@ impl Mesh {
             offset,
             length: 65_536,
         }))
+    }
+
+    async fn preferred_release(&self) -> Option<ReleaseManifest> {
+        let targets = local_compatible_targets();
+        let channel = std::env::var("MYCELIUM_UPDATE_CHANNEL").unwrap_or_else(|_| "canary".into());
+        self.releases()
+            .await
+            .into_iter()
+            .filter(|release| targets.contains(&release.target) && release.channel == channel)
+            .max_by_key(|release| {
+                let preference = targets
+                    .iter()
+                    .position(|target| target == &release.target)
+                    .map(|index| targets.len() - index)
+                    .unwrap_or_default();
+                (release.version.clone(), preference)
+            })
     }
 }
 
@@ -1143,11 +1162,44 @@ fn now() -> u64 {
 
 fn collect_health() -> Result<HostHealth, AnyError> {
     #[cfg(target_os = "linux")]
-    return collect_linux();
+    let mut health = collect_linux()?;
     #[cfg(target_os = "macos")]
-    return collect_darwin();
-    #[allow(unreachable_code)]
-    Err("health collection supports Linux and Darwin".into())
+    let mut health = collect_darwin()?;
+    add_update_health(&mut health);
+    Ok(health)
+}
+
+fn add_update_health(health: &mut HostHealth) {
+    let state = crate::read_update_state();
+    if let Ok(executable) = std::env::current_exe() {
+        if let Ok(bytes) = std::fs::read(executable) {
+            health.platform_metrics.insert(
+                "mycelium_update.installed_digest".into(),
+                mycelium_peer_protocol::sha256_hex(&bytes),
+            );
+        }
+    }
+    if let Some(value) = state.release_version {
+        health
+            .platform_metrics
+            .insert("mycelium_update.release_version".into(), value);
+    }
+    if let Some(value) = state.release_target {
+        health
+            .platform_metrics
+            .insert("mycelium_update.release_target".into(), value);
+    }
+    if !state.activation_state.is_empty() {
+        health.platform_metrics.insert(
+            "mycelium_update.activation_state".into(),
+            state.activation_state,
+        );
+    }
+    if let Some(value) = state.last_error {
+        health
+            .platform_metrics
+            .insert("mycelium_update.last_error".into(), value);
+    }
 }
 
 #[cfg(target_os = "linux")]
