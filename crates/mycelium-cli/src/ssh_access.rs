@@ -1,0 +1,448 @@
+use std::collections::BTreeSet;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use mycelium_peer_protocol::AccessStatement;
+use serde_json::Value;
+
+pub fn run(args: &[String], state: &Value) -> Result<Vec<String>, String> {
+    match args.first().map(String::as_str) {
+        Some("ca-init") => ca_init(args),
+        Some("issue") => issue(args, state),
+        Some("krl") => krl(args, state),
+        Some("host-bundle") => host_bundle(args),
+        Some(action) => Err(format!("unknown access ssh action `{action}`")),
+        None => Err("access ssh needs ca-init, issue, or krl".into()),
+    }
+}
+
+fn host_bundle(args: &[String]) -> Result<Vec<String>, String> {
+    require_write(args)?;
+    let ca_public = required(args, "--ca-public")?;
+    let krl = required(args, "--krl")?;
+    let destination = Path::new(required(args, "--path")?);
+    if destination.exists() {
+        return Err(format!(
+            "refusing to replace existing SSH host bundle {}",
+            destination.display()
+        ));
+    }
+    let staging = temporary_key_path(destination.to_string_lossy().as_ref());
+    if staging.exists() {
+        fs::remove_dir_all(&staging)
+            .map_err(|e| format!("remove stale staging directory {}: {e}", staging.display()))?;
+    }
+    fs::create_dir_all(&staging)
+        .map_err(|e| format!("create staging directory {}: {e}", staging.display()))?;
+    let result = (|| {
+        fs::copy(ca_public, staging.join("user_ca.pub"))
+            .map_err(|e| format!("copy SSH CA public key: {e}"))?;
+        fs::copy(krl, staging.join("revoked.krl"))
+            .map_err(|e| format!("copy SSH revocation list: {e}"))?;
+        fs::write(
+            staging.join("60-mycelium-access.conf"),
+            "# Managed by Mycelium; existing SSH authentication remains enabled.\n\
+             TrustedUserCAKeys /etc/ssh/mycelium/user_ca.pub\n\
+             RevokedKeys /etc/ssh/mycelium/revoked.krl\n\
+             PubkeyAuthentication yes\n",
+        )
+        .map_err(|e| format!("write sshd drop-in: {e}"))?;
+        fs::write(
+            staging.join("manifest.json"),
+            "{\n  \"version\": 1,\n  \"install\": {\n    \"user_ca.pub\": \"/etc/ssh/mycelium/user_ca.pub\",\n    \"revoked.krl\": \"/etc/ssh/mycelium/revoked.krl\",\n    \"60-mycelium-access.conf\": \"/etc/ssh/sshd_config.d/60-mycelium-access.conf\"\n  },\n  \"validate\": [\"sshd\", \"-t\"],\n  \"reload_after_validation\": true\n}\n",
+        )
+        .map_err(|e| format!("write host bundle manifest: {e}"))?;
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
+        }
+        fs::rename(&staging, destination)
+            .map_err(|e| format!("install host bundle {}: {e}", destination.display()))
+    })();
+    if result.is_err() {
+        let _ = fs::remove_dir_all(&staging);
+    }
+    result?;
+    Ok(vec![format!(
+        "wrote SSH host bundle {}; validate with `sshd -t` before installation",
+        destination.display()
+    )])
+}
+
+fn ca_init(args: &[String]) -> Result<Vec<String>, String> {
+    require_write(args)?;
+    let path = required(args, "--path")?;
+    if Path::new(path).exists() || PathBuf::from(format!("{path}.pub")).exists() {
+        return Err(format!("refusing to replace existing SSH CA at {path}"));
+    }
+    if let Some(parent) = Path::new(path).parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
+    }
+    command(
+        "ssh-keygen",
+        &[
+            "-q",
+            "-t",
+            "ed25519",
+            "-N",
+            "",
+            "-C",
+            "mycelium access authority",
+            "-f",
+            path,
+        ],
+    )?;
+    Ok(vec![format!(
+        "created SSH user CA {path} (public key: {path}.pub)"
+    )])
+}
+
+fn issue(args: &[String], state: &Value) -> Result<Vec<String>, String> {
+    require_write(args)?;
+    let grant_id = required(args, "--grant")?;
+    let public_key_path = required(args, "--public-key")?;
+    let ca = required(args, "--ca")?;
+    let output = required(args, "--path")?;
+    let requested_ttl = parse_duration(value(args, "--ttl").unwrap_or("8h"))?;
+    let now = now()?;
+
+    let grant = state["grants"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|entry| {
+            entry["active"].as_bool() == Some(true)
+                && entry["record"]["statement"]["grant_id"].as_str() == Some(grant_id)
+        })
+        .ok_or_else(|| format!("grant `{grant_id}` is missing, inactive, or revoked"))?;
+    let statement: AccessStatement = serde_json::from_value(grant["record"]["statement"].clone())
+        .map_err(|e| format!("decode grant `{grant_id}`: {e}"))?;
+    let AccessStatement::Grant {
+        principal,
+        serial,
+        unix_users,
+        ssh_public_keys,
+        not_before,
+        not_after,
+        ..
+    } = statement
+    else {
+        return Err(format!("record `{grant_id}` is not a grant"));
+    };
+    if unix_users.is_empty() {
+        return Err(format!("grant `{grant_id}` has no unix_users principals"));
+    }
+    if now < not_before || now >= not_after {
+        return Err(format!("grant `{grant_id}` is outside its validity window"));
+    }
+    let public_key = fs::read_to_string(public_key_path)
+        .map_err(|e| format!("read SSH public key {public_key_path}: {e}"))?;
+    let key_fingerprint = key_material(&public_key)?;
+    if !ssh_public_keys
+        .iter()
+        .filter_map(|key| key_material(key).ok())
+        .any(|allowed| allowed == key_fingerprint)
+    {
+        return Err(format!(
+            "public key is not authorized by grant `{grant_id}`"
+        ));
+    }
+    let ttl = requested_ttl.min(not_after.saturating_sub(now));
+    if ttl == 0 {
+        return Err(format!("grant `{grant_id}` has expired"));
+    }
+
+    let temp = temporary_key_path(public_key_path);
+    fs::copy(public_key_path, &temp)
+        .map_err(|e| format!("prepare certificate input {}: {e}", temp.display()))?;
+    let principals = unix_users.join(",");
+    let validity = format!("+0s:+{ttl}s");
+    let serial = serial.to_string();
+    let identity = format!("mycelium:{grant_id}:{principal}");
+    let result = command(
+        "ssh-keygen",
+        &[
+            "-q",
+            "-s",
+            ca,
+            "-I",
+            &identity,
+            "-n",
+            &principals,
+            "-V",
+            &validity,
+            "-z",
+            &serial,
+            temp.to_str().ok_or("temporary path is not UTF-8")?,
+        ],
+    );
+    let generated = PathBuf::from(format!(
+        "{}-cert.pub",
+        temp.to_string_lossy()
+            .strip_suffix(".pub")
+            .unwrap_or(&temp.to_string_lossy())
+    ));
+    if let Err(error) = result {
+        let _ = fs::remove_file(&temp);
+        let _ = fs::remove_file(&generated);
+        return Err(error);
+    }
+    if let Some(parent) = Path::new(output).parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
+    }
+    fs::rename(&generated, output).map_err(|e| format!("install certificate {output}: {e}"))?;
+    let _ = fs::remove_file(&temp);
+    Ok(vec![format!(
+        "issued {output} for grant={grant_id} serial={serial} principals={principals} ttl={ttl}s"
+    )])
+}
+
+fn krl(args: &[String], state: &Value) -> Result<Vec<String>, String> {
+    require_write(args)?;
+    let ca_public = required(args, "--ca-public")?;
+    let output = required(args, "--path")?;
+    let mut serials: BTreeSet<u64> = state["revocations"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|record| record["statement"]["serial"].as_u64())
+        .collect();
+    // Principal- and grant-wide revocations need to become concrete OpenSSH
+    // serial revocations too. The converged view already performed the
+    // selector matching, so derive the affected serials instead of requiring
+    // the authority to duplicate them in the revoke statement.
+    serials.extend(
+        state["grants"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|grant| {
+                grant["revoked_by"]
+                    .as_array()
+                    .is_some_and(|records| !records.is_empty())
+            })
+            .filter_map(|grant| grant["record"]["statement"]["serial"].as_u64()),
+    );
+    let spec = temporary_key_path(output);
+    let contents = serials
+        .iter()
+        .map(|serial| format!("serial: {serial}\n"))
+        .collect::<String>();
+    fs::write(&spec, contents).map_err(|e| format!("write {}: {e}", spec.display()))?;
+    if let Some(parent) = Path::new(output).parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
+    }
+    let result = command(
+        "ssh-keygen",
+        &[
+            "-q",
+            "-k",
+            "-f",
+            output,
+            "-s",
+            ca_public,
+            spec.to_str().ok_or("temporary path is not UTF-8")?,
+        ],
+    );
+    let _ = fs::remove_file(&spec);
+    result?;
+    Ok(vec![format!(
+        "wrote {output} with {} revoked serial(s)",
+        serials.len()
+    )])
+}
+
+fn value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+    args.iter()
+        .position(|arg| arg == flag)
+        .and_then(|i| args.get(i + 1))
+        .map(String::as_str)
+}
+
+fn required<'a>(args: &'a [String], flag: &str) -> Result<&'a str, String> {
+    value(args, flag).ok_or_else(|| format!("access ssh needs {flag}"))
+}
+
+fn require_write(args: &[String]) -> Result<(), String> {
+    args.iter()
+        .any(|arg| arg == "--write")
+        .then_some(())
+        .ok_or_else(|| "SSH access changes require --write".into())
+}
+
+fn key_material(value: &str) -> Result<String, String> {
+    let mut fields = value.split_whitespace();
+    let kind = fields.next().ok_or("SSH public key has no algorithm")?;
+    let body = fields.next().ok_or("SSH public key has no key material")?;
+    Ok(format!("{kind} {body}"))
+}
+
+fn parse_duration(value: &str) -> Result<u64, String> {
+    let split = value
+        .find(|c: char| !c.is_ascii_digit())
+        .ok_or_else(|| format!("duration `{value}` needs a suffix: s, m, h, or d"))?;
+    let amount = value[..split]
+        .parse::<u64>()
+        .map_err(|_| format!("invalid duration `{value}`"))?;
+    let factor = match &value[split..] {
+        "s" => 1,
+        "m" => 60,
+        "h" => 3600,
+        "d" => 86400,
+        _ => return Err(format!("invalid duration suffix in `{value}`")),
+    };
+    amount
+        .checked_mul(factor)
+        .ok_or_else(|| format!("duration `{value}` is too large"))
+}
+
+fn now() -> Result<u64, String> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .map_err(|e| format!("system clock: {e}"))
+}
+
+fn temporary_key_path(seed: &str) -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "mycelium-ssh-{}-{}",
+        std::process::id(),
+        Path::new(seed)
+            .file_name()
+            .and_then(|v| v.to_str())
+            .unwrap_or("key")
+    ))
+}
+
+fn command(program: &str, args: &[&str]) -> Result<(), String> {
+    let output = Command::new(program)
+        .args(args)
+        .output()
+        .map_err(|e| format!("run {program}: {e}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    Err(format!("{program} failed ({}): {stderr}", output.status))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn durations_are_explicit_and_bounded() {
+        assert_eq!(parse_duration("8h").unwrap(), 28_800);
+        assert_eq!(parse_duration("15m").unwrap(), 900);
+        assert!(parse_duration("8").is_err());
+        assert!(parse_duration("1fortnight").is_err());
+    }
+
+    #[test]
+    fn comments_do_not_change_key_identity() {
+        assert_eq!(
+            key_material("ssh-ed25519 AAAA alice").unwrap(),
+            "ssh-ed25519 AAAA"
+        );
+    }
+
+    #[test]
+    fn openssh_issues_and_revokes_a_granted_key() {
+        if Command::new("ssh-keygen").arg("-h").output().is_err() {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!(
+            "mycelium-ssh-test-{}-{}",
+            std::process::id(),
+            now().unwrap()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let ca = root.join("ca");
+        let user = root.join("user");
+        let cert = root.join("user-cert.pub");
+        command(
+            "ssh-keygen",
+            &["-q", "-t", "ed25519", "-N", "", "-f", ca.to_str().unwrap()],
+        )
+        .unwrap();
+        command(
+            "ssh-keygen",
+            &[
+                "-q",
+                "-t",
+                "ed25519",
+                "-N",
+                "",
+                "-f",
+                user.to_str().unwrap(),
+            ],
+        )
+        .unwrap();
+        let public_key = fs::read_to_string(user.with_extension("pub")).unwrap();
+        let timestamp = now().unwrap();
+        let mut state = serde_json::json!({
+            "grants": [{
+                "active": true,
+                "revoked_by": [],
+                "record": { "statement": {
+                    "kind": "grant", "grant_id": "grant-1", "principal": "oidc:https://issuer.example#user-42",
+                    "serial": 42, "roles": [], "scopes": ["site:home"], "unix_users": ["avery"],
+                    "ssh_public_keys": [public_key], "not_before": timestamp - 1, "not_after": timestamp + 3600
+                }}
+            }],
+            "revocations": []
+        });
+        let issue_args = vec![
+            "issue",
+            "--grant",
+            "grant-1",
+            "--public-key",
+            user.with_extension("pub").to_str().unwrap(),
+            "--ca",
+            ca.to_str().unwrap(),
+            "--path",
+            cert.to_str().unwrap(),
+            "--ttl",
+            "10m",
+            "--write",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+        issue(&issue_args, &state).unwrap();
+        assert!(cert.exists());
+        state["grants"][0]["active"] = serde_json::json!(false);
+        state["grants"][0]["revoked_by"] = serde_json::json!(["revoke-1"]);
+        state["revocations"] = serde_json::json!([{
+            "statement": { "kind": "revoke", "revocation_id": "revoke-1", "grant_id": "grant-1", "revoked_at": timestamp, "reason": "test" }
+        }]);
+        let krl_path = root.join("revoked.krl");
+        let krl_args = vec![
+            "krl",
+            "--ca-public",
+            ca.with_extension("pub").to_str().unwrap(),
+            "--path",
+            krl_path.to_str().unwrap(),
+            "--write",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+        krl(&krl_args, &state).unwrap();
+        let query = Command::new("ssh-keygen")
+            .args([
+                "-Q",
+                "-f",
+                krl_path.to_str().unwrap(),
+                cert.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            !query.status.success(),
+            "certificate serial 42 should be revoked"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+}

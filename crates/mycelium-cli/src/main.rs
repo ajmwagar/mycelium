@@ -6,6 +6,8 @@
 //! applying it.
 
 mod enroll;
+mod oidc;
+mod ssh_access;
 
 use mycelium_core::{
     ActionPlan, ActionRisk, AllocationReceipt, BootReachability, DiscoveryProtocol, LogicalNetwork,
@@ -91,6 +93,11 @@ usage:
   mycelium access list [--json]
   mycelium access keygen --path PATH --write [--json]
   mycelium access publish --statement PATH --signing-key PATH --write [--dry-run] [--json]
+  mycelium access ssh ca-init --path PRIVATE-KEY --write [--json]
+  mycelium access ssh issue --grant ID --public-key PATH --ca PRIVATE-KEY --path CERT --ttl 8h --write [--json]
+  mycelium access ssh krl --ca-public PATH --path KRL --write [--json]
+  mycelium access ssh host-bundle --ca-public PATH --krl PATH --path DIR --write [--json]
+  mycelium access oidc verify --issuer URL --audience ID --token-env VAR [--json]
   mycelium update status [--channel CHANNEL] [--json]
   mycelium update apply [--channel CHANNEL] [--path INSTALLED-BINARY] --write
   mycelium enroll init [--path CA-DIR] --write
@@ -507,6 +514,14 @@ async fn run(cmd: &str, args: &[String]) -> Result<Vec<String>, ClientError> {
 }
 
 async fn access(args: &[String]) -> Result<Vec<String>, ClientError> {
+    if args.first().is_some_and(|value| value == "ssh") {
+        let mut client = connect().await?;
+        let state = client.call(&Request::AccessList).await?;
+        return ssh_access::run(&args[1..], &state).map_err(access_error);
+    }
+    if args.first().is_some_and(|value| value == "oidc") {
+        return oidc::run(&args[1..]).await.map_err(access_error);
+    }
     let flags = parse_flags(args);
     let action = flags.rest.first().map(String::as_str).unwrap_or("list");
     let request = match action {
@@ -568,6 +583,13 @@ async fn access(args: &[String]) -> Result<Vec<String>, ClientError> {
         ));
     }
     Ok(lines)
+}
+
+fn access_error(message: String) -> ClientError {
+    ClientError::Rpc {
+        message,
+        kind: "access".into(),
+    }
 }
 
 async fn enroll_command(args: &[String]) -> Result<Vec<String>, ClientError> {
