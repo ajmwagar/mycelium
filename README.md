@@ -226,7 +226,7 @@ Compilation belongs to the external build pipeline (for example Fab). The
 pipeline hands Mycelium a JSON release-set manifest whose relative binary paths
 are resolved from the manifest's directory:
 
-The checked-in Fab workflow builds static-musl artifacts for both Linux
+The centrally managed Fab workflow builds static-musl artifacts for both Linux
 architectures. Linux peers treat musl and GNU releases as compatible while
 preferring musl at the same version, allowing an existing GNU installation to
 migrate onto the portable artifact. Fab emits `dist/release-set.json` and
