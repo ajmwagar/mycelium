@@ -702,10 +702,9 @@ fn validate_gateway_url(value: &str) -> Result<(), String> {
     let url = reqwest::Url::parse(value).map_err(|e| format!("invalid gateway URL: {e}"))?;
     let private = url.host_str().is_some_and(|host| {
         host == "localhost"
-            || host.parse::<std::net::IpAddr>().is_ok_and(|ip| match ip {
-                std::net::IpAddr::V4(ip) => ip.is_loopback() || ip.is_private(),
-                std::net::IpAddr::V6(ip) => ip.is_loopback() || ip.is_unique_local(),
-            })
+            || host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(crate::pair::private_transport_ip)
     });
     if url.scheme() != "https" && !(url.scheme() == "http" && private) {
         return Err("gateway URL must use HTTPS (HTTP is allowed only on private networks)".into());
@@ -784,6 +783,7 @@ mod tests {
         assert!(validate_gateway_url("https://access.example.test").is_ok());
         assert!(validate_gateway_url("http://127.0.0.1:8787").is_ok());
         assert!(validate_gateway_url("http://192.168.1.2:8787").is_ok());
+        assert!(validate_gateway_url("http://100.120.101.5:8787").is_ok());
         assert!(validate_gateway_url("http://access.example.test").is_err());
         assert!(validate_gateway_url("https://user:secret@access.example.test").is_err());
     }

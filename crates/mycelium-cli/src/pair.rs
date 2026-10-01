@@ -63,11 +63,7 @@ fn validate_advertise(value: &str) -> Result<(), String> {
     }
     let private = url.scheme() == "http"
         && url.host_str().is_some_and(|host| {
-            host == "localhost"
-                || host.parse::<IpAddr>().is_ok_and(|ip| match ip {
-                    IpAddr::V4(ip) => ip.is_private() || ip.is_loopback(),
-                    IpAddr::V6(ip) => ip.is_unique_local() || ip.is_loopback(),
-                })
+            host == "localhost" || host.parse::<IpAddr>().is_ok_and(private_transport_ip)
         });
     if private {
         Ok(())
@@ -76,6 +72,16 @@ fn validate_advertise(value: &str) -> Result<(), String> {
             "pairing advertise URL must use HTTPS unless it is a private or loopback address"
                 .into(),
         )
+    }
+}
+
+pub(crate) fn private_transport_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => {
+            let octets = ip.octets();
+            ip.is_private() || ip.is_loopback() || (octets[0] == 100 && (octets[1] & 0xc0) == 0x40)
+        }
+        IpAddr::V6(ip) => ip.is_unique_local() || ip.is_loopback(),
     }
 }
 
@@ -93,6 +99,7 @@ mod tests {
     #[test]
     fn public_plaintext_pairing_is_rejected() {
         assert!(validate_advertise("http://192.168.1.2:8788").is_ok());
+        assert!(validate_advertise("http://100.120.101.5:8788").is_ok());
         assert!(validate_advertise("http://127.0.0.1:8788").is_ok());
         assert!(validate_advertise("http://203.0.113.4:8788").is_err());
         assert!(validate_advertise("https://pair.example.test").is_ok());
