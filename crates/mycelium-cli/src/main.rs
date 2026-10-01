@@ -102,7 +102,8 @@ usage:
   mycelium access oidc verify --issuer URL --audience ID --token-env VAR [--json]
   mycelium access oidc ssh-issue --issuer URL --audience ID --token-env VAR --public-key PATH --ca PRIVATE-KEY --path CERT [--grant ID] [--ttl 8h] --write [--json]
   mycelium access oidc gateway --listen 127.0.0.1:8787 --issuer URL --audience ID --client-id ID --client-secret-env VAR --callback-url HTTPS-URL --ca PRIVATE-KEY --write
-  mycelium access oidc join --gateway HTTPS-URL --public-key PATH --certificate PATH [--grant ID] [--ttl 1h] --write
+  mycelium access oidc join --gateway HTTPS-URL --public-key PATH --certificate PATH [--grant ID] [--ttl 8h] --write
+    [--provider NAME] [--providers PATH]
   mycelium update status [--channel CHANNEL] [--json]
   mycelium update apply [--channel CHANNEL] [--path INSTALLED-BINARY] --write
   mycelium enroll init [--path CA-DIR] --write

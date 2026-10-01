@@ -226,7 +226,7 @@ mycelium access oidc join \
   --gateway https://mycelium-access.example \
   --public-key ~/.ssh/id_ed25519.pub \
   --certificate ~/.ssh/id_ed25519-cert.pub \
-  --ttl 1h --write
+  --ttl 8h --write
 
 mycelium access ssh client-config \
   --host mycelium-lab --hostname lab.example --user buddy \
@@ -239,6 +239,29 @@ Include the generated fragment from `~/.ssh/config`. Provider configuration,
 client credentials, grants, CA material, certificates, and runtime inventory
 belong in deployment state, never the source tree. The gateway reloads current
 grant/revocation state for every request and never returns the CA key.
+
+An existing login CLI can supply the token through a provider-neutral
+credential process. Store this deployment configuration outside the repository
+at `$MYCELIUM_HOME/auth-providers.json`:
+
+```json
+{
+  "providers": {
+    "company-sso": {
+      "issuer": "https://identity.example",
+      "audience": "mycelium",
+      "credential_process": [
+        "fpl", "auth", "token", "--audience", "mycelium", "--json"
+      ]
+    }
+  }
+}
+```
+
+Then use `mycelium access oidc join --provider company-sso ...`. Mycelium runs
+the argv array directly without a shell and independently verifies the returned
+JWT against discovery, JWKS, issuer, and audience before sending it to the
+certificate gateway.
 
 The authority private key stays off ordinary peers. Membership in the mTLS
 mesh permits transport only; it does not permit creating access statements.

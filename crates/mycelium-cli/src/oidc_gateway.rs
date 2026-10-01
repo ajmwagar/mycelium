@@ -75,6 +75,18 @@ struct ErrorResponse {
     error: String,
 }
 
+#[derive(Deserialize)]
+struct ProviderFile {
+    providers: HashMap<String, CredentialProvider>,
+}
+
+#[derive(Deserialize)]
+struct CredentialProvider {
+    issuer: String,
+    audience: String,
+    credential_process: Vec<String>,
+}
+
 pub async fn serve(args: &[String]) -> Result<Vec<String>, String> {
     require_write(args)?;
     let listen = required(args, "--listen")?
@@ -367,7 +379,23 @@ pub async fn join(args: &[String]) -> Result<Vec<String>, String> {
         ));
     }
     let client = reqwest::Client::new();
-    let response = if let Some(token_env) = value(args, "--token-env") {
+    let configured_token = value(args, "--provider")
+        .map(|provider| credential_process(args, provider))
+        .transpose()?;
+    let response = if let Some((token, provider)) = configured_token {
+        crate::oidc::verify_token(&provider.issuer, &provider.audience, &token, None).await?;
+        client
+            .post(format!("{gateway}/v1/ssh/issue"))
+            .json(&IssueRequest {
+                token,
+                public_key,
+                grant: value(args, "--grant").map(str::to_owned),
+                ttl: value(args, "--ttl").unwrap_or("8h").to_owned(),
+            })
+            .send()
+            .await
+            .map_err(|e| format!("request SSH certificate from gateway: {e}"))?
+    } else if let Some(token_env) = value(args, "--token-env") {
         let token = std::env::var(token_env)
             .map_err(|_| format!("OIDC token environment variable `{token_env}` is not set"))?;
         client
@@ -376,7 +404,7 @@ pub async fn join(args: &[String]) -> Result<Vec<String>, String> {
                 token,
                 public_key,
                 grant: value(args, "--grant").map(str::to_owned),
-                ttl: value(args, "--ttl").unwrap_or("1h").to_owned(),
+                ttl: value(args, "--ttl").unwrap_or("8h").to_owned(),
             })
             .send()
             .await
@@ -387,7 +415,7 @@ pub async fn join(args: &[String]) -> Result<Vec<String>, String> {
             .json(&StartRequest {
                 public_key,
                 grant: value(args, "--grant").map(str::to_owned),
-                ttl: value(args, "--ttl").unwrap_or("1h").to_owned(),
+                ttl: value(args, "--ttl").unwrap_or("8h").to_owned(),
             })
             .send()
             .await
@@ -454,6 +482,42 @@ pub async fn join(args: &[String]) -> Result<Vec<String>, String> {
     )])
 }
 
+fn credential_process(args: &[String], name: &str) -> Result<(String, CredentialProvider), String> {
+    let path = value(args, "--providers")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| myceliumd::home_dir().join("auth-providers.json"));
+    let raw = fs::read_to_string(&path)
+        .map_err(|e| format!("read auth providers {}: {e}", path.display()))?;
+    let mut file: ProviderFile = serde_json::from_str(&raw)
+        .map_err(|e| format!("parse auth providers {}: {e}", path.display()))?;
+    let provider = file
+        .providers
+        .remove(name)
+        .ok_or_else(|| format!("auth provider `{name}` is not configured"))?;
+    let (program, process_args) = provider
+        .credential_process
+        .split_first()
+        .ok_or_else(|| format!("auth provider `{name}` has an empty credential_process"))?;
+    let output = std::process::Command::new(program)
+        .args(process_args)
+        .output()
+        .map_err(|e| format!("run credential process for `{name}`: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "credential process for `{name}` exited {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let body: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|e| format!("credential process for `{name}` returned invalid JSON: {e}"))?;
+    let token = body["access_token"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("credential process for `{name}` returned no access_token"))?;
+    Ok((token.to_owned(), provider))
+}
+
 fn validate_gateway_url(value: &str) -> Result<(), String> {
     let url = reqwest::Url::parse(value).map_err(|e| format!("invalid gateway URL: {e}"))?;
     let loopback = url.host_str().is_some_and(|host| {
@@ -509,7 +573,7 @@ fn path_string(path: &Path) -> Result<String, String> {
 }
 
 fn default_ttl() -> String {
-    "1h".into()
+    "8h".into()
 }
 
 fn value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
@@ -540,5 +604,18 @@ mod tests {
         assert!(validate_gateway_url("http://127.0.0.1:8787").is_ok());
         assert!(validate_gateway_url("http://access.example.test").is_err());
         assert!(validate_gateway_url("https://user:secret@access.example.test").is_err());
+    }
+
+    #[test]
+    fn credential_process_uses_argv_without_a_shell() {
+        let root = temporary_root();
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("providers.json");
+        fs::write(&path, r#"{"providers":{"test":{"issuer":"https://issuer.example","audience":"mycelium","credential_process":["/bin/echo","{\"access_token\":\"jwt\"}"]}}}"#).unwrap();
+        let args = vec!["--providers".into(), path.to_string_lossy().into_owned()];
+        let (token, provider) = credential_process(&args, "test").unwrap();
+        assert_eq!(token, "jwt");
+        assert_eq!(provider.audience, "mycelium");
+        fs::remove_dir_all(root).unwrap();
     }
 }

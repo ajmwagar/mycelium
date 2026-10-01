@@ -157,7 +157,7 @@ pub(crate) fn issue_for_oidc(
     state: &Value,
     principal: &str,
     audience: &str,
-    identity_expires_at: u64,
+    _identity_expires_at: u64,
 ) -> Result<Vec<String>, String> {
     let grant_id = if let Some(grant_id) = value(args, "--grant") {
         grant_id.to_owned()
@@ -190,13 +190,7 @@ pub(crate) fn issue_for_oidc(
         bound_args.push("--grant".into());
         bound_args.push(grant_id);
     }
-    issue_bound(
-        &bound_args,
-        state,
-        Some(principal),
-        Some(audience),
-        Some(identity_expires_at),
-    )
+    issue_bound(&bound_args, state, Some(principal), Some(audience), None)
 }
 
 fn issue_bound(
@@ -620,7 +614,7 @@ mod tests {
         .into_iter()
         .map(str::to_owned)
         .collect::<Vec<_>>();
-        issue_for_oidc(
+        let issued = issue_for_oidc(
             &oidc_args,
             &state,
             "oidc:https://issuer.example#user-42",
@@ -629,6 +623,10 @@ mod tests {
         )
         .unwrap();
         assert!(oidc_cert.exists());
+        assert!(
+            issued[0].contains("ttl=600s"),
+            "the exchanged SSH credential must not inherit the JWT's remaining 300 seconds"
+        );
 
         let mut wrong_principal_args = oidc_args.clone();
         wrong_principal_args.extend(["--grant".into(), "grant-1".into()]);

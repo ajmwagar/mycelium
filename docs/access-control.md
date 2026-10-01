@@ -82,8 +82,11 @@ OIDC_TOKEN='...' mycelium access oidc ssh-issue \
 
 Issuance verifies discovery, JWKS signature, algorithm, key ID, issuer,
 audience, subject, and expiry. It then requires one active signed grant for
-the normalized issuer/subject and audience. The certificate lifetime is
-capped by the requested TTL, grant expiry, and JWT expiry. Neither the JWT nor
+the normalized issuer/subject and audience. The JWT must be valid at exchange
+time, but the resulting SSH certificate is an independent credential whose
+lifetime is capped by the requested TTL and grant expiry. This deliberately
+lets already-authenticated operators retain bounded access during an IdP
+outage without creating a permanent credential. Neither the JWT nor
 the IdP signing keys enter Mycelium gossip or persistent state.
 
 For self-service use, run `mycelium access oidc gateway` on the authority host
