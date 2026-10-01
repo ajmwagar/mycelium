@@ -30,6 +30,7 @@ const DIGEST_INTERVAL: Duration = Duration::from_secs(15);
 const ARTIFACT_REQUEST_INTERVAL: Duration = Duration::from_secs(1);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_OBSERVATIONS_PER_MESSAGE: usize = 64;
+const MAX_OBSERVATION_MESSAGE_BYTES: usize = 900 * 1024;
 
 type AnyError = Box<dyn Error + Send + Sync>;
 
@@ -683,10 +684,14 @@ impl Mesh {
                                 .map(|(_, envelope)| envelope.clone())
                                 .collect::<Vec<_>>();
                             if !newer.is_empty() {
-                                for chunk in newer.chunks(MAX_OBSERVATIONS_PER_MESSAGE) {
+                                let batches = tokio::task::spawn_blocking(move || {
+                                    observation_batches(newer)
+                                })
+                                .await??;
+                                for chunk in batches {
                                     send(
                                         &mut writer,
-                                        &PeerMessage::Observations(chunk.to_vec()),
+                                        &PeerMessage::Observations(chunk),
                                     )
                                     .await?;
                                 }
@@ -774,6 +779,37 @@ impl Mesh {
                 (release.version.clone(), preference)
             })
     }
+}
+
+fn observation_batches(
+    observations: Vec<SignedEnvelope>,
+) -> Result<Vec<Vec<SignedEnvelope>>, AnyError> {
+    let mut batches = Vec::new();
+    let mut current = Vec::new();
+    let mut current_bytes = 32usize;
+    for observation in observations {
+        let bytes = serde_json::to_vec(&observation)?.len() + 1;
+        if bytes > MAX_OBSERVATION_MESSAGE_BYTES {
+            eprintln!(
+                "myceliumd: skipping oversized {} byte observation from {}",
+                bytes, observation.origin
+            );
+            continue;
+        }
+        if !current.is_empty()
+            && (current.len() == MAX_OBSERVATIONS_PER_MESSAGE
+                || current_bytes + bytes > MAX_OBSERVATION_MESSAGE_BYTES)
+        {
+            batches.push(std::mem::take(&mut current));
+            current_bytes = 32;
+        }
+        current_bytes += bytes;
+        current.push(observation);
+    }
+    if !current.is_empty() {
+        batches.push(current);
+    }
+    Ok(batches)
 }
 
 #[derive(Clone)]
@@ -1418,6 +1454,66 @@ fn parse_darwin_swap(text: &str) -> (u64, u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn observation_batches_are_bounded_by_wire_size() {
+        let key = SigningKey::from_bytes(&[31; 32]);
+        let observations = (1..=3)
+            .map(|sequence| {
+                SignedEnvelope::sign(
+                    &key,
+                    sequence,
+                    sequence,
+                    PeerEvent::Topology(TopologySnapshot {
+                        schema_version: 1,
+                        topology: serde_json::json!({"payload": "x".repeat(480_000)}),
+                    }),
+                )
+                .unwrap()
+            })
+            .collect();
+        let batches = observation_batches(observations).unwrap();
+        assert_eq!(batches.len(), 3);
+        assert!(batches.iter().all(|batch| {
+            serde_json::to_vec(&PeerMessage::Observations(batch.clone()))
+                .unwrap()
+                .len()
+                < 1_048_576
+        }));
+    }
+
+    #[test]
+    fn oversized_observation_does_not_block_smaller_events() {
+        let key = SigningKey::from_bytes(&[32; 32]);
+        let oversized = SignedEnvelope::sign(
+            &key,
+            1,
+            1,
+            PeerEvent::Topology(TopologySnapshot {
+                schema_version: 1,
+                topology: serde_json::json!({"payload": "x".repeat(MAX_OBSERVATION_MESSAGE_BYTES)}),
+            }),
+        )
+        .unwrap();
+        let hello = SignedEnvelope::sign(&key, 2, 2, PeerEvent::Hello(test_hello(&key))).unwrap();
+        let batches = observation_batches(vec![oversized, hello]).unwrap();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].len(), 1);
+        assert!(matches!(batches[0][0].event, PeerEvent::Hello(_)));
+    }
+
+    fn test_hello(key: &SigningKey) -> PeerHello {
+        PeerHello {
+            node_id: encode_hex(key.verifying_key().as_bytes()),
+            protocol_version: PROTOCOL_VERSION,
+            site: "test".into(),
+            hostname: "test".into(),
+            platform: Platform::Linux,
+            architecture: "x86_64".into(),
+            daemon_version: "test".into(),
+            capabilities: Vec::new(),
+        }
+    }
 
     fn test_dir(name: &str) -> std::path::PathBuf {
         let path = std::env::temp_dir().join(format!(
