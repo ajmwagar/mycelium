@@ -966,7 +966,12 @@ impl Daemon {
                 let device = saved
                     .values()
                     .find(|device| {
-                        device.meta.id.to_string().eq_ignore_ascii_case(&selector)
+                        let id = device.meta.id.to_string();
+                        let inferred_name = id
+                            .strip_prefix(&format!("{}-", device.meta.driver))
+                            .unwrap_or(&id);
+                        id.eq_ignore_ascii_case(&selector)
+                            || inferred_name.eq_ignore_ascii_case(&selector)
                             || device.meta.address.eq_ignore_ascii_case(&selector)
                     })
                     .ok_or_else(|| MyceliumError::UnknownDevice(selector.clone()))?;
@@ -987,11 +992,19 @@ impl Daemon {
                             device.meta.id
                         ))
                     })?;
+                let target = Target::parse(&device.target)?;
+                let Target::Host { host, port, jump } = target else {
+                    return Err(MyceliumError::Validation(format!(
+                        "{} is a subnet target, not an interactive SSH host",
+                        device.meta.id
+                    )));
+                };
                 to_value(serde_json::json!({
                     "device": device.meta.id,
-                    "host": device.meta.address,
+                    "host": host,
                     "username": username,
-                    "port": 22,
+                    "port": port.unwrap_or(22),
+                    "jump": jump,
                     "identity": device.key_path,
                 }))
                 .map_err(json_err)
@@ -1631,10 +1644,10 @@ mod tests {
     async fn ssh_plan_resolves_inventory_identity_without_secrets() {
         let daemon = daemon_with_fake();
         daemon.saved.lock().await.insert(
-            DeviceId::new("titan"),
+            DeviceId::new("linux-lab-node"),
             SavedDevice {
                 meta: DeviceMeta {
-                    id: DeviceId::new("titan"),
+                    id: DeviceId::new("linux-lab-node"),
                     kind: mycelium_core::DeviceKind::Other,
                     driver: "linux".into(),
                     vendor: None,
@@ -1642,22 +1655,23 @@ mod tests {
                     firmware: None,
                     address: "100.83.7.116".into(),
                 },
-                target: "titan".into(),
-                username: Some("avery".into()),
+                target: "100.83.7.116@gateway".into(),
+                username: Some("operator".into()),
                 password_env: Some("SECRET_PASSWORD".into()),
                 key_path: Some("~/.ssh/id_ed25519".into()),
             },
         );
         let response = daemon
             .dispatch(Request::SshPlan {
-                selector: "TITAN".into(),
+                selector: "LAB-NODE".into(),
                 username: None,
             })
             .await;
         assert!(response.ok, "{response:?}");
         let plan = response.result.unwrap();
         assert_eq!(plan["host"], "100.83.7.116");
-        assert_eq!(plan["username"], "avery");
+        assert_eq!(plan["username"], "operator");
+        assert_eq!(plan["jump"], "gateway");
         assert_eq!(plan["identity"], "~/.ssh/id_ed25519");
         assert!(plan.get("password_env").is_none());
     }

@@ -275,11 +275,13 @@ mycelium ssh lab-node
 mycelium ssh lab-node -- uname -a
 ```
 
-The daemon derives the destination and Unix user from inventory. The CLI uses
-only the selected identity and Mycelium certificate, so a missing certificate
-fails loudly instead of silently falling back to unrelated agent keys. Override
-paths with `--key` and `--certificate`, or set `MYCELIUM_SSH_IDENTITY` and
-`MYCELIUM_SSH_CERTIFICATE`.
+The daemon derives the destination, Unix user, port, and optional ProxyJump
+from inventory targets such as `host:2222@gateway`. The CLI prefers
+`$MYCELIUM_HOME/ssh/<device-id>-cert.pub`, then the shared
+`$MYCELIUM_HOME/ssh/user-cert.pub`. It uses only the selected identity and
+certificate, so missing material fails loudly instead of silently falling back
+to unrelated agent keys. Override paths with `--key` and `--certificate`, or
+set `MYCELIUM_SSH_IDENTITY` and `MYCELIUM_SSH_CERTIFICATE`.
 
 Host CA trust is a privileged bootstrap/reconciliation action. Mycelium
 generates the host bundle and an optional narrowly scoped client fragment; it

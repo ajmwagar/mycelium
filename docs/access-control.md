@@ -175,9 +175,10 @@ mycelium ssh mycelium-lab
 mycelium ssh mycelium-lab -- hostname
 ```
 
-Mycelium resolves the host and Unix user from inventory and selects the managed
-identity and certificate. Generate a narrowly scoped client fragment only when
-direct `ssh` compatibility is desired:
+Mycelium resolves the host, Unix user, port, and optional ProxyJump from
+inventory and selects a device-specific certificate when one exists, otherwise
+the shared managed certificate. Generate a narrowly scoped client fragment
+only when direct `ssh` compatibility is desired:
 
 ```sh
 mycelium access ssh client-config \

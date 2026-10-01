@@ -1079,12 +1079,21 @@ async fn ssh(args: &[String]) -> Result<Vec<String>, ClientError> {
         .or_else(|| plan["identity"].as_str().map(expand_home))
         .or_else(|| std::env::var("MYCELIUM_SSH_IDENTITY").ok().map(expand_home))
         .unwrap_or_else(|| expand_home("~/.ssh/id_ed25519"));
+    let device = plan["device"]
+        .as_str()
+        .ok_or(err_usage("SSH plan has no device"))?;
+    let device_certificate = myceliumd::home_dir().join(format!("ssh/{device}-cert.pub"));
     let certificate = options
         .certificate
         .or_else(|| {
             std::env::var("MYCELIUM_SSH_CERTIFICATE")
                 .ok()
                 .map(expand_home)
+        })
+        .or_else(|| {
+            device_certificate
+                .is_file()
+                .then(|| device_certificate.to_string_lossy().into())
         })
         .unwrap_or_else(|| {
             myceliumd::home_dir()
@@ -1103,10 +1112,12 @@ async fn ssh(args: &[String]) -> Result<Vec<String>, ClientError> {
     let port = options
         .port
         .unwrap_or_else(|| plan["port"].as_u64().unwrap_or(22) as u16);
+    let jump = plan["jump"].as_str();
     let argv = ssh_argv(
         host,
         username,
         port,
+        jump,
         &identity,
         &certificate,
         &options.extra,
@@ -1117,6 +1128,7 @@ async fn ssh(args: &[String]) -> Result<Vec<String>, ClientError> {
             "host": host,
             "username": username,
             "port": port,
+            "jump": jump,
             "identity": identity,
             "certificate": certificate,
             "argv": argv,
@@ -1204,6 +1216,7 @@ fn ssh_argv(
     host: &str,
     username: &str,
     port: u16,
+    jump: Option<&str>,
     identity: &str,
     certificate: &str,
     extra: &[String],
@@ -1218,6 +1231,9 @@ fn ssh_argv(
         "-p".into(),
         port.to_string(),
     ];
+    if let Some(jump) = jump {
+        argv.extend(["-J".into(), jump.into()]);
+    }
     argv.push(format!("{username}@{host}"));
     argv.extend_from_slice(extra);
     argv
@@ -2280,12 +2296,21 @@ mod ssh_command_tests {
 
     #[test]
     fn ssh_argv_uses_only_explicit_identity_material() {
-        let argv = ssh_argv("titan", "avery", 22, "/key", "/cert", &[]);
+        let argv = ssh_argv(
+            "lab-node",
+            "operator",
+            22,
+            Some("gateway"),
+            "/key",
+            "/cert",
+            &[],
+        );
         assert!(argv
             .windows(2)
             .any(|pair| pair == ["-o", "IdentitiesOnly=yes"]));
         assert!(argv.contains(&"IdentityFile=/key".into()));
         assert!(argv.contains(&"CertificateFile=/cert".into()));
-        assert_eq!(argv.last().map(String::as_str), Some("avery@titan"));
+        assert!(argv.windows(2).any(|pair| pair == ["-J", "gateway"]));
+        assert_eq!(argv.last().map(String::as_str), Some("operator@lab-node"));
     }
 }
