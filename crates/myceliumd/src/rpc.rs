@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -602,6 +602,87 @@ impl Daemon {
                 }))
                 .map_err(json_err)
             }
+            Request::AllocationRecord {
+                site,
+                vlan,
+                subnet,
+                gateway,
+                source,
+                write,
+                dry_run,
+            } => {
+                validate_site_name(&site)?;
+                validate_evidence_source(&source)?;
+                let allocation = match (vlan, subnet) {
+                    (Some(id), None) => {
+                        if gateway.is_some() {
+                            return Err(MyceliumError::Validation(
+                                "an allocation gateway requires --subnet".into(),
+                            ));
+                        }
+                        AllocationValue::Vlan {
+                            id: mycelium_core::VlanId(id),
+                        }
+                    }
+                    (None, Some(subnet)) => {
+                        let (network, prefix) = parse_cidr(&subnet)?;
+                        let gateway = gateway
+                            .map(|value| {
+                                value.parse().map_err(|_| {
+                                    MyceliumError::Validation(format!(
+                                        "invalid gateway address `{value}`"
+                                    ))
+                                })
+                            })
+                            .transpose()?;
+                        AllocationValue::Subnet {
+                            network,
+                            prefix,
+                            gateway,
+                        }
+                    }
+                    _ => {
+                        return Err(MyceliumError::Validation(
+                            "allocation record needs exactly one of --vlan or --subnet".into(),
+                        ))
+                    }
+                };
+                let mut candidate =
+                    AllocationReceipt::imported(&site, allocation, BTreeSet::from([source]));
+                if let Some(existing) = self
+                    .allocations
+                    .lock()
+                    .await
+                    .get(&candidate.identity)
+                    .cloned()
+                {
+                    let mut merged = existing;
+                    let previous_sources = merged.basis.sources.len();
+                    merged.basis.sources.extend(candidate.basis.sources);
+                    if merged.basis.sources.len() != previous_sources {
+                        merged.generation = merged.generation.saturating_add(1);
+                    }
+                    candidate = merged;
+                }
+                if dry_run {
+                    return to_value(serde_json::json!({
+                        "dry_run": true,
+                        "receipt": candidate,
+                    }))
+                    .map_err(json_err);
+                }
+                if !write {
+                    return Err(MyceliumError::WritesNotPermitted(
+                        "allocation recording requires --write".into(),
+                    ));
+                }
+                self.allocations
+                    .lock()
+                    .await
+                    .insert(candidate.identity.clone(), candidate.clone());
+                self.persist_allocations().await?;
+                to_value(candidate).map_err(json_err)
+            }
             Request::NetworkList => {
                 let networks = self
                     .networks
@@ -624,20 +705,24 @@ impl Daemon {
                 validate_network_name(&name)?;
                 let (network_address, prefix) = parse_cidr(&subnet)?;
                 let allocations = self.allocations.lock().await;
-                let vlan_receipt = allocations
-                    .values()
-                    .find(|receipt| {
-                        receipt.site == site
-                            && receipt.allocation
-                                == AllocationValue::Vlan {
-                                    id: mycelium_core::VlanId(vlan),
-                                }
+                let vlan_receipt = vlan
+                    .map(|vlan| {
+                        allocations
+                            .values()
+                            .find(|receipt| {
+                                receipt.site == site
+                                    && receipt.allocation
+                                        == AllocationValue::Vlan {
+                                            id: mycelium_core::VlanId(vlan),
+                                        }
+                            })
+                            .ok_or_else(|| {
+                                MyceliumError::Validation(format!(
+                                    "no allocation receipt for site `{site}` VLAN {vlan}"
+                                ))
+                            })
                     })
-                    .ok_or_else(|| {
-                        MyceliumError::Validation(format!(
-                            "no allocation receipt for site `{site}` VLAN {vlan}"
-                        ))
-                    })?;
+                    .transpose()?;
                 let subnet_receipt = allocations
                     .values()
                     .find(|receipt| {
@@ -653,10 +738,10 @@ impl Daemon {
                             "no allocation receipt for site `{site}` subnet {network_address}/{prefix}"
                         ))
                     })?;
-                let receipt_ids = std::collections::BTreeSet::from([
-                    vlan_receipt.identity.clone(),
-                    subnet_receipt.identity.clone(),
-                ]);
+                let mut receipt_ids = BTreeSet::from([subnet_receipt.identity.clone()]);
+                if let Some(vlan_receipt) = vlan_receipt {
+                    receipt_ids.insert(vlan_receipt.identity.clone());
+                }
                 drop(allocations);
                 let candidate = LogicalNetwork::adopted(&site, &name, receipt_ids.clone());
                 let networks = self.networks.lock().await;
@@ -1193,6 +1278,20 @@ fn validate_site_name(site: &str) -> Result<()> {
     {
         return Err(MyceliumError::Validation(
             "site must be 1-64 lowercase letters, digits, or hyphens".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_evidence_source(source: &str) -> Result<()> {
+    if source.is_empty()
+        || source.len() > 256
+        || source
+            .bytes()
+            .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
+    {
+        return Err(MyceliumError::Validation(
+            "allocation source must be a non-empty, whitespace-free identifier".into(),
         ));
     }
     Ok(())

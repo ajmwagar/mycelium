@@ -344,6 +344,34 @@ set `MYCELIUM_SSH_IDENTITY` and `MYCELIUM_SSH_CERTIFICATE`.
 `mycelium exec` requires a command and enables SSH batch mode, making the same
 derived route suitable for scripts, health checks, and one-shot agents.
 
+File transfer uses that identical route plan in either direction:
+
+```sh
+mycelium scp ./agent dgx-spark:/tmp/agent --preserve
+mycelium scp dgx-spark:/var/log/mycelium.log ./logs/
+mycelium scp ./bundle dgx-spark:/tmp/bundle --recursive
+```
+
+Exactly one operand must be a Mycelium `DEVICE:PATH`; remote-to-remote copies
+are rejected because they do not have one unambiguous identity and route.
+
+## Allocation-backed logical networks
+
+Allocation evidence is persisted separately from logical network ownership.
+Externally managed networks can record an IaC-backed subnet without inventing
+a VLAN, then adopt that stable receipt:
+
+```sh
+mycelium allocations record --site beachhead --subnet 10.118.0.0/20 \
+  --gateway 10.118.0.1 --source shared-infra:projects/beachhead --write
+mycelium networks adopt beachhead-vpc --site beachhead \
+  --subnet 10.118.0.0/20 --write
+```
+
+Tagged networks add a separate VLAN receipt and pass `--vlan ID` during
+adoption. Re-recording the same fact is idempotent; a new evidence source is
+merged into the receipt and advances its generation.
+
 Host CA trust is a privileged bootstrap/reconciliation action. Mycelium
 generates the host bundle and an optional narrowly scoped client fragment; it
 does not silently modify `sshd` or `~/.ssh/config`. Keep an existing SSH session

@@ -72,11 +72,26 @@ pub enum Request {
         #[serde(default)]
         dry_run: bool,
     },
+    AllocationRecord {
+        site: String,
+        #[serde(default)]
+        vlan: Option<u16>,
+        #[serde(default)]
+        subnet: Option<String>,
+        #[serde(default)]
+        gateway: Option<String>,
+        source: String,
+        #[serde(default)]
+        write: bool,
+        #[serde(default)]
+        dry_run: bool,
+    },
     NetworkList,
     NetworkAdopt {
         name: String,
         site: String,
-        vlan: u16,
+        #[serde(default)]
+        vlan: Option<u16>,
         subnet: String,
         #[serde(default)]
         write: bool,

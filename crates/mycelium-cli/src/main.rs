@@ -91,8 +91,9 @@ usage:
   mycelium discovery scope remove <observer> --write [--dry-run]
   mycelium allocations list [--json]
   mycelium allocations import --site SITE --write [--dry-run] [--json]
+  mycelium allocations record --site SITE (--subnet CIDR [--gateway IP] | --vlan ID) --source ID --write [--dry-run] [--json]
   mycelium networks list [--json]
-  mycelium networks adopt NAME --site SITE --vlan ID --subnet CIDR --write [--dry-run]
+  mycelium networks adopt NAME --site SITE --subnet CIDR [--vlan ID] --write [--dry-run]
   mycelium networks drift [NAME] [--json]
   mycelium peers [--json]
   mycelium releases list [--json]
@@ -126,6 +127,7 @@ usage:
   mycelium tunnel <target>:<port> [--via DEVICE] [--local-port N] [--write] [--json]
   mycelium ssh <device> [--user USER] [--key PATH] [--certificate PATH] [--port N] [--json] [-- COMMAND...]
   mycelium exec <device> [--user USER] [--key PATH] [--certificate PATH] [--port N] [--json] -- COMMAND...
+  mycelium scp SOURCE DEST [--user USER] [--key PATH] [--certificate PATH] [--port N] [--recursive] [--preserve] [--json]
   mycelium console <device> [--json]
   mycelium remove <id>
 
@@ -157,6 +159,8 @@ struct Flags {
     site: Option<String>,
     vlan: Option<u16>,
     subnet: Option<String>,
+    gateway: Option<String>,
+    source: Option<String>,
     path: Option<String>,
     binary: Option<String>,
     bundle: Option<String>,
@@ -195,6 +199,8 @@ fn parse_flags(args: &[String]) -> Flags {
         site: None,
         vlan: None,
         subnet: None,
+        gateway: None,
+        source: None,
         path: None,
         binary: None,
         bundle: None,
@@ -300,6 +306,14 @@ fn parse_flags(args: &[String]) -> Flags {
             "--subnet" => {
                 i += 1;
                 f.subnet = args.get(i).cloned();
+            }
+            "--gateway" => {
+                i += 1;
+                f.gateway = args.get(i).cloned();
+            }
+            "--source" => {
+                i += 1;
+                f.source = args.get(i).cloned();
             }
             "--path" => {
                 i += 1;
@@ -442,6 +456,7 @@ async fn run(cmd: &str, args: &[String]) -> Result<Vec<String>, ClientError> {
         "plan" => plan(args).await,
         "ssh" => ssh(args, false).await,
         "exec" => ssh(args, true).await,
+        "scp" => scp(args).await,
         "scan" => {
             let f = parse_flags(args);
             let mut c = connect().await?;
@@ -1094,15 +1109,78 @@ async fn ssh(args: &[String], command_required: bool) -> Result<Vec<String>, Cli
     if command_required && options.extra.is_empty() {
         return Err(err_usage("exec needs a command after --"));
     }
+    let resolved = resolve_ssh(
+        &options.device,
+        options.user,
+        options.identity,
+        options.certificate,
+        options.port,
+    )
+    .await?;
+    let argv = ssh_argv(
+        &resolved.host,
+        &resolved.username,
+        resolved.port,
+        resolved.jump.as_deref(),
+        &resolved.identity,
+        &resolved.certificate,
+        command_required,
+        &options.extra,
+    );
+    if options.json {
+        return Ok(vec![resolved.json_with_argv(&argv).to_string()]);
+    }
+    let status = std::process::Command::new("ssh")
+        .args(&argv)
+        .status()
+        .map_err(|error| err_usage(&format!("could not run SSH: {error}")))?;
+    if !status.success() {
+        return Err(err_usage(&format!("SSH exited with {status}")));
+    }
+    Ok(Vec::new())
+}
+
+#[derive(Debug)]
+struct ResolvedSsh {
+    device: String,
+    host: String,
+    username: String,
+    port: u16,
+    jump: Option<String>,
+    identity: String,
+    certificate: String,
+}
+
+impl ResolvedSsh {
+    fn json_with_argv(&self, argv: &[String]) -> serde_json::Value {
+        serde_json::json!({
+            "device": self.device,
+            "host": self.host,
+            "username": self.username,
+            "port": self.port,
+            "jump": self.jump,
+            "identity": self.identity,
+            "certificate": self.certificate,
+            "argv": argv,
+        })
+    }
+}
+
+async fn resolve_ssh(
+    selector: &str,
+    user: Option<String>,
+    identity: Option<String>,
+    certificate: Option<String>,
+    port: Option<u16>,
+) -> Result<ResolvedSsh, ClientError> {
     let mut client = connect().await?;
     let plan = client
         .call(&Request::SshPlan {
-            selector: options.device.clone(),
-            username: options.user.clone(),
+            selector: selector.to_owned(),
+            username: user,
         })
         .await?;
-    let identity = options
-        .identity
+    let identity = identity
         .or_else(|| plan["identity"].as_str().map(expand_home))
         .or_else(|| std::env::var("MYCELIUM_SSH_IDENTITY").ok().map(expand_home))
         .unwrap_or_else(|| expand_home("~/.ssh/id_ed25519"));
@@ -1110,8 +1188,7 @@ async fn ssh(args: &[String], command_required: bool) -> Result<Vec<String>, Cli
         .as_str()
         .ok_or(err_usage("SSH plan has no device"))?;
     let device_certificate = myceliumd::home_dir().join(format!("ssh/{device}-cert.pub"));
-    let certificate = options
-        .certificate
+    let certificate = certificate
         .or_else(|| {
             std::env::var("MYCELIUM_SSH_CERTIFICATE")
                 .ok()
@@ -1136,41 +1213,15 @@ async fn ssh(args: &[String], command_required: bool) -> Result<Vec<String>, Cli
     let username = plan["username"]
         .as_str()
         .ok_or(err_usage("SSH plan has no username"))?;
-    let port = options
-        .port
-        .unwrap_or_else(|| plan["port"].as_u64().unwrap_or(22) as u16);
-    let jump = plan["jump"].as_str();
-    let argv = ssh_argv(
-        host,
-        username,
-        port,
-        jump,
-        &identity,
-        &certificate,
-        command_required,
-        &options.extra,
-    );
-    if options.json {
-        return Ok(vec![serde_json::json!({
-            "device": plan["device"],
-            "host": host,
-            "username": username,
-            "port": port,
-            "jump": jump,
-            "identity": identity,
-            "certificate": certificate,
-            "argv": argv,
-        })
-        .to_string()]);
-    }
-    let status = std::process::Command::new("ssh")
-        .args(&argv)
-        .status()
-        .map_err(|error| err_usage(&format!("could not run SSH: {error}")))?;
-    if !status.success() {
-        return Err(err_usage(&format!("SSH exited with {status}")));
-    }
-    Ok(Vec::new())
+    Ok(ResolvedSsh {
+        device: device.to_owned(),
+        host: host.to_owned(),
+        username: username.to_owned(),
+        port: port.unwrap_or_else(|| plan["port"].as_u64().unwrap_or(22) as u16),
+        jump: plan["jump"].as_str().map(str::to_owned),
+        identity,
+        certificate,
+    })
 }
 
 #[derive(Debug, PartialEq)]
@@ -1238,6 +1289,166 @@ impl SshOptions {
         }
         Ok(parsed)
     }
+}
+
+#[derive(Debug, PartialEq)]
+struct ScpOptions {
+    source: String,
+    destination: String,
+    user: Option<String>,
+    identity: Option<String>,
+    certificate: Option<String>,
+    port: Option<u16>,
+    recursive: bool,
+    preserve: bool,
+    json: bool,
+}
+
+impl ScpOptions {
+    fn parse(args: &[String]) -> Result<Self, ClientError> {
+        let mut positional = Vec::new();
+        let mut parsed = Self {
+            source: String::new(),
+            destination: String::new(),
+            user: None,
+            identity: None,
+            certificate: None,
+            port: None,
+            recursive: false,
+            preserve: false,
+            json: false,
+        };
+        let mut index = 0;
+        while index < args.len() {
+            let flag = &args[index];
+            let take = |index: &mut usize, name: &str| -> Result<String, ClientError> {
+                *index += 1;
+                args.get(*index)
+                    .cloned()
+                    .ok_or(err_usage(&format!("scp needs a value for {name}")))
+            };
+            match flag.as_str() {
+                "--user" => parsed.user = Some(take(&mut index, flag)?),
+                "--key" => parsed.identity = Some(expand_home(&take(&mut index, flag)?)),
+                "--certificate" => parsed.certificate = Some(expand_home(&take(&mut index, flag)?)),
+                "--port" => {
+                    let value = take(&mut index, flag)?;
+                    let port = value
+                        .parse::<u16>()
+                        .map_err(|_| err_usage("SCP port must be an integer from 1 to 65535"))?;
+                    if port == 0 {
+                        return Err(err_usage("SCP port must be an integer from 1 to 65535"));
+                    }
+                    parsed.port = Some(port);
+                }
+                "--recursive" | "-r" => parsed.recursive = true,
+                "--preserve" | "-p" => parsed.preserve = true,
+                "--json" => parsed.json = true,
+                "--" => positional.extend_from_slice(&args[index + 1..]),
+                value if value.starts_with('-') => {
+                    return Err(err_usage(&format!("unknown scp option `{value}`")))
+                }
+                value => positional.push(value.to_owned()),
+            }
+            if flag == "--" {
+                break;
+            }
+            index += 1;
+        }
+        if positional.len() != 2 {
+            return Err(err_usage("scp needs exactly SOURCE and DEST"));
+        }
+        parsed.source = positional.remove(0);
+        parsed.destination = positional.remove(0);
+        Ok(parsed)
+    }
+}
+
+fn remote_operand(value: &str) -> Option<(&str, &str)> {
+    value
+        .split_once(':')
+        .filter(|(device, path)| !device.is_empty() && !path.is_empty())
+}
+
+async fn scp(args: &[String]) -> Result<Vec<String>, ClientError> {
+    let options = ScpOptions::parse(args)?;
+    let source_remote = remote_operand(&options.source);
+    let destination_remote = remote_operand(&options.destination);
+    let (selector, remote_path, uploading) =
+        match (source_remote, destination_remote) {
+            (None, Some((device, path))) => (device, path, true),
+            (Some((device, path)), None) => (device, path, false),
+            (Some(_), Some(_)) => return Err(err_usage(
+                "scp supports exactly one Mycelium remote; remote-to-remote copies are ambiguous",
+            )),
+            (None, None) => return Err(err_usage("scp needs one DEVICE:PATH operand")),
+        };
+    let resolved = resolve_ssh(
+        selector,
+        options.user,
+        options.identity,
+        options.certificate,
+        options.port,
+    )
+    .await?;
+    let remote = format!("{}@{}:{}", resolved.username, resolved.host, remote_path);
+    let (source, destination) = if uploading {
+        (options.source.as_str(), remote.as_str())
+    } else {
+        (remote.as_str(), options.destination.as_str())
+    };
+    let argv = scp_argv(
+        source,
+        destination,
+        &resolved,
+        options.recursive,
+        options.preserve,
+    );
+    if options.json {
+        let mut output = resolved.json_with_argv(&argv);
+        output["direction"] = serde_json::json!(if uploading { "upload" } else { "download" });
+        return Ok(vec![output.to_string()]);
+    }
+    let status = std::process::Command::new("scp")
+        .args(&argv)
+        .status()
+        .map_err(|error| err_usage(&format!("could not run SCP: {error}")))?;
+    if !status.success() {
+        return Err(err_usage(&format!("SCP exited with {status}")));
+    }
+    Ok(Vec::new())
+}
+
+fn scp_argv(
+    source: &str,
+    destination: &str,
+    resolved: &ResolvedSsh,
+    recursive: bool,
+    preserve: bool,
+) -> Vec<String> {
+    let mut argv = vec![
+        "-o".into(),
+        "BatchMode=yes".into(),
+        "-o".into(),
+        "IdentitiesOnly=yes".into(),
+        "-o".into(),
+        format!("IdentityFile={}", resolved.identity),
+        "-o".into(),
+        format!("CertificateFile={}", resolved.certificate),
+        "-P".into(),
+        resolved.port.to_string(),
+    ];
+    if let Some(jump) = &resolved.jump {
+        argv.extend(["-J".into(), jump.clone()]);
+    }
+    if recursive {
+        argv.push("-r".into());
+    }
+    if preserve {
+        argv.push("-p".into());
+    }
+    argv.extend([source.into(), destination.into()]);
+    argv
 }
 
 fn ssh_argv(
@@ -1540,7 +1751,30 @@ async fn allocations(args: &[String]) -> Result<Vec<String>, ClientError> {
                 )])
             }
         }
-        _ => Err(err_usage("usage: mycelium allocations list|import ...")),
+        Some("record") => {
+            let site = flags
+                .site
+                .ok_or(err_usage("allocations record needs --site SITE"))?;
+            let source = flags
+                .source
+                .ok_or(err_usage("allocations record needs --source ID"))?;
+            let mut client = connect().await?;
+            let value = client
+                .call(&Request::AllocationRecord {
+                    site,
+                    vlan: flags.vlan,
+                    subnet: flags.subnet,
+                    gateway: flags.gateway,
+                    source,
+                    write: flags.write,
+                    dry_run: flags.dry_run,
+                })
+                .await?;
+            Ok(vec![value.to_string()])
+        }
+        _ => Err(err_usage(
+            "usage: mycelium allocations list|import|record ...",
+        )),
     }
 }
 
@@ -1574,7 +1808,6 @@ async fn networks(args: &[String]) -> Result<Vec<String>, ClientError> {
                 .first()
                 .ok_or(err_usage("networks adopt needs NAME"))?;
             let site = flags.site.ok_or(err_usage("networks adopt needs --site"))?;
-            let vlan = flags.vlan.ok_or(err_usage("networks adopt needs --vlan"))?;
             let subnet = flags
                 .subnet
                 .ok_or(err_usage("networks adopt needs --subnet"))?;
@@ -1583,7 +1816,7 @@ async fn networks(args: &[String]) -> Result<Vec<String>, ClientError> {
                 .call(&Request::NetworkAdopt {
                     name: name.clone(),
                     site,
-                    vlan,
+                    vlan: flags.vlan,
                     subnet,
                     write: flags.write,
                     dry_run: flags.dry_run,
@@ -2362,5 +2595,44 @@ mod ssh_command_tests {
         assert!(argv.windows(2).any(|pair| pair == ["-o", "BatchMode=yes"]));
         assert!(argv.windows(2).any(|pair| pair == ["-J", "pris"]));
         assert_eq!(&argv[argv.len() - 2..], ["uname", "-a"]);
+    }
+
+    #[test]
+    fn scp_options_require_exactly_one_remote() {
+        let upload = ["./agent", "dgx-spark:/tmp/agent", "--preserve"].map(str::to_owned);
+        let parsed = ScpOptions::parse(&upload).unwrap();
+        assert_eq!(
+            remote_operand(&parsed.destination),
+            Some(("dgx-spark", "/tmp/agent"))
+        );
+        assert!(parsed.preserve);
+        assert!(remote_operand("./local-file").is_none());
+    }
+
+    #[test]
+    fn scp_argv_uses_the_derived_jump_and_scp_port_flag() {
+        let resolved = ResolvedSsh {
+            device: "dgx-spark".into(),
+            host: "192.168.1.48".into(),
+            username: "fpladmin".into(),
+            port: 2222,
+            jump: Some("pris".into()),
+            identity: "/key".into(),
+            certificate: "/cert".into(),
+        };
+        let argv = scp_argv(
+            "./agent",
+            "fpladmin@192.168.1.48:/tmp/agent",
+            &resolved,
+            false,
+            true,
+        );
+        assert!(argv.windows(2).any(|pair| pair == ["-J", "pris"]));
+        assert!(argv.windows(2).any(|pair| pair == ["-P", "2222"]));
+        assert!(argv.contains(&"BatchMode=yes".into()));
+        assert_eq!(
+            argv.last().map(String::as_str),
+            Some("fpladmin@192.168.1.48:/tmp/agent")
+        );
     }
 }
