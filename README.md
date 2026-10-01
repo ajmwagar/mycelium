@@ -187,6 +187,10 @@ mycelium access publish --statement revocation.json \
 mycelium access list
 ```
 
+OIDC-backed grants bind issuer, subject, and audience to Unix principals and
+optionally permit a valid JWT holder to certify a presented SSH key. The
+resulting certificate never outlives either the JWT or the signed grant.
+
 The authority private key stays off ordinary peers. Membership in the mTLS
 mesh permits transport only; it does not permit creating access statements.
 See [`docs/access-control.md`](docs/access-control.md) for the OIDC verification,

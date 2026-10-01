@@ -97,7 +97,9 @@ usage:
   mycelium access ssh issue --grant ID --public-key PATH --ca PRIVATE-KEY --path CERT --ttl 8h --write [--json]
   mycelium access ssh krl --ca-public PATH --path KRL --write [--json]
   mycelium access ssh host-bundle --ca-public PATH --krl PATH --path DIR --write [--json]
+  mycelium access ssh client-config --host ALIAS --hostname HOST --user USER --identity PATH --certificate PATH --path FILE --write [--json]
   mycelium access oidc verify --issuer URL --audience ID --token-env VAR [--json]
+  mycelium access oidc ssh-issue --issuer URL --audience ID --token-env VAR --public-key PATH --ca PRIVATE-KEY --path CERT [--grant ID] [--ttl 8h] --write [--json]
   mycelium update status [--channel CHANNEL] [--json]
   mycelium update apply [--channel CHANNEL] [--path INSTALLED-BINARY] --write
   mycelium enroll init [--path CA-DIR] --write
@@ -520,7 +522,15 @@ async fn access(args: &[String]) -> Result<Vec<String>, ClientError> {
         return ssh_access::run(&args[1..], &state).map_err(access_error);
     }
     if args.first().is_some_and(|value| value == "oidc") {
-        return oidc::run(&args[1..]).await.map_err(access_error);
+        let state = if args.get(1).is_some_and(|value| value == "ssh-issue") {
+            let mut client = connect().await?;
+            Some(client.call(&Request::AccessList).await?)
+        } else {
+            None
+        };
+        return oidc::run(&args[1..], state.as_ref())
+            .await
+            .map_err(access_error);
     }
     let flags = parse_flags(args);
     let action = flags.rest.first().map(String::as_str).unwrap_or("list");

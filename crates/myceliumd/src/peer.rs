@@ -757,13 +757,14 @@ fn validate_release_label(name: &str, value: &str) -> Result<(), AnyError> {
     Ok(())
 }
 
-fn validate_access_principal(value: &str) -> Result<(), AnyError> {
+fn validate_access_identity(name: &str, value: &str) -> Result<(), AnyError> {
     // Principals are opaque identity-provider identifiers, not local labels.
     // In particular, the OIDC adapter emits `oidc:<issuer>#<subject>` values.
     if value.is_empty() || value.len() > 512 || !value.bytes().all(|byte| byte.is_ascii_graphic()) {
-        return Err(
-            "principal must contain 1-512 printable ASCII characters without whitespace".into(),
-        );
+        return Err(format!(
+            "{name} must contain 1-512 printable ASCII characters without whitespace"
+        )
+        .into());
     }
     Ok(())
 }
@@ -789,12 +790,13 @@ fn validate_access_statement(statement: &AccessStatement) -> Result<(), AnyError
             scopes,
             unix_users,
             ssh_public_keys,
+            oidc_audiences,
             not_before,
             not_after,
             ..
         } => {
             validate_release_label("grant_id", grant_id)?;
-            validate_access_principal(principal)?;
+            validate_access_identity("principal", principal)?;
             for (name, values) in [("role", roles), ("scope", scopes)] {
                 for value in values {
                     validate_access_selector(name, value)?;
@@ -802,6 +804,9 @@ fn validate_access_statement(statement: &AccessStatement) -> Result<(), AnyError
             }
             for value in unix_users {
                 validate_release_label("unix_user", value)?;
+            }
+            for value in oidc_audiences {
+                validate_access_identity("oidc_audience", value)?;
             }
             if ssh_public_keys.len() > 32
                 || ssh_public_keys.iter().any(|key| {
@@ -833,7 +838,7 @@ fn validate_access_statement(statement: &AccessStatement) -> Result<(), AnyError
                 validate_release_label("grant_id", value)?;
             }
             if let Some(value) = principal {
-                validate_access_principal(value)?;
+                validate_access_identity("principal", value)?;
             }
             if reason.is_empty() || reason.len() > 512 || reason.contains(['\n', '\r']) {
                 return Err("revocation reason must be 1-512 characters on one line".into());
@@ -1205,6 +1210,8 @@ mod tests {
             scopes: vec!["site:home".into()],
             unix_users: vec!["avery".into()],
             ssh_public_keys: vec![],
+            oidc_audiences: vec!["mycelium".into()],
+            oidc_ssh_key_exchange: true,
             not_before: 1,
             not_after: 2,
         }

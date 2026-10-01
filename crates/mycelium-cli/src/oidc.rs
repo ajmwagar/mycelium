@@ -21,15 +21,42 @@ struct Identity {
     expires_at: u64,
 }
 
-pub async fn run(args: &[String]) -> Result<Vec<String>, String> {
+pub async fn run(args: &[String], state: Option<&Value>) -> Result<Vec<String>, String> {
     match args.first().map(String::as_str) {
         Some("verify") => verify(args).await,
+        Some("ssh-issue") => {
+            ssh_issue(args, state.ok_or("OIDC SSH issuance needs access state")?).await
+        }
         Some(action) => Err(format!("unknown access oidc action `{action}`")),
         None => Err("access oidc needs verify".into()),
     }
 }
 
 async fn verify(args: &[String]) -> Result<Vec<String>, String> {
+    let identity = verify_identity(args).await?;
+    let json = serde_json::to_string_pretty(&identity)
+        .map_err(|e| format!("encode OIDC identity: {e}"))?;
+    Ok(vec![json])
+}
+
+async fn ssh_issue(args: &[String], state: &Value) -> Result<Vec<String>, String> {
+    let identity = verify_identity(args).await?;
+    let audience = required(args, "--audience")?;
+    let mut output = crate::ssh_access::issue_for_oidc(
+        args,
+        state,
+        &identity.principal,
+        audience,
+        identity.expires_at,
+    )?;
+    output.push(format!(
+        "authenticated OIDC principal {} (token expires at {})",
+        identity.principal, identity.expires_at
+    ));
+    Ok(output)
+}
+
+async fn verify_identity(args: &[String]) -> Result<Identity, String> {
     let issuer = required(args, "--issuer")?.trim_end_matches('/');
     let audience = required(args, "--audience")?;
     let token_env = required(args, "--token-env")?;
@@ -69,10 +96,7 @@ async fn verify(args: &[String]) -> Result<Vec<String>, String> {
     let claims = decode::<Value>(&token, &key, &validation)
         .map_err(|e| format!("verify OIDC token: {e}"))?
         .claims;
-    let identity = normalize_identity(issuer, claims)?;
-    let json = serde_json::to_string_pretty(&identity)
-        .map_err(|e| format!("encode OIDC identity: {e}"))?;
-    Ok(vec![json])
+    normalize_identity(issuer, claims)
 }
 
 async fn fetch_json<T: serde::de::DeserializeOwned>(

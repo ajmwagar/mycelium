@@ -1,12 +1,7 @@
 target/
 .env
+.env.*
+!.env.example
 *.pid
-~/.mycelium
-.mycelium/peer.key
-.mycelium/peer-observations.json
-.mycelium/artifacts/
-.mycelium/pki/
-.mycelium/authority/
-.mycelium/enrollments/
-.mycelium/release.key
-.mycelium/access.key
+.mycelium/
+brag-output*/

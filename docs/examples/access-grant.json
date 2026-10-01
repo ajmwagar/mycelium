@@ -9,6 +9,8 @@
   "ssh_public_keys": [
     "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEexampleReplaceWithTheExactAuthorizedPublicKey"
   ],
+  "oidc_audiences": ["mycelium"],
+  "oidc_ssh_key_exchange": false,
   "not_before": 1790812800,
   "not_after": 1793491200
 }

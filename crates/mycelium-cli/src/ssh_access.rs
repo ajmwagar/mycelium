@@ -13,9 +13,59 @@ pub fn run(args: &[String], state: &Value) -> Result<Vec<String>, String> {
         Some("issue") => issue(args, state),
         Some("krl") => krl(args, state),
         Some("host-bundle") => host_bundle(args),
+        Some("client-config") => client_config(args),
         Some(action) => Err(format!("unknown access ssh action `{action}`")),
         None => Err("access ssh needs ca-init, issue, or krl".into()),
     }
+}
+
+fn client_config(args: &[String]) -> Result<Vec<String>, String> {
+    require_write(args)?;
+    let alias = config_atom(args, "--host")?;
+    let hostname = config_atom(args, "--hostname")?;
+    let user = config_atom(args, "--user")?;
+    let identity = config_value(args, "--identity")?;
+    let certificate = config_value(args, "--certificate")?;
+    let port = value(args, "--port")
+        .map(|port| {
+            port.parse::<u16>()
+                .map_err(|_| format!("invalid SSH port `{port}`"))
+        })
+        .transpose()?;
+    let destination = Path::new(required(args, "--path")?);
+    if destination.exists() {
+        return Err(format!(
+            "refusing to replace existing SSH client config {}",
+            destination.display()
+        ));
+    }
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
+    }
+    let mut config = format!(
+        "# Managed by Mycelium. Include this file from ~/.ssh/config.\n\
+         Host {alias}\n\
+           HostName {hostname}\n\
+           User {user}\n"
+    );
+    if let Some(port) = port {
+        config.push_str(&format!("  Port {port}\n"));
+    }
+    config.push_str(&format!(
+        "  IdentityFile {identity}\n\
+           CertificateFile {certificate}\n\
+           IdentitiesOnly yes\n"
+    ));
+    let staging = temporary_key_path(destination.to_string_lossy().as_ref());
+    fs::write(&staging, config)
+        .map_err(|e| format!("write staged SSH client config {}: {e}", staging.display()))?;
+    fs::rename(&staging, destination)
+        .map_err(|e| format!("install SSH client config {}: {e}", destination.display()))?;
+    Ok(vec![format!(
+        "wrote SSH client config {}; add `Include {}` to ~/.ssh/config",
+        destination.display(),
+        destination.display()
+    )])
 }
 
 fn host_bundle(args: &[String]) -> Result<Vec<String>, String> {
@@ -99,6 +149,63 @@ fn ca_init(args: &[String]) -> Result<Vec<String>, String> {
 }
 
 fn issue(args: &[String], state: &Value) -> Result<Vec<String>, String> {
+    issue_bound(args, state, None, None, None)
+}
+
+pub(crate) fn issue_for_oidc(
+    args: &[String],
+    state: &Value,
+    principal: &str,
+    audience: &str,
+    identity_expires_at: u64,
+) -> Result<Vec<String>, String> {
+    let grant_id = if let Some(grant_id) = value(args, "--grant") {
+        grant_id.to_owned()
+    } else {
+        let matches = state["grants"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|entry| {
+                entry["active"].as_bool() == Some(true)
+                    && entry["record"]["statement"]["principal"].as_str() == Some(principal)
+                    && entry["record"]["statement"]["oidc_audiences"]
+                        .as_array()
+                        .is_some_and(|audiences| audiences.iter().any(|value| value == audience))
+            })
+            .filter_map(|entry| entry["record"]["statement"]["grant_id"].as_str())
+            .collect::<Vec<_>>();
+        match matches.as_slice() {
+            [grant_id] => (*grant_id).to_owned(),
+            [] => return Err(format!("no active grant matches OIDC principal `{principal}`")),
+            _ => {
+                return Err(format!(
+                    "multiple active grants match OIDC principal `{principal}`; select one with --grant"
+                ))
+            }
+        }
+    };
+    let mut bound_args = args.to_vec();
+    if value(args, "--grant").is_none() {
+        bound_args.push("--grant".into());
+        bound_args.push(grant_id);
+    }
+    issue_bound(
+        &bound_args,
+        state,
+        Some(principal),
+        Some(audience),
+        Some(identity_expires_at),
+    )
+}
+
+fn issue_bound(
+    args: &[String],
+    state: &Value,
+    expected_principal: Option<&str>,
+    expected_audience: Option<&str>,
+    identity_expires_at: Option<u64>,
+) -> Result<Vec<String>, String> {
     require_write(args)?;
     let grant_id = required(args, "--grant")?;
     let public_key_path = required(args, "--public-key")?;
@@ -123,6 +230,8 @@ fn issue(args: &[String], state: &Value) -> Result<Vec<String>, String> {
         serial,
         unix_users,
         ssh_public_keys,
+        oidc_audiences,
+        oidc_ssh_key_exchange,
         not_before,
         not_after,
         ..
@@ -130,6 +239,20 @@ fn issue(args: &[String], state: &Value) -> Result<Vec<String>, String> {
     else {
         return Err(format!("record `{grant_id}` is not a grant"));
     };
+    if expected_principal.is_some_and(|expected| expected != principal) {
+        return Err(format!(
+            "grant `{grant_id}` belongs to `{principal}`, not authenticated principal `{}`",
+            expected_principal.unwrap_or_default()
+        ));
+    }
+    if expected_audience
+        .is_some_and(|expected| !oidc_audiences.iter().any(|value| value == expected))
+    {
+        return Err(format!(
+            "grant `{grant_id}` does not authorize OIDC audience `{}`",
+            expected_audience.unwrap_or_default()
+        ));
+    }
     if unix_users.is_empty() {
         return Err(format!("grant `{grant_id}` has no unix_users principals"));
     }
@@ -139,18 +262,22 @@ fn issue(args: &[String], state: &Value) -> Result<Vec<String>, String> {
     let public_key = fs::read_to_string(public_key_path)
         .map_err(|e| format!("read SSH public key {public_key_path}: {e}"))?;
     let key_fingerprint = key_material(&public_key)?;
-    if !ssh_public_keys
+    let key_is_enrolled = ssh_public_keys
         .iter()
         .filter_map(|key| key_material(key).ok())
-        .any(|allowed| allowed == key_fingerprint)
-    {
+        .any(|allowed| allowed == key_fingerprint);
+    if !key_is_enrolled && !(expected_principal.is_some() && oidc_ssh_key_exchange) {
         return Err(format!(
             "public key is not authorized by grant `{grant_id}`"
         ));
     }
-    let ttl = requested_ttl.min(not_after.saturating_sub(now));
+    let expires_at =
+        identity_expires_at.map_or(not_after, |token_expiry| not_after.min(token_expiry));
+    let ttl = requested_ttl.min(expires_at.saturating_sub(now));
     if ttl == 0 {
-        return Err(format!("grant `{grant_id}` has expired"));
+        return Err(format!(
+            "grant `{grant_id}` or authenticated identity has expired"
+        ));
     }
 
     let temp = temporary_key_path(public_key_path);
@@ -264,6 +391,30 @@ fn required<'a>(args: &'a [String], flag: &str) -> Result<&'a str, String> {
     value(args, flag).ok_or_else(|| format!("access ssh needs {flag}"))
 }
 
+fn config_atom<'a>(args: &'a [String], flag: &str) -> Result<&'a str, String> {
+    let value = required(args, flag)?;
+    if value.is_empty()
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_graphic() && !b"#*?![]".contains(&byte))
+    {
+        return Err(format!("SSH config {flag} contains unsafe characters"));
+    }
+    Ok(value)
+}
+
+fn config_value<'a>(args: &'a [String], flag: &str) -> Result<&'a str, String> {
+    let value = required(args, flag)?;
+    if value.is_empty()
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_graphic() && byte != b'#')
+    {
+        return Err(format!("SSH config {flag} contains unsafe characters"));
+    }
+    Ok(value)
+}
+
 fn require_write(args: &[String]) -> Result<(), String> {
     args.iter()
         .any(|arg| arg == "--write")
@@ -348,6 +499,45 @@ mod tests {
     }
 
     #[test]
+    fn client_config_is_scoped_to_one_alias() {
+        let root = std::env::temp_dir().join(format!(
+            "mycelium-ssh-config-test-{}-{}",
+            std::process::id(),
+            now().unwrap()
+        ));
+        let path = root.join("buddy.conf");
+        let args = vec![
+            "client-config",
+            "--host",
+            "mycelium-lab",
+            "--hostname",
+            "lab.example.test",
+            "--user",
+            "buddy",
+            "--identity",
+            "~/.ssh/id_ed25519",
+            "--certificate",
+            "~/.ssh/id_ed25519-cert.pub",
+            "--port",
+            "2222",
+            "--path",
+            path.to_str().unwrap(),
+            "--write",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+        client_config(&args).unwrap();
+        let config = fs::read_to_string(&path).unwrap();
+        assert!(config.contains("Host mycelium-lab\n"));
+        assert!(config.contains("HostName lab.example.test\n"));
+        assert!(config.contains("User buddy\n"));
+        assert!(config.contains("Port 2222\n"));
+        assert!(config.contains("CertificateFile ~/.ssh/id_ed25519-cert.pub\n"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn openssh_issues_and_revokes_a_granted_key() {
         if Command::new("ssh-keygen").arg("-h").output().is_err() {
             return;
@@ -388,7 +578,9 @@ mod tests {
                 "record": { "statement": {
                     "kind": "grant", "grant_id": "grant-1", "principal": "oidc:https://issuer.example#user-42",
                     "serial": 42, "roles": [], "scopes": ["site:home"], "unix_users": ["avery"],
-                    "ssh_public_keys": [public_key], "not_before": timestamp - 1, "not_after": timestamp + 3600
+                    "ssh_public_keys": [public_key], "oidc_audiences": ["mycelium"],
+                    "oidc_ssh_key_exchange": false,
+                    "not_before": timestamp - 1, "not_after": timestamp + 3600
                 }}
             }],
             "revocations": []
@@ -412,6 +604,52 @@ mod tests {
         .collect::<Vec<_>>();
         issue(&issue_args, &state).unwrap();
         assert!(cert.exists());
+        let oidc_cert = root.join("oidc-user-cert.pub");
+        let oidc_args = vec![
+            "ssh-issue",
+            "--public-key",
+            user.with_extension("pub").to_str().unwrap(),
+            "--ca",
+            ca.to_str().unwrap(),
+            "--path",
+            oidc_cert.to_str().unwrap(),
+            "--ttl",
+            "10m",
+            "--write",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+        issue_for_oidc(
+            &oidc_args,
+            &state,
+            "oidc:https://issuer.example#user-42",
+            "mycelium",
+            timestamp + 300,
+        )
+        .unwrap();
+        assert!(oidc_cert.exists());
+
+        let mut wrong_principal_args = oidc_args.clone();
+        wrong_principal_args.extend(["--grant".into(), "grant-1".into()]);
+        assert!(issue_for_oidc(
+            &wrong_principal_args,
+            &state,
+            "oidc:https://issuer.example#someone-else",
+            "mycelium",
+            timestamp + 300,
+        )
+        .unwrap_err()
+        .contains("not authenticated principal"));
+        assert!(issue_for_oidc(
+            &wrong_principal_args,
+            &state,
+            "oidc:https://issuer.example#user-42",
+            "some-other-client",
+            timestamp + 300,
+        )
+        .unwrap_err()
+        .contains("does not authorize OIDC audience"));
         state["grants"][0]["active"] = serde_json::json!(false);
         state["grants"][0]["revoked_by"] = serde_json::json!(["revoke-1"]);
         state["revocations"] = serde_json::json!([{

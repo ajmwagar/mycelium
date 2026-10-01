@@ -57,7 +57,34 @@ mycelium access ssh issue \
 The verify result and the grant are deliberately separate. Compare the
 returned `principal` with the grant's `principal`, then let the access
 authority publish the policy decision. Mycelium does not currently exchange a
-verified OIDC token for a grant automatically.
+verified OIDC token for a grant automatically. The grant's `oidc_audiences`
+must contain the exact client audience accepted for SSH exchange. Set
+`oidc_ssh_key_exchange` to `false` to require a pre-enrolled public key, or to
+`true` to let a holder of a valid bound JWT certify the key presented during
+that exchange.
+
+Once the signed grant has converged, the trusted access authority can exchange
+the user's current JWT and public key for a short-lived OpenSSH certificate.
+The command runs where the SSH CA private key is held; the user never receives
+that key:
+
+```sh
+OIDC_TOKEN='...' mycelium access oidc ssh-issue \
+  --issuer https://identity.example \
+  --audience mycelium \
+  --token-env OIDC_TOKEN \
+  --public-key ~/.ssh/id_ed25519.pub \
+  --ca .mycelium/ssh/user_ca \
+  --path ~/.ssh/id_ed25519-cert.pub \
+  --ttl 1h \
+  --write
+```
+
+Issuance verifies discovery, JWKS signature, algorithm, key ID, issuer,
+audience, subject, and expiry. It then requires one active signed grant for
+the normalized issuer/subject and audience. The certificate lifetime is
+capped by the requested TTL, grant expiry, and JWT expiry. Neither the JWT nor
+the IdP signing keys enter Mycelium gossip or persistent state.
 
 Certificate lifetime is capped by the signed grant. Issuance fails if the
 grant is missing, inactive, expired, revoked, has no Unix principal, or does
@@ -122,6 +149,26 @@ ssh-keygen -Q -f .mycelium/ssh/revoked.krl ~/.ssh/id_ed25519-cert.pub
 
 The KRL query exits successfully when the certificate is not revoked and
 non-zero when it is revoked.
+
+### Configure the user's SSH client
+
+Generate a narrowly scoped client fragment after issuing the certificate:
+
+```sh
+mycelium access ssh client-config \
+  --host mycelium-lab \
+  --hostname lab.example.net \
+  --user buddy \
+  --identity ~/.ssh/id_ed25519 \
+  --certificate ~/.ssh/id_ed25519-cert.pub \
+  --path ~/.ssh/mycelium-lab.conf \
+  --write
+```
+
+Add `Include ~/.ssh/mycelium-lab.conf` to `~/.ssh/config`. The target Unix
+account must already exist; its username must be listed in the signed grant's
+`unix_users`. Mycelium's host bundle trusts the SSH CA and KRL but deliberately
+does not create OS accounts or change shells, groups, or sudo policy.
 
 ## OIDC boundary
 

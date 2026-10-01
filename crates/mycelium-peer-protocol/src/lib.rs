@@ -85,6 +85,10 @@ pub enum AccessStatement {
         unix_users: Vec<String>,
         #[serde(default)]
         ssh_public_keys: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        oidc_audiences: Vec<String>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        oidc_ssh_key_exchange: bool,
         not_before: u64,
         not_after: u64,
     },
@@ -99,6 +103,10 @@ pub enum AccessStatement {
         revoked_at: u64,
         reason: String,
     },
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl AccessStatement {
@@ -421,11 +429,16 @@ mod tests {
                 scopes: vec!["home".into()],
                 unix_users: vec!["avery".into()],
                 ssh_public_keys: vec!["ssh-ed25519 AAAA".into()],
+                oidc_audiences: vec![],
+                oidc_ssh_key_exchange: false,
                 not_before: 10,
                 not_after: 20,
             },
         )
         .unwrap();
+        let encoded = serde_json::to_value(&record.statement).unwrap();
+        assert!(encoded.get("oidc_audiences").is_none());
+        assert!(encoded.get("oidc_ssh_key_exchange").is_none());
         record.verify().unwrap();
         if let AccessStatement::Grant { scopes, .. } = &mut record.statement {
             scopes.push("prod".into());
@@ -443,6 +456,8 @@ mod tests {
             scopes: vec![],
             unix_users: vec![],
             ssh_public_keys: vec![],
+            oidc_audiences: vec![],
+            oidc_ssh_key_exchange: false,
             not_before: 10,
             not_after: 20,
         };
