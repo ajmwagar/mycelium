@@ -1007,13 +1007,23 @@ impl Supervisor {
 }
 
 fn active_supervisor() -> Option<Supervisor> {
-    if cfg!(target_os = "linux")
-        && std::process::Command::new("systemctl")
-            .args(["--user", "is-active", "--quiet", "mycelium"])
-            .status()
-            .is_ok_and(|status| status.success())
-    {
-        return Some(Supervisor::Systemd);
+    if cfg!(target_os = "linux") {
+        let loaded = std::process::Command::new("systemctl")
+            .args([
+                "--user",
+                "show",
+                "mycelium",
+                "--property=LoadState",
+                "--value",
+            ])
+            .output()
+            .is_ok_and(|output| {
+                output.status.success()
+                    && String::from_utf8_lossy(&output.stdout).trim() == "loaded"
+            });
+        if loaded {
+            return Some(Supervisor::Systemd);
+        }
     }
     let uid = uid().ok()?;
     if cfg!(target_os = "macos")
