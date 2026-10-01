@@ -71,6 +71,7 @@ fn host_rollout(args: &[String]) -> Result<Vec<String>, String> {
             "scp",
             vec![
                 "-q".into(),
+                "-O".into(),
                 "-r".into(),
                 format!("{}/.", bundle.display()),
                 format!("{target}:{remote_bundle}/"),
