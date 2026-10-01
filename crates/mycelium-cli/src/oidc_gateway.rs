@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
+use std::future::IntoFuture;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -145,6 +146,55 @@ pub async fn serve(args: &[String]) -> Result<Vec<String>, String> {
         .await
         .map_err(|e| format!("serve OIDC gateway: {e}"))?;
     Ok(Vec::new())
+}
+
+pub(crate) async fn serve_pairing(
+    listen: SocketAddr,
+    ca: PathBuf,
+    invite_store: PathBuf,
+    invitation_id: String,
+    expires_at: u64,
+) -> Result<(), String> {
+    let listener = tokio::net::TcpListener::bind(listen)
+        .await
+        .map_err(|error| format!("bind pairing listener {listen}: {error}"))?;
+    let state = GatewayState {
+        issuer: "pairing".into(),
+        audience: "pairing".into(),
+        ca: Arc::new(ca),
+        client_id: "pairing".into(),
+        client_secret: "pairing".into(),
+        callback_url: "pairing".into(),
+        invite_store: Arc::new(invite_store.clone()),
+        invite_lock: Arc::new(Mutex::new(())),
+        pending: Arc::new(Mutex::new(HashMap::new())),
+    };
+    let app = Router::new()
+        .route("/health", get(|| async { StatusCode::NO_CONTENT }))
+        .route("/v1/invite/redeem", post(redeem_invite))
+        .with_state(state);
+    let server = axum::serve(listener, app).into_future();
+    tokio::pin!(server);
+    loop {
+        tokio::select! {
+            result = &mut server => {
+                return result.map_err(|error| format!("serve pairing listener: {error}"));
+            }
+            _ = tokio::time::sleep(std::time::Duration::from_millis(250)) => {
+                let now = crate::invite::now()?;
+                let store = crate::invite::load(&invite_store)?;
+                let consumed = store.invitations.iter()
+                    .find(|invitation| invitation.id == invitation_id)
+                    .is_none_or(|invitation| invitation.remaining_uses == 0);
+                if consumed {
+                    return Ok(());
+                }
+                if now >= expires_at {
+                    return Err("pairing claim expired before redemption".into());
+                }
+            }
+        }
+    }
 }
 
 async fn redeem_invite(
@@ -650,14 +700,15 @@ fn credential_process(args: &[String], name: &str) -> Result<(String, Credential
 
 fn validate_gateway_url(value: &str) -> Result<(), String> {
     let url = reqwest::Url::parse(value).map_err(|e| format!("invalid gateway URL: {e}"))?;
-    let loopback = url.host_str().is_some_and(|host| {
+    let private = url.host_str().is_some_and(|host| {
         host == "localhost"
-            || host
-                .parse::<std::net::IpAddr>()
-                .is_ok_and(|ip| ip.is_loopback())
+            || host.parse::<std::net::IpAddr>().is_ok_and(|ip| match ip {
+                std::net::IpAddr::V4(ip) => ip.is_loopback() || ip.is_private(),
+                std::net::IpAddr::V6(ip) => ip.is_loopback() || ip.is_unique_local(),
+            })
     });
-    if url.scheme() != "https" && !(url.scheme() == "http" && loopback) {
-        return Err("gateway URL must use HTTPS (HTTP is allowed only on loopback)".into());
+    if url.scheme() != "https" && !(url.scheme() == "http" && private) {
+        return Err("gateway URL must use HTTPS (HTTP is allowed only on private networks)".into());
     }
     if url.username() != "" || url.password().is_some() {
         return Err("gateway URL must not contain credentials".into());
@@ -732,6 +783,7 @@ mod tests {
     fn gateway_transport_requires_tls_except_on_loopback() {
         assert!(validate_gateway_url("https://access.example.test").is_ok());
         assert!(validate_gateway_url("http://127.0.0.1:8787").is_ok());
+        assert!(validate_gateway_url("http://192.168.1.2:8787").is_ok());
         assert!(validate_gateway_url("http://access.example.test").is_err());
         assert!(validate_gateway_url("https://user:secret@access.example.test").is_err());
     }

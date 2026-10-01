@@ -3,13 +3,17 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub async fn run(args: &[String]) -> Result<Vec<String>, String> {
-    let gateway = value(args, "--gateway")
-        .map(str::to_owned)
+    let claim = value(args, "--claim");
+    let embedded = claim
+        .map(crate::invite::decode_pair_claim)
+        .transpose()?
+        .flatten();
+    let gateway = embedded
+        .as_ref()
+        .map(|(endpoint, _)| endpoint.clone())
+        .or_else(|| value(args, "--gateway").map(str::to_owned))
         .or_else(|| std::env::var("MYCELIUM_GATEWAY").ok())
-        .ok_or_else(|| {
-            "setup needs --gateway HTTPS-URL (or the MYCELIUM_GATEWAY environment variable)"
-                .to_owned()
-        })?;
+        .ok_or_else(|| "setup needs a pairing claim or --gateway HTTPS-URL".to_owned())?;
     let ssh_dir = user_home()?.join(".ssh");
     let private_key = value(args, "--key")
         .map(expand_home)
@@ -50,8 +54,11 @@ pub async fn run(args: &[String]) -> Result<Vec<String>, String> {
         path_string(&certificate)?,
         "--write".to_owned(),
     ];
-    let mut lines = if let Some(claim) = value(args, "--claim") {
-        request.extend(["--claim".to_owned(), claim.to_owned()]);
+    let mut lines = if let Some(claim) = claim {
+        let secret = embedded
+            .as_ref()
+            .map_or(claim, |(_, secret)| secret.as_str());
+        request.extend(["--claim".to_owned(), secret.to_owned()]);
         crate::oidc_gateway::redeem(&request).await?
     } else {
         request.extend([

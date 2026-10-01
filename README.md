@@ -39,20 +39,21 @@ curl --proto '=https' --tlsv1.2 -fsS \
 After installation, enrollment can be repeated explicitly with
 `mycelium setup --gateway https://sso.fpl.dev`.
 
-An administrator can instead create a bounded, one-use claim when OIDC is not
-appropriate. The authority stores only a hash of the claim; its Unix
-principals, expiry, credential lifetime, and use count cannot be broadened at
-redemption.
+An administrator can instead run a temporary pairing listener when OIDC is not
+appropriate. The self-contained claim carries the rendezvous URL and a
+high-entropy secret; the authority stores only its hash. The listener exits
+after successful redemption or expiry. Private-network HTTP is supported for
+direct pairing, while public rendezvous URLs must use HTTPS.
 
 ```sh
-# Authority host (same MYCELIUM_HOME as the gateway):
-mycelium invite create --name buddy --unix-user operator \
-  --ttl 15m --credential-ttl 8h --uses 1 --write
+# Authority host; keep this process open while the other user joins:
+mycelium pair --name buddy --unix-user operator \
+  --ttl 15m --credential-ttl 8h
 
 # New user machine:
 curl --proto '=https' --tlsv1.2 -fsS \
   https://raw.githubusercontent.com/ajmwagar/mycelium/master/install.sh | \
-  sh -s -- --claim MYC-REPLACE-WITH-THE-CLAIM
+  sh -s -- --claim MYC1-REPLACE-WITH-THE-PAIRING-CLAIM
 ```
 
 Requirements: a current stable Rust toolchain and the native tools required by

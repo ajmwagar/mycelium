@@ -9,6 +9,7 @@ mod enroll;
 mod invite;
 mod oidc;
 mod oidc_gateway;
+mod pair;
 mod setup;
 mod ssh_access;
 
@@ -71,7 +72,8 @@ const USAGE: &str = "\
 mycelium — control plane for your network appliances
 
 usage:
-  mycelium setup --gateway HTTPS-URL [--claim CODE] [--ttl 8h] [--key PATH] [--certificate PATH]
+  mycelium setup [--gateway HTTPS-URL] [--claim CODE] [--ttl 8h] [--key PATH] [--certificate PATH]
+  mycelium pair --name NAME --unix-user USER... [--listen ADDR] [--advertise URL] [--ca PATH] [--ttl 15m] [--credential-ttl 8h]
   mycelium invite create --name NAME --unix-user USER... [--ttl 15m] [--credential-ttl 8h] [--uses 1] --write
   mycelium daemon status|start|stop
   mycelium drivers
@@ -349,6 +351,7 @@ fn parse_flags(args: &[String]) -> Flags {
 async fn run(cmd: &str, args: &[String]) -> Result<Vec<String>, ClientError> {
     match cmd {
         "setup" => setup::run(args).await.map_err(access_error),
+        "pair" => pair::run(args).await.map_err(access_error),
         "invite" => invite::run(args).map_err(access_error),
         "daemon" => daemon(args).await,
         "help" | "--help" | "-h" => Ok(usage()),

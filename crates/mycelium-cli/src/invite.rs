@@ -37,15 +37,29 @@ pub(crate) struct RedeemResponse {
     pub expires_at: u64,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct CreatedInvitation {
+    pub code: String,
+    pub id: String,
+    pub expires_at: u64,
+    pub uses: u32,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PairClaim {
+    endpoint: String,
+    secret: String,
+}
+
 pub(crate) fn run(args: &[String]) -> Result<Vec<String>, String> {
     match args.first().map(String::as_str) {
-        Some("create") => create(args),
+        Some("create") => render_created(create(args)?),
         Some(action) => Err(format!("unknown invite action `{action}`")),
         None => Err("invite needs create".into()),
     }
 }
 
-fn create(args: &[String]) -> Result<Vec<String>, String> {
+pub(crate) fn create(args: &[String]) -> Result<CreatedInvitation, String> {
     require_write(args)?;
     let name = required(args, "--name")?;
     validate_atom("name", name)?;
@@ -92,12 +106,47 @@ fn create(args: &[String]) -> Result<Vec<String>, String> {
         serial,
     });
     save(&store_path, &store)?;
+    Ok(CreatedInvitation {
+        code,
+        id,
+        expires_at: now.saturating_add(ttl),
+        uses,
+    })
+}
+
+fn render_created(created: CreatedInvitation) -> Result<Vec<String>, String> {
     Ok(vec![
-        format!("Claim code: {code}"),
-        format!("Invitation: {id}"),
-        format!("Expires: {} (in {ttl}s)", now.saturating_add(ttl)),
-        format!("Uses: {uses}"),
+        format!("Claim code: {}", created.code),
+        format!("Invitation: {}", created.id),
+        format!("Expires: {}", created.expires_at),
+        format!("Uses: {}", created.uses),
     ])
+}
+
+pub(crate) fn encode_pair_claim(endpoint: &str, secret: &str) -> Result<String, String> {
+    let payload = serde_json::to_vec(&PairClaim {
+        endpoint: endpoint.to_owned(),
+        secret: secret.to_owned(),
+    })
+    .map_err(|error| format!("encode pairing claim: {error}"))?;
+    Ok(format!("MYC1-{}", hex(payload)))
+}
+
+pub(crate) fn decode_pair_claim(claim: &str) -> Result<Option<(String, String)>, String> {
+    let Some(encoded) = claim.strip_prefix("MYC1-") else {
+        return Ok(None);
+    };
+    if encoded.len() % 2 != 0 || encoded.len() > 4096 {
+        return Err("invalid pairing claim encoding".into());
+    }
+    let bytes = (0..encoded.len())
+        .step_by(2)
+        .map(|index| u8::from_str_radix(&encoded[index..index + 2], 16))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| "invalid pairing claim encoding".to_owned())?;
+    let payload: PairClaim =
+        serde_json::from_slice(&bytes).map_err(|error| format!("decode pairing claim: {error}"))?;
+    Ok(Some((payload.endpoint, payload.secret)))
 }
 
 pub(crate) fn store_path(args: &[String]) -> PathBuf {
@@ -277,12 +326,20 @@ mod tests {
         .map(str::to_owned)
         .collect::<Vec<_>>();
         let output = create(&args).unwrap();
-        let claim = output[0].strip_prefix("Claim code: ").unwrap();
+        let claim = &output.code;
         let raw = fs::read_to_string(&store_path).unwrap();
         assert!(!raw.contains(claim));
         let store = load(&store_path).unwrap();
         assert_eq!(store.invitations.len(), 1);
         assert_eq!(store.invitations[0].code_hash, claim_hash(claim));
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn pairing_claim_carries_rendezvous_without_changing_secret() {
+        let encoded = encode_pair_claim("http://192.168.1.2:8788", "MYC-SECRET").unwrap();
+        let decoded = decode_pair_claim(&encoded).unwrap().unwrap();
+        assert_eq!(decoded.0, "http://192.168.1.2:8788");
+        assert_eq!(decoded.1, "MYC-SECRET");
     }
 }
