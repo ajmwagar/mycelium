@@ -28,6 +28,17 @@ supported host build.
 
 ## Quick start
 
+For a first-time user, the installer builds the CLI and starts browser-based
+OIDC enrollment. `MYCELIUM_GATEWAY` can select any compatible deployment.
+
+```sh
+curl --proto '=https' --tlsv1.2 -fsS \
+  https://raw.githubusercontent.com/ajmwagar/mycelium/master/install.sh | sh
+```
+
+After installation, enrollment can be repeated explicitly with
+`mycelium setup --gateway https://sso.fpl.dev`.
+
 Requirements: a current stable Rust toolchain and the native tools required by
 the drivers you choose (for example OpenSSH and SNMP utilities).
 

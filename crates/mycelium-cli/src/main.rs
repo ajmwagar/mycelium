@@ -8,6 +8,7 @@
 mod enroll;
 mod oidc;
 mod oidc_gateway;
+mod setup;
 mod ssh_access;
 
 use mycelium_core::{
@@ -69,6 +70,7 @@ const USAGE: &str = "\
 mycelium — control plane for your network appliances
 
 usage:
+  mycelium setup --gateway HTTPS-URL [--ttl 8h] [--key PATH] [--certificate PATH]
   mycelium daemon status|start|stop
   mycelium drivers
   mycelium add <host[:port]> [--name NAME] [--driver NAME] [--user U] [--password-env VAR] [--key PATH]
@@ -344,6 +346,7 @@ fn parse_flags(args: &[String]) -> Flags {
 
 async fn run(cmd: &str, args: &[String]) -> Result<Vec<String>, ClientError> {
     match cmd {
+        "setup" => setup::run(args).await.map_err(access_error),
         "daemon" => daemon(args).await,
         "help" | "--help" | "-h" => Ok(usage()),
         "drivers" => {
