@@ -1,0 +1,544 @@
+use std::collections::HashMap;
+use std::fs;
+use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use axum::extract::{Path as AxumPath, Query, State};
+use axum::http::{HeaderMap, StatusCode};
+use axum::routing::{get, post};
+use axum::{Json, Router};
+use myceliumd::client::Client;
+use myceliumd::protocol::Request;
+use rand_core::{OsRng, RngCore};
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone)]
+struct GatewayState {
+    issuer: Arc<str>,
+    audience: Arc<str>,
+    ca: Arc<PathBuf>,
+    client_id: Arc<str>,
+    client_secret: Arc<str>,
+    callback_url: Arc<str>,
+    pending: Arc<Mutex<HashMap<String, Pending>>>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+struct IssueRequest {
+    token: String,
+    public_key: String,
+    #[serde(default)]
+    grant: Option<String>,
+    #[serde(default = "default_ttl")]
+    ttl: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct IssueResponse {
+    certificate: String,
+    principal: String,
+    expires_at: u64,
+}
+
+struct Pending {
+    poll_secret: String,
+    request: IssueRequest,
+    result: Option<Result<IssueResponse, String>>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct StartResponse {
+    authorization_url: String,
+    request_id: String,
+    poll_secret: String,
+}
+
+#[derive(Deserialize)]
+struct CallbackQuery {
+    code: String,
+    state: String,
+}
+
+#[derive(Deserialize, Serialize)]
+struct StartRequest {
+    public_key: String,
+    #[serde(default)]
+    grant: Option<String>,
+    #[serde(default = "default_ttl")]
+    ttl: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ErrorResponse {
+    error: String,
+}
+
+pub async fn serve(args: &[String]) -> Result<Vec<String>, String> {
+    require_write(args)?;
+    let listen = required(args, "--listen")?
+        .parse::<SocketAddr>()
+        .map_err(|e| format!("invalid gateway listen address: {e}"))?;
+    if !listen.ip().is_loopback() {
+        return Err(
+            "OIDC gateway only binds loopback; publish it through an HTTPS reverse proxy".into(),
+        );
+    }
+    let issuer = required(args, "--issuer")?.trim_end_matches('/').to_owned();
+    let audience = required(args, "--audience")?.to_owned();
+    let ca = PathBuf::from(required(args, "--ca")?);
+    let client_id = required(args, "--client-id")?.to_owned();
+    if client_id != audience {
+        return Err("OIDC audience must equal the gateway's registered client ID".into());
+    }
+    let client_secret_env = required(args, "--client-secret-env")?;
+    let client_secret = std::env::var(client_secret_env).map_err(|_| {
+        format!("OIDC client secret environment variable `{client_secret_env}` is not set")
+    })?;
+    let callback_url = required(args, "--callback-url")?.to_owned();
+    if !ca.is_file() {
+        return Err(format!(
+            "SSH CA private key {} does not exist",
+            ca.display()
+        ));
+    }
+    let listener = tokio::net::TcpListener::bind(listen)
+        .await
+        .map_err(|e| format!("bind OIDC gateway {listen}: {e}"))?;
+    let state = GatewayState {
+        issuer: issuer.into(),
+        audience: audience.into(),
+        ca: Arc::new(ca),
+        client_id: client_id.into(),
+        client_secret: client_secret.into(),
+        callback_url: callback_url.into(),
+        pending: Arc::new(Mutex::new(HashMap::new())),
+    };
+    let app = Router::new()
+        .route("/health", get(|| async { StatusCode::NO_CONTENT }))
+        .route("/v1/ssh/issue", post(issue))
+        .route("/v1/oidc/start", post(start))
+        .route("/v1/oidc/callback", get(callback))
+        .route("/v1/oidc/status/{id}", get(status))
+        .with_state(state);
+    eprintln!("mycelium OIDC gateway listening on http://{listen}; HTTPS termination is required");
+    axum::serve(listener, app)
+        .await
+        .map_err(|e| format!("serve OIDC gateway: {e}"))?;
+    Ok(Vec::new())
+}
+
+async fn issue(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    Json(mut request): Json<IssueRequest>,
+) -> Result<Json<IssueResponse>, (StatusCode, Json<ErrorResponse>)> {
+    if headers
+        .get("content-type")
+        .and_then(|value| value.to_str().ok())
+        .is_none_or(|value| !value.starts_with("application/json"))
+    {
+        return Err(api_error(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "JSON required",
+        ));
+    }
+    if request.token.len() > 64 * 1024 || request.public_key.len() > 16 * 1024 {
+        return Err(api_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "request too large",
+        ));
+    }
+    let identity = crate::oidc::verify_token(&state.issuer, &state.audience, &request.token, None)
+        .await
+        .map_err(|error| api_error(StatusCode::UNAUTHORIZED, error))?;
+    request.token.clear();
+
+    let mut client = Client::connect()
+        .await
+        .map_err(|error| api_error(StatusCode::SERVICE_UNAVAILABLE, error.to_string()))?;
+    let access = client
+        .call(&Request::AccessList)
+        .await
+        .map_err(|error| api_error(StatusCode::SERVICE_UNAVAILABLE, error.to_string()))?;
+    let root = temporary_root();
+    fs::create_dir_all(&root)
+        .map_err(|error| api_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    let key_path = root.join("user.pub");
+    let certificate_path = root.join("user-cert.pub");
+    let result = (|| {
+        fs::write(&key_path, request.public_key.as_bytes())
+            .map_err(|error| format!("stage SSH public key: {error}"))?;
+        let mut args = vec![
+            "ssh-issue".into(),
+            "--public-key".into(),
+            path_string(&key_path)?,
+            "--ca".into(),
+            path_string(&state.ca)?,
+            "--path".into(),
+            path_string(&certificate_path)?,
+            "--ttl".into(),
+            request.ttl,
+            "--write".into(),
+        ];
+        if let Some(grant) = request.grant {
+            args.extend(["--grant".into(), grant]);
+        }
+        crate::ssh_access::issue_for_oidc(
+            &args,
+            &access,
+            &identity.principal,
+            &state.audience,
+            identity.expires_at,
+        )?;
+        fs::read_to_string(&certificate_path)
+            .map_err(|error| format!("read issued SSH certificate: {error}"))
+    })();
+    let _ = fs::remove_dir_all(&root);
+    let certificate = result.map_err(|error| api_error(StatusCode::FORBIDDEN, error))?;
+    Ok(Json(IssueResponse {
+        certificate,
+        principal: identity.principal,
+        expires_at: identity.expires_at,
+    }))
+}
+
+async fn start(
+    State(state): State<GatewayState>,
+    Json(body): Json<StartRequest>,
+) -> Result<Json<StartResponse>, (StatusCode, Json<ErrorResponse>)> {
+    if body.public_key.len() > 16 * 1024 {
+        return Err(api_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "public key too large",
+        ));
+    }
+    let request_id = random_secret();
+    let poll_secret = random_secret();
+    state
+        .pending
+        .lock()
+        .map_err(|_| api_error(StatusCode::INTERNAL_SERVER_ERROR, "pending lock poisoned"))?
+        .insert(
+            request_id.clone(),
+            Pending {
+                poll_secret: poll_secret.clone(),
+                request: IssueRequest {
+                    token: String::new(),
+                    public_key: body.public_key,
+                    grant: body.grant,
+                    ttl: body.ttl,
+                },
+                result: None,
+            },
+        );
+    let mut url = reqwest::Url::parse(&format!("{}/authorize", state.issuer))
+        .map_err(|e| api_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    url.query_pairs_mut()
+        .append_pair("response_type", "code")
+        .append_pair("client_id", &state.client_id)
+        .append_pair("redirect_uri", &state.callback_url)
+        .append_pair("scope", "openid email profile")
+        .append_pair("state", &request_id);
+    Ok(Json(StartResponse {
+        authorization_url: url.into(),
+        request_id,
+        poll_secret,
+    }))
+}
+
+async fn callback(
+    State(state): State<GatewayState>,
+    Query(query): Query<CallbackQuery>,
+) -> Result<&'static str, (StatusCode, Json<ErrorResponse>)> {
+    if !state
+        .pending
+        .lock()
+        .map_err(|_| api_error(StatusCode::INTERNAL_SERVER_ERROR, "pending lock poisoned"))?
+        .contains_key(&query.state)
+    {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "unknown or expired OIDC state",
+        ));
+    }
+    let token_response = reqwest::Client::new()
+        .post(format!("{}/token", state.issuer))
+        .form(&[
+            ("grant_type", "authorization_code"),
+            ("code", query.code.as_str()),
+            ("client_id", &state.client_id),
+            ("client_secret", &state.client_secret),
+            ("redirect_uri", &state.callback_url),
+        ])
+        .send()
+        .await
+        .map_err(|e| api_error(StatusCode::BAD_GATEWAY, e.to_string()))?;
+    let token_json: serde_json::Value = token_response
+        .json()
+        .await
+        .map_err(|e| api_error(StatusCode::BAD_GATEWAY, e.to_string()))?;
+    let token = token_json["id_token"]
+        .as_str()
+        .ok_or_else(|| {
+            api_error(
+                StatusCode::UNAUTHORIZED,
+                "OIDC token response has no id_token",
+            )
+        })?
+        .to_owned();
+    let mut request = {
+        let mut pending = state
+            .pending
+            .lock()
+            .map_err(|_| api_error(StatusCode::INTERNAL_SERVER_ERROR, "pending lock poisoned"))?;
+        pending
+            .get_mut(&query.state)
+            .ok_or_else(|| api_error(StatusCode::BAD_REQUEST, "unknown OIDC state"))?
+            .request
+            .clone()
+    };
+    request.token = token;
+    let mut headers = HeaderMap::new();
+    headers.insert("content-type", "application/json".parse().unwrap());
+    let result = issue(State(state.clone()), headers, Json(request))
+        .await
+        .map(|Json(value)| value)
+        .map_err(|(_, Json(error))| error.error);
+    state
+        .pending
+        .lock()
+        .map_err(|_| api_error(StatusCode::INTERNAL_SERVER_ERROR, "pending lock poisoned"))?
+        .get_mut(&query.state)
+        .unwrap()
+        .result = Some(result);
+    Ok("Mycelium authentication complete. You may close this window.")
+}
+
+async fn status(
+    State(state): State<GatewayState>,
+    AxumPath(id): AxumPath<String>,
+    headers: HeaderMap,
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ErrorResponse>)> {
+    let bearer = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .ok_or_else(|| api_error(StatusCode::UNAUTHORIZED, "poll secret required"))?;
+    let mut pending = state
+        .pending
+        .lock()
+        .map_err(|_| api_error(StatusCode::INTERNAL_SERVER_ERROR, "pending lock poisoned"))?;
+    let item = pending
+        .get(&id)
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "join request not found"))?;
+    if item.poll_secret != bearer {
+        return Err(api_error(StatusCode::UNAUTHORIZED, "invalid poll secret"));
+    }
+    match item.result.clone() {
+        None => Ok((
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({"status":"pending"})),
+        )),
+        Some(Ok(value)) => {
+            pending.remove(&id);
+            Ok((StatusCode::OK, Json(serde_json::to_value(value).unwrap())))
+        }
+        Some(Err(error)) => {
+            pending.remove(&id);
+            Err(api_error(StatusCode::FORBIDDEN, error))
+        }
+    }
+}
+
+pub async fn join(args: &[String]) -> Result<Vec<String>, String> {
+    require_write(args)?;
+    let gateway = required(args, "--gateway")?.trim_end_matches('/');
+    validate_gateway_url(gateway)?;
+    let public_key_path = required(args, "--public-key")?;
+    let public_key = fs::read_to_string(public_key_path)
+        .map_err(|e| format!("read SSH public key {public_key_path}: {e}"))?;
+    let certificate_path = Path::new(required(args, "--certificate")?);
+    if certificate_path.exists() {
+        return Err(format!(
+            "refusing to replace existing SSH certificate {}",
+            certificate_path.display()
+        ));
+    }
+    let client = reqwest::Client::new();
+    let response = if let Some(token_env) = value(args, "--token-env") {
+        let token = std::env::var(token_env)
+            .map_err(|_| format!("OIDC token environment variable `{token_env}` is not set"))?;
+        client
+            .post(format!("{gateway}/v1/ssh/issue"))
+            .json(&IssueRequest {
+                token,
+                public_key,
+                grant: value(args, "--grant").map(str::to_owned),
+                ttl: value(args, "--ttl").unwrap_or("1h").to_owned(),
+            })
+            .send()
+            .await
+            .map_err(|e| format!("request SSH certificate from gateway: {e}"))?
+    } else {
+        let started = client
+            .post(format!("{gateway}/v1/oidc/start"))
+            .json(&StartRequest {
+                public_key,
+                grant: value(args, "--grant").map(str::to_owned),
+                ttl: value(args, "--ttl").unwrap_or("1h").to_owned(),
+            })
+            .send()
+            .await
+            .map_err(|e| format!("start OIDC join: {e}"))?;
+        if !started.status().is_success() {
+            return Err(format!(
+                "OIDC gateway refused join start: {}",
+                started.status()
+            ));
+        }
+        let started: StartResponse = started
+            .json()
+            .await
+            .map_err(|e| format!("decode join start: {e}"))?;
+        eprintln!(
+            "Open this URL to authenticate:\n{}",
+            started.authorization_url
+        );
+        open_browser(&started.authorization_url);
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            let polled = client
+                .get(format!("{gateway}/v1/oidc/status/{}", started.request_id))
+                .bearer_auth(&started.poll_secret)
+                .send()
+                .await
+                .map_err(|e| format!("poll OIDC join: {e}"))?;
+            if polled.status() == StatusCode::ACCEPTED {
+                continue;
+            }
+            break polled;
+        }
+    };
+    if !response.status().is_success() {
+        let status = response.status();
+        let error = response
+            .json::<ErrorResponse>()
+            .await
+            .map(|body| body.error)
+            .unwrap_or_else(|_| "gateway returned an unreadable error".into());
+        return Err(format!("OIDC gateway returned {status}: {error}"));
+    }
+    let issued = response
+        .json::<IssueResponse>()
+        .await
+        .map_err(|e| format!("decode OIDC gateway response: {e}"))?;
+    if let Some(parent) = certificate_path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
+    }
+    let staging = certificate_path.with_extension("mycelium-staging");
+    fs::write(&staging, issued.certificate)
+        .map_err(|e| format!("write staged SSH certificate {}: {e}", staging.display()))?;
+    fs::rename(&staging, certificate_path).map_err(|e| {
+        format!(
+            "install SSH certificate {}: {e}",
+            certificate_path.display()
+        )
+    })?;
+    Ok(vec![format!(
+        "joined as {}; wrote {} (OIDC token expires at {})",
+        issued.principal,
+        certificate_path.display(),
+        issued.expires_at
+    )])
+}
+
+fn validate_gateway_url(value: &str) -> Result<(), String> {
+    let url = reqwest::Url::parse(value).map_err(|e| format!("invalid gateway URL: {e}"))?;
+    let loopback = url.host_str().is_some_and(|host| {
+        host == "localhost"
+            || host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback())
+    });
+    if url.scheme() != "https" && !(url.scheme() == "http" && loopback) {
+        return Err("gateway URL must use HTTPS (HTTP is allowed only on loopback)".into());
+    }
+    if url.username() != "" || url.password().is_some() {
+        return Err("gateway URL must not contain credentials".into());
+    }
+    Ok(())
+}
+
+fn api_error(status: StatusCode, error: impl Into<String>) -> (StatusCode, Json<ErrorResponse>) {
+    (
+        status,
+        Json(ErrorResponse {
+            error: error.into(),
+        }),
+    )
+}
+
+fn temporary_root() -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    std::env::temp_dir().join(format!("mycelium-oidc-{}-{nanos}", std::process::id()))
+}
+
+fn random_secret() -> String {
+    let mut bytes = [0u8; 32];
+    OsRng.fill_bytes(&mut bytes);
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn open_browser(url: &str) {
+    let command = if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    let _ = std::process::Command::new(command).arg(url).spawn();
+}
+
+fn path_string(path: &Path) -> Result<String, String> {
+    path.to_str()
+        .map(str::to_owned)
+        .ok_or_else(|| format!("path is not UTF-8: {}", path.display()))
+}
+
+fn default_ttl() -> String {
+    "1h".into()
+}
+
+fn value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+    args.iter()
+        .position(|arg| arg == flag)
+        .and_then(|index| args.get(index + 1))
+        .map(String::as_str)
+}
+
+fn required<'a>(args: &'a [String], flag: &str) -> Result<&'a str, String> {
+    value(args, flag).ok_or_else(|| format!("OIDC access command needs {flag}"))
+}
+
+fn require_write(args: &[String]) -> Result<(), String> {
+    args.iter()
+        .any(|arg| arg == "--write")
+        .then_some(())
+        .ok_or_else(|| "OIDC gateway changes require --write".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gateway_transport_requires_tls_except_on_loopback() {
+        assert!(validate_gateway_url("https://access.example.test").is_ok());
+        assert!(validate_gateway_url("http://127.0.0.1:8787").is_ok());
+        assert!(validate_gateway_url("http://access.example.test").is_err());
+        assert!(validate_gateway_url("https://user:secret@access.example.test").is_err());
+    }
+}

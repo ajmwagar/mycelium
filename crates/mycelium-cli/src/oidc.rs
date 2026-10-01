@@ -11,14 +11,14 @@ struct Discovery {
 /// Stable output contract between any OIDC provider and Mycelium's access
 /// authority. Bearer and ID tokens never enter peer gossip or persistence.
 #[derive(Debug, Serialize)]
-struct Identity {
-    principal: String,
-    issuer: String,
-    subject: String,
+pub(crate) struct Identity {
+    pub(crate) principal: String,
+    pub(crate) issuer: String,
+    pub(crate) subject: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     email: Option<String>,
     groups: Vec<String>,
-    expires_at: u64,
+    pub(crate) expires_at: u64,
 }
 
 pub async fn run(args: &[String], state: Option<&Value>) -> Result<Vec<String>, String> {
@@ -27,6 +27,8 @@ pub async fn run(args: &[String], state: Option<&Value>) -> Result<Vec<String>, 
         Some("ssh-issue") => {
             ssh_issue(args, state.ok_or("OIDC SSH issuance needs access state")?).await
         }
+        Some("gateway") => crate::oidc_gateway::serve(args).await,
+        Some("join") => crate::oidc_gateway::join(args).await,
         Some(action) => Err(format!("unknown access oidc action `{action}`")),
         None => Err("access oidc needs verify".into()),
     }
@@ -62,7 +64,17 @@ async fn verify_identity(args: &[String]) -> Result<Identity, String> {
     let token_env = required(args, "--token-env")?;
     let token = std::env::var(token_env)
         .map_err(|_| format!("OIDC token environment variable `{token_env}` is not set"))?;
-    let discovery_url = value(args, "--discovery")
+    verify_token(issuer, audience, &token, value(args, "--discovery")).await
+}
+
+pub(crate) async fn verify_token(
+    issuer: &str,
+    audience: &str,
+    token: &str,
+    discovery_override: Option<&str>,
+) -> Result<Identity, String> {
+    let issuer = issuer.trim_end_matches('/');
+    let discovery_url = discovery_override
         .map(str::to_owned)
         .unwrap_or_else(|| format!("{issuer}/.well-known/openid-configuration"));
     let client = reqwest::Client::builder()

@@ -31,6 +31,17 @@ supported host build.
 Requirements: a current stable Rust toolchain and the native tools required by
 the drivers you choose (for example OpenSSH and SNMP utilities).
 
+Install directly from GitHub:
+
+```sh
+cargo install --git https://github.com/ajmwagar/mycelium.git \
+  --package mycelium-cli --locked
+mycelium drivers
+```
+
+For a pinned checkout, build `mycelium-cli` as shown below and place
+`target/release/mycelium` on `PATH`.
+
 ```sh
 git clone https://github.com/ajmwagar/mycelium.git
 cd mycelium
@@ -190,6 +201,44 @@ mycelium access list
 OIDC-backed grants bind issuer, subject, and audience to Unix principals and
 optionally permit a valid JWT holder to certify a presented SSH key. The
 resulting certificate never outlives either the JWT or the signed grant.
+
+### Join with OIDC
+
+The SSH CA stays on an authority host. Run the gateway on loopback and expose
+it only through an HTTPS reverse proxy:
+
+```sh
+mycelium access oidc gateway \
+  --listen 127.0.0.1:8787 \
+  --issuer https://identity.example \
+  --audience mycelium \
+  --client-id mycelium \
+  --client-secret-env MYCELIUM_OIDC_CLIENT_SECRET \
+  --callback-url https://mycelium-access.example/v1/oidc/callback \
+  --ca "$MYCELIUM_HOME/ssh/user_ca" --write
+```
+
+After an administrator publishes the user's signed grant, the user installs
+the CLI and exchanges a current ID token plus their public key:
+
+```sh
+mycelium access oidc join \
+  --gateway https://mycelium-access.example \
+  --public-key ~/.ssh/id_ed25519.pub \
+  --certificate ~/.ssh/id_ed25519-cert.pub \
+  --ttl 1h --write
+
+mycelium access ssh client-config \
+  --host mycelium-lab --hostname lab.example --user buddy \
+  --identity ~/.ssh/id_ed25519 \
+  --certificate ~/.ssh/id_ed25519-cert.pub \
+  --path ~/.ssh/mycelium-lab.conf --write
+```
+
+Include the generated fragment from `~/.ssh/config`. Provider configuration,
+client credentials, grants, CA material, certificates, and runtime inventory
+belong in deployment state, never the source tree. The gateway reloads current
+grant/revocation state for every request and never returns the CA key.
 
 The authority private key stays off ordinary peers. Membership in the mTLS
 mesh permits transport only; it does not permit creating access statements.

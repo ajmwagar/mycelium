@@ -86,6 +86,12 @@ the normalized issuer/subject and audience. The certificate lifetime is
 capped by the requested TTL, grant expiry, and JWT expiry. Neither the JWT nor
 the IdP signing keys enter Mycelium gossip or persistent state.
 
+For self-service use, run `mycelium access oidc gateway` on the authority host
+behind HTTPS, then run `mycelium access oidc join` on the user's machine. The
+gateway binds only to loopback, reloads converged access state per request, and
+returns only the signed user certificate. The README contains the complete
+operator and user commands.
+
 Certificate lifetime is capped by the signed grant. Issuance fails if the
 grant is missing, inactive, expired, revoked, has no Unix principal, or does
 not contain the presented public key.
