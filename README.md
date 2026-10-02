@@ -520,6 +520,22 @@ the certificate at the same path; the SSH fragment does not need regeneration.
 
 The authority private key stays off ordinary peers. Membership in the mTLS
 mesh permits transport only; it does not permit creating access statements.
+
+### Peer-bound transport credentials
+
+One persistent Ed25519 key identifies a Mycelium peer. Transport private keys
+remain separate and local: Mycelium signs bindings from that peer identity to
+the public WireGuard, mTLS, DERP, or SSH credential instead of deriving or
+reusing private keys across protocols.
+
+WireGuard publications use this common binding directly. Upgraded mTLS peers
+also gossip a signed SHA-256 fingerprint of their leaf certificate and advertise
+the `transport.identity-binding` capability. Sensitive operations on such a
+connection are accepted only after the presented certificate matches that
+peer-signed binding. Peers without the capability remain compatible during a
+rolling upgrade, but receive only the legacy CA-membership guarantee.
+After all peers have been upgraded, set
+`MYCELIUM_REQUIRE_TRANSPORT_BINDING=true` to reject that legacy downgrade path.
 See [`docs/access-control.md`](docs/access-control.md) for the OIDC verification,
 SSH certificate issuance, host installation, validation, and rollback runbook.
 

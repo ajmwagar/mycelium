@@ -99,6 +99,7 @@ pub enum PeerEvent {
     Topology(TopologySnapshot),
     Release(ReleaseManifest),
     Access(AccessRecord),
+    Transport(TransportCredentialBinding),
     WireGuard(WireGuardBinding),
     SecurityPosture(SecurityPosture),
     SecurityEvents(SecurityEventBatch),
@@ -115,6 +116,7 @@ enum KnownPeerEvent {
     Topology(TopologySnapshot),
     Release(ReleaseManifest),
     Access(AccessRecord),
+    Transport(TransportCredentialBinding),
     WireGuard(WireGuardBinding),
     SecurityPosture(SecurityPosture),
     SecurityEvents(SecurityEventBatch),
@@ -134,6 +136,7 @@ impl<'de> Deserialize<'de> for PeerEvent {
                     | "topology"
                     | "release"
                     | "access"
+                    | "transport"
                     | "wire_guard"
                     | "security_posture"
                     | "security_events"
@@ -150,6 +153,7 @@ impl<'de> Deserialize<'de> for PeerEvent {
             KnownPeerEvent::Topology(value) => Self::Topology(value),
             KnownPeerEvent::Release(value) => Self::Release(value),
             KnownPeerEvent::Access(value) => Self::Access(value),
+            KnownPeerEvent::Transport(value) => Self::Transport(value),
             KnownPeerEvent::WireGuard(value) => Self::WireGuard(value),
             KnownPeerEvent::SecurityPosture(value) => Self::SecurityPosture(value),
             KnownPeerEvent::SecurityEvents(value) => Self::SecurityEvents(value),
@@ -242,19 +246,70 @@ pub struct SecurityEventBatch {
     pub events: Vec<SecurityEvent>,
 }
 
+/// A narrowly scoped transport credential bound to a stable Mycelium peer.
+///
+/// This is deliberately not key derivation: every transport owns and rotates
+/// its own private key. The peer's Ed25519 identity authorizes the public half
+/// by signing the envelope that carries this binding.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransportKind {
+    Mtls,
+    WireGuard,
+    Derp,
+    Ssh,
+}
+
+fn wireguard_transport_kind() -> TransportKind {
+    TransportKind::WireGuard
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransportCredentialBinding {
+    pub node_id: String,
+    #[serde(default = "wireguard_transport_kind")]
+    pub kind: TransportKind,
+    /// Transport-specific public key or certificate SHA-256 fingerprint.
+    pub public_key: String,
+    pub generation: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valid_until: Option<u64>,
+}
+
+impl TransportCredentialBinding {
+    pub fn validate_for(&self, origin: &str) -> Result<(), String> {
+        if self.node_id != origin {
+            return Err("transport binding does not belong to its signed origin".into());
+        }
+        if self.public_key.trim().is_empty() {
+            return Err("transport binding public key is empty".into());
+        }
+        Ok(())
+    }
+}
+
 /// A WireGuard transport key and the routes it may advertise, authorized by
 /// the surrounding signed envelope from the node's Mycelium identity.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WireGuardBinding {
-    pub node_id: String,
+    #[serde(flatten)]
+    pub credential: TransportCredentialBinding,
     pub hostname: String,
     pub site: String,
-    pub public_key: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
     #[serde(default)]
     pub advertised_prefixes: Vec<String>,
-    pub generation: u64,
+}
+
+impl WireGuardBinding {
+    pub fn validate_for(&self, origin: &str) -> Result<(), String> {
+        self.credential.validate_for(origin)?;
+        if self.credential.kind != TransportKind::WireGuard {
+            return Err("WireGuard binding carries a non-WireGuard credential".into());
+        }
+        Ok(())
+    }
 }
 
 /// A signed, schema-versioned topology snapshot. The topology schema remains
@@ -725,13 +780,17 @@ mod tests {
             1,
             1,
             PeerEvent::WireGuard(WireGuardBinding {
-                node_id,
+                credential: TransportCredentialBinding {
+                    node_id,
+                    kind: TransportKind::WireGuard,
+                    public_key: "wireguard-public-key".into(),
+                    generation: 1,
+                    valid_until: None,
+                },
                 hostname: "gateway".into(),
                 site: "home".into(),
-                public_key: "wireguard-public-key".into(),
                 endpoint: Some("198.51.100.10:51820".into()),
                 advertised_prefixes: vec!["192.168.10.0/24".into()],
-                generation: 1,
             }),
         )
         .unwrap();
@@ -740,6 +799,43 @@ mod tests {
             binding.advertised_prefixes.push("10.0.0.0/8".into());
         }
         assert!(envelope.verify().is_err());
+    }
+
+    #[test]
+    fn transport_binding_rejects_wrong_origin_and_transport_kind() {
+        let binding = TransportCredentialBinding {
+            node_id: "peer-a".into(),
+            kind: TransportKind::Mtls,
+            public_key: "sha256:certificate".into(),
+            generation: 1,
+            valid_until: None,
+        };
+        assert!(binding.validate_for("peer-a").is_ok());
+        assert!(binding.validate_for("peer-b").is_err());
+
+        let wireguard = WireGuardBinding {
+            credential: binding,
+            hostname: "gateway".into(),
+            site: "home".into(),
+            endpoint: None,
+            advertised_prefixes: Vec::new(),
+        };
+        assert!(wireguard.validate_for("peer-a").is_err());
+    }
+
+    #[test]
+    fn legacy_wireguard_binding_defaults_to_wireguard_transport() {
+        let binding: WireGuardBinding = serde_json::from_value(serde_json::json!({
+            "node_id": "peer-a",
+            "hostname": "gateway",
+            "site": "home",
+            "public_key": "wg-key",
+            "advertised_prefixes": [],
+            "generation": 7
+        }))
+        .unwrap();
+        assert_eq!(binding.credential.kind, TransportKind::WireGuard);
+        assert_eq!(binding.credential.public_key, "wg-key");
     }
 
     #[test]

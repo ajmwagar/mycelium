@@ -159,13 +159,17 @@ mod tests {
         }
         topology.nodes.insert(node.id.clone(), node);
         let binding = WireGuardBinding {
-            node_id: "identity".into(),
+            credential: mycelium_peer_protocol::TransportCredentialBinding {
+                node_id: "identity".into(),
+                kind: mycelium_peer_protocol::TransportKind::WireGuard,
+                public_key: "public".into(),
+                generation: 1,
+                valid_until: None,
+            },
             hostname: "gateway".into(),
             site: "home".into(),
-            public_key: "public".into(),
             endpoint: None,
             advertised_prefixes: vec!["192.168.10.0/24".into()],
-            generation: 1,
         };
         let records = derive_records(&topology, &[binding], "mycelium").unwrap();
         assert_eq!(records.len(), 1);

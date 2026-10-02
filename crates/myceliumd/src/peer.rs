@@ -14,8 +14,8 @@ use mycelium_peer_protocol::{
     decode_hex, encode_hex, local_build_target, local_compatible_targets, sha256_hex, AccessRecord,
     AccessStatement, FilesystemHealth, HostHealth, PeerEvent, PeerHello, PeerMessage, Platform,
     ProcessHealth, ReleaseManifest, SecurityEventBatch, SecurityPosture, SignedEnvelope,
-    TopologySnapshot, WireGuardBinding, MAX_SECURITY_EVENTS, MAX_SECURITY_FINDINGS,
-    PROTOCOL_VERSION,
+    TopologySnapshot, TransportCredentialBinding, TransportKind, WireGuardBinding,
+    MAX_SECURITY_EVENTS, MAX_SECURITY_FINDINGS, PROTOCOL_VERSION,
 };
 use rand_core::OsRng;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
@@ -43,6 +43,7 @@ pub struct PeerView {
     pub origin: String,
     pub hello: Option<PeerHello>,
     pub health: Option<HostHealth>,
+    pub transports: Vec<TransportCredentialBinding>,
     pub last_seen: u64,
 }
 
@@ -88,6 +89,7 @@ pub struct Mesh {
     allowed_origins: Option<BTreeSet<String>>,
     trusted_release_keys: BTreeSet<String>,
     trusted_access_keys: BTreeSet<String>,
+    require_transport_binding: bool,
 }
 
 impl Mesh {
@@ -105,13 +107,18 @@ impl Mesh {
                 platform: Platform::Linux,
                 architecture: "test".into(),
                 daemon_version: crate::VERSION.into(),
-                capabilities: vec!["system.health".into(), "security.posture".into()],
+                capabilities: vec![
+                    "system.health".into(),
+                    "security.posture".into(),
+                    "transport.identity-binding".into(),
+                ],
             },
             sequence: AtomicU64::new(0),
             observations: Mutex::new(BTreeMap::new()),
             allowed_origins: None,
             trusted_release_keys: BTreeSet::new(),
             trusted_access_keys: BTreeSet::new(),
+            require_transport_binding: false,
         })
     }
 
@@ -152,7 +159,11 @@ impl Mesh {
             platform: platform(),
             architecture: std::env::consts::ARCH.into(),
             daemon_version: crate::VERSION.into(),
-            capabilities: vec!["system.health".into(), "security.posture".into()],
+            capabilities: vec![
+                "system.health".into(),
+                "security.posture".into(),
+                "transport.identity-binding".into(),
+            ],
         };
         let allowed_origins = std::env::var("MYCELIUM_PEER_ALLOW").ok().map(|value| {
             value
@@ -164,6 +175,8 @@ impl Mesh {
         });
         let trusted_release_keys = csv_set("MYCELIUM_RELEASE_KEYS");
         let trusted_access_keys = csv_set("MYCELIUM_ACCESS_KEYS");
+        let require_transport_binding = std::env::var("MYCELIUM_REQUIRE_TRANSPORT_BINDING")
+            .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "yes"));
         let observations = match std::fs::read_to_string(crate::peer_observations_path()) {
             Ok(text) => serde_json::from_str::<Vec<SignedEnvelope>>(&text)?
                 .into_iter()
@@ -207,6 +220,7 @@ impl Mesh {
             allowed_origins,
             trusted_release_keys,
             trusted_access_keys,
+            require_transport_binding,
         }))
     }
 
@@ -263,6 +277,10 @@ impl Mesh {
         });
 
         if let Some(tls) = TlsSettings::from_env()? {
+            self.publish(PeerEvent::Transport(
+                tls.identity_binding(&self.hello.node_id)?,
+            ))
+            .await?;
             let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
             if let Some(address) = tls.listen.clone() {
                 let mesh = self.clone();
@@ -291,6 +309,7 @@ impl Mesh {
                 origin: envelope.origin.clone(),
                 hello: None,
                 health: None,
+                transports: Vec::new(),
                 last_seen: 0,
             });
             view.last_seen = view.last_seen.max(envelope.emitted_at);
@@ -300,7 +319,8 @@ impl Mesh {
                 PeerEvent::Topology(_) => {}
                 PeerEvent::Release(_) => {}
                 PeerEvent::Access(_) => {}
-                PeerEvent::WireGuard(_) => {}
+                PeerEvent::Transport(binding) => view.transports.push(binding.clone()),
+                PeerEvent::WireGuard(binding) => view.transports.push(binding.credential.clone()),
                 PeerEvent::SecurityPosture(_) => {}
                 PeerEvent::SecurityEvents(_) => {}
                 PeerEvent::Unknown => {}
@@ -331,6 +351,22 @@ impl Mesh {
                 _ => None,
             })
             .collect()
+    }
+
+    async fn has_transport_binding(
+        &self,
+        node_id: &str,
+        kind: TransportKind,
+        public_key: &str,
+    ) -> bool {
+        self.observations.lock().await.values().any(|envelope| {
+            envelope.origin == node_id
+                && matches!(
+                    &envelope.event,
+                    PeerEvent::Transport(binding)
+                        if binding.kind == kind && binding.public_key == public_key
+                )
+        })
     }
 
     pub async fn security_postures(&self) -> Vec<SecurityPosture> {
@@ -390,13 +426,17 @@ impl Mesh {
         advertised_prefixes: Vec<String>,
     ) -> Result<WireGuardBinding, AnyError> {
         let binding = WireGuardBinding {
-            node_id: self.hello.node_id.clone(),
+            credential: TransportCredentialBinding {
+                node_id: self.hello.node_id.clone(),
+                kind: TransportKind::WireGuard,
+                public_key,
+                generation: now(),
+                valid_until: None,
+            },
             hostname: self.hello.hostname.clone(),
             site: self.hello.site.clone(),
-            public_key,
             endpoint,
             advertised_prefixes,
-            generation: now(),
         };
         self.publish(PeerEvent::WireGuard(binding.clone())).await?;
         Ok(binding)
@@ -690,7 +730,8 @@ impl Mesh {
                 PeerEvent::Access(record) => {
                     self.trusted_access_keys.contains(&record.signer) && record.verify().is_ok()
                 }
-                PeerEvent::WireGuard(binding) => binding.node_id == envelope.origin,
+                PeerEvent::Transport(binding) => binding.validate_for(&envelope.origin).is_ok(),
+                PeerEvent::WireGuard(binding) => binding.validate_for(&envelope.origin).is_ok(),
                 PeerEvent::SecurityPosture(posture) => {
                     posture.node_id == envelope.origin
                         && posture.findings.len() <= MAX_SECURITY_FINDINGS
@@ -734,7 +775,9 @@ impl Mesh {
             tokio::spawn(async move {
                 match acceptor.accept(tcp).await {
                     Ok(stream) => {
-                        if let Err(error) = mesh.run_stream(stream).await {
+                        let fingerprint =
+                            tls_peer_fingerprint(stream.get_ref().1.peer_certificates());
+                        if let Err(error) = mesh.run_stream(stream, fingerprint).await {
                             eprintln!("myceliumd: peer {peer}: {error}");
                         }
                     }
@@ -765,10 +808,15 @@ impl Mesh {
             .ok_or("seed must be host:port")?;
         let name = server_name(host.trim_matches(&['[', ']'][..]))?;
         let stream = connector.connect(name, tcp).await?;
-        self.run_stream(stream).await
+        let fingerprint = tls_peer_fingerprint(stream.get_ref().1.peer_certificates());
+        self.run_stream(stream, fingerprint).await
     }
 
-    async fn run_stream<S>(&self, stream: S) -> Result<(), AnyError>
+    async fn run_stream<S>(
+        &self,
+        stream: S,
+        peer_certificate: Option<String>,
+    ) -> Result<(), AnyError>
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
     {
@@ -792,13 +840,25 @@ impl Mesh {
         );
         renewal_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut pending_renewal = None::<String>;
+        let mut remote_identity = None::<String>;
+        let mut binding_required = self.require_transport_binding;
+        let mut transport_authenticated = false;
         loop {
             tokio::select! {
                 result = lines.next_line() => {
                     let Some(line) = result? else { return Ok(()); };
                     if line.len() > 1_048_576 { return Err("peer message exceeds 1 MiB".into()); }
                     match serde_json::from_str::<PeerMessage>(line.trim())? {
-                        PeerMessage::Observations(values) => self.merge(values).await?,
+                        PeerMessage::Observations(values) => {
+                            self.merge(values).await?;
+                            if let (Some(node_id), Some(fingerprint)) =
+                                (remote_identity.as_deref(), peer_certificate.as_deref())
+                            {
+                                transport_authenticated = self
+                                    .has_transport_binding(node_id, TransportKind::Mtls, fingerprint)
+                                    .await;
+                            }
+                        }
                         PeerMessage::Digest(remote) => {
                             let newer = self
                                 .observations
@@ -828,11 +888,17 @@ impl Mesh {
                             return Err(format!("protocol {} is unsupported", hello.protocol_version).into());
                         }
                         PeerMessage::ArtifactRequest { digest, offset, length } => {
+                            if binding_required && !transport_authenticated {
+                                continue;
+                            }
                             if let Some(chunk) = artifact_chunk(&digest, offset, length)? {
                                 send(&mut writer, &chunk).await?;
                             }
                         }
                         PeerMessage::ArtifactChunk { digest, offset, data, complete } => {
+                            if binding_required && !transport_authenticated {
+                                continue;
+                            }
                             accept_artifact_chunk(
                                 &digest,
                                 offset,
@@ -847,11 +913,17 @@ impl Mesh {
                             }
                         }
                         PeerMessage::SshRenewalRequest(request) => {
+                            if binding_required && !transport_authenticated {
+                                continue;
+                            }
                             if let Some(response) = crate::ssh_renewal::issue(&request, now()) {
                                 send(&mut writer, &PeerMessage::SshRenewalResponse(response)).await?;
                             }
                         }
                         PeerMessage::SshRenewalResponse(response) => {
+                            if binding_required && !transport_authenticated {
+                                continue;
+                            }
                             if pending_renewal.as_deref() == Some(response.request_id.as_str()) {
                                 match crate::ssh_renewal::install(&response, now()) {
                                     Ok(()) => {}
@@ -860,7 +932,17 @@ impl Mesh {
                                 pending_renewal = None;
                             }
                         }
-                        PeerMessage::Hello(_) | PeerMessage::Ping { .. } => {}
+                        PeerMessage::Hello(hello) => {
+                            remote_identity = Some(hello.node_id.clone());
+                            binding_required = self.require_transport_binding
+                                || hello.capabilities.iter().any(|capability| {
+                                    capability == "transport.identity-binding"
+                                });
+                            if binding_required && peer_certificate.is_none() {
+                                return Err("peer advertised transport binding without a TLS certificate".into());
+                            }
+                        }
+                        PeerMessage::Ping { .. } => {}
                     }
                 }
                 _ = digest_interval.tick() => {
@@ -874,12 +956,14 @@ impl Mesh {
                     send(&mut writer, &PeerMessage::Digest(digest)).await?;
                 }
                 _ = artifact_interval.tick() => {
-                    if let Some(request) = self.next_artifact_request().await? {
-                        send(&mut writer, &request).await?;
+                    if !binding_required || transport_authenticated {
+                        if let Some(request) = self.next_artifact_request().await? {
+                            send(&mut writer, &request).await?;
+                        }
                     }
                 }
                 _ = renewal_interval.tick() => {
-                    if pending_renewal.is_none() {
+                    if (!binding_required || transport_authenticated) && pending_renewal.is_none() {
                         match crate::ssh_renewal::renewal_request(&self.key, now()) {
                             Ok(Some(request)) => {
                                 pending_renewal = Some(request.request_id.clone());
@@ -975,6 +1059,20 @@ struct TlsSettings {
 }
 
 impl TlsSettings {
+    fn identity_binding(&self, node_id: &str) -> Result<TransportCredentialBinding, AnyError> {
+        let certificate = certs(&self.cert)?
+            .into_iter()
+            .next()
+            .ok_or("peer certificate chain is empty")?;
+        Ok(TransportCredentialBinding {
+            node_id: node_id.to_owned(),
+            kind: TransportKind::Mtls,
+            public_key: mycelium_peer_protocol::sha256_hex(certificate.as_ref()),
+            generation: now(),
+            valid_until: None,
+        })
+    }
+
     fn from_env() -> Result<Option<Self>, AnyError> {
         let listen = std::env::var("MYCELIUM_PEER_LISTEN").ok();
         let seeds = std::env::var("MYCELIUM_PEERS")
@@ -1048,6 +1146,9 @@ fn event_key(envelope: &SignedEnvelope) -> String {
                 format!("access:{}:revoke:{revocation_id}", record.signer)
             }
         },
+        PeerEvent::Transport(binding) => {
+            format!("{}:transport:{:?}", envelope.origin, binding.kind)
+        }
         PeerEvent::WireGuard(_) => format!("{}:wireguard", envelope.origin),
         PeerEvent::SecurityPosture(_) => format!("{}:security-posture", envelope.origin),
         PeerEvent::SecurityEvents(_) => format!("{}:security-events", envelope.origin),
@@ -1062,7 +1163,8 @@ fn event_origin_matches(envelope: &SignedEnvelope) -> bool {
         | PeerEvent::Topology(_)
         | PeerEvent::Release(_)
         | PeerEvent::Access(_) => true,
-        PeerEvent::WireGuard(binding) => binding.node_id == envelope.origin,
+        PeerEvent::Transport(binding) => binding.validate_for(&envelope.origin).is_ok(),
+        PeerEvent::WireGuard(binding) => binding.validate_for(&envelope.origin).is_ok(),
         PeerEvent::SecurityPosture(posture) => posture.node_id == envelope.origin,
         PeerEvent::SecurityEvents(events) => events.node_id == envelope.origin,
         PeerEvent::Unknown => false,
@@ -1335,6 +1437,12 @@ fn certs(path: &str) -> Result<Vec<CertificateDer<'static>>, AnyError> {
     rustls_pemfile::certs(&mut StdBufReader::new(std::fs::File::open(path)?))
         .collect::<Result<Vec<_>, _>>()
         .map_err(Into::into)
+}
+
+fn tls_peer_fingerprint(certificates: Option<&[CertificateDer<'_>]>) -> Option<String> {
+    certificates
+        .and_then(|chain| chain.first())
+        .map(|certificate| mycelium_peer_protocol::sha256_hex(certificate.as_ref()))
 }
 
 fn private_key(path: &str) -> Result<PrivateKeyDer<'static>, AnyError> {
