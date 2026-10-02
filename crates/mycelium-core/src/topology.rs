@@ -282,6 +282,17 @@ pub struct OverlayPeerRecord {
 /// One atomic piece of topology truth from one device.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Observation {
+    /// A signed device identity projected from a peer's self-claimed public
+    /// interface facts. Existing discovery nodes are merged only when MAC/IP
+    /// evidence is non-conflicting.
+    DeviceIdentity {
+        device: String,
+        hostname: String,
+        port: String,
+        mac: Option<MacAddress>,
+        ips: Vec<IpAddr>,
+        origin: Origin,
+    },
     /// Reachable host seen in a forwarding table (arp/neighbors).
     Neighbor {
         mac: Option<MacAddress>,
@@ -526,6 +537,71 @@ impl Topology {
     fn observe_one(&mut self, obs: Observation, report: &mut TopologyReport) {
         let obs_origin = observation_origin(&obs);
         match obs {
+            Observation::DeviceIdentity {
+                device,
+                hostname,
+                port,
+                mac,
+                ips,
+                origin,
+            } => {
+                let aliases = self
+                    .nodes
+                    .iter()
+                    .filter(|(id, node)| {
+                        id.as_str() != device
+                            && !node.device
+                            && (mac.is_some_and(|claimed| node.mac == Some(claimed))
+                                || node.mac.is_none()
+                                    && ips.iter().any(|ip| node.ips.contains_key(ip)))
+                    })
+                    .map(|(id, _)| id.clone())
+                    .collect::<Vec<_>>();
+                for alias in aliases {
+                    if let Some(source) = self.nodes.remove(&alias) {
+                        let target = self.device_node(&device, mac, &origin);
+                        merge_node(target, source);
+                    }
+                }
+                let node = self.device_node(&device, mac, &origin);
+                let source = origin_key(&origin);
+                node.hostnames.insert(hostname.to_lowercase());
+                node.origins.insert(source.clone());
+                for ip in &ips {
+                    node.ips
+                        .entry(*ip)
+                        .or_insert_with(|| IpRecord {
+                            addr: *ip,
+                            prefix: None,
+                            vlan: None,
+                            origins: BTreeSet::new(),
+                        })
+                        .origins
+                        .insert(source.clone());
+                }
+                node.ports
+                    .entry(port.clone())
+                    .or_insert_with(|| Link {
+                        a: PortRef {
+                            device: device.clone(),
+                            port,
+                            vif: None,
+                        },
+                        b: None,
+                        state: LinkState::Up,
+                        medium: None,
+                        speed_mbps: None,
+                        duplex: None,
+                        origins: BTreeSet::new(),
+                    })
+                    .origins
+                    .insert(source);
+                let snapshot = node.clone();
+                for ip in ips {
+                    self.check_ip_mac(&snapshot, ip, mac, &origin, report);
+                }
+                report.updated_nodes += 1;
+            }
             Observation::Neighbor {
                 mac,
                 ip,
@@ -1006,7 +1082,8 @@ impl Topology {
 
 fn observation_origin(o: &Observation) -> Origin {
     match o {
-        Observation::Neighbor { origin, .. }
+        Observation::DeviceIdentity { origin, .. }
+        | Observation::Neighbor { origin, .. }
         | Observation::Attachment { origin, .. }
         | Observation::DevicePort { origin, .. }
         | Observation::VlanMember { origin, .. }
@@ -1469,5 +1546,54 @@ mod tests {
         let json = serde_json::to_string(&topo).unwrap();
         let back: Topology = serde_json::from_str(&json).unwrap();
         assert_eq!(topo, back);
+    }
+
+    #[test]
+    fn signed_device_identity_merges_matching_discovery_node() {
+        let mut topology = Topology::empty();
+        topology.observe_all([Observation::Neighbor {
+            mac: MacAddress::parse("02:00:00:00:00:42"),
+            ip: ip("192.168.10.42"),
+            hostname: None,
+            port: None,
+            origin: Origin::new("gateway", "arp").at_site("home"),
+        }]);
+        topology.observe_all([Observation::DeviceIdentity {
+            device: "peer-key-42".into(),
+            hostname: "radioman-pi".into(),
+            port: "eth0".into(),
+            mac: MacAddress::parse("02:00:00:00:00:42"),
+            ips: vec![ip("192.168.10.42")],
+            origin: Origin::new("radioman-pi", "peer-identity").at_site("home"),
+        }]);
+        assert_eq!(topology.nodes.len(), 1);
+        let node = &topology.nodes["peer-key-42"];
+        assert!(node.hostnames.contains("radioman-pi"));
+        assert!(node.ips.contains_key(&ip("192.168.10.42")));
+    }
+
+    #[test]
+    fn conflicting_device_identity_does_not_consume_other_mac() {
+        let mut topology = Topology::empty();
+        topology.observe_all([Observation::Neighbor {
+            mac: MacAddress::parse("02:00:00:00:00:41"),
+            ip: ip("192.168.10.42"),
+            hostname: None,
+            port: None,
+            origin: Origin::new("gateway", "arp").at_site("home"),
+        }]);
+        topology.observe_all([Observation::DeviceIdentity {
+            device: "peer-key-42".into(),
+            hostname: "radioman-pi".into(),
+            port: "eth0".into(),
+            mac: MacAddress::parse("02:00:00:00:00:42"),
+            ips: vec![ip("192.168.10.42")],
+            origin: Origin::new("radioman-pi", "peer-identity").at_site("home"),
+        }]);
+        assert_eq!(topology.nodes.len(), 2);
+        assert!(topology
+            .conflicts
+            .iter()
+            .any(|conflict| matches!(conflict, Conflict::SameIpDiffMac { .. })));
     }
 }

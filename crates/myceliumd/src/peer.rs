@@ -13,10 +13,10 @@ use ed25519_dalek::SigningKey;
 use mycelium_peer_protocol::{
     decode_hex, encode_hex, local_build_target, local_compatible_targets, sha256_hex, AccessRecord,
     AccessStatement, AuthorityRecord, AuthorityStatement, FilesystemHealth, HardwareSnapshot,
-    HostHealth, PackageManifest, PeerEvent, PeerHello, PeerMessage, Platform, ProcessHealth,
-    ReleaseManifest, SecurityEventBatch, SecurityPosture, SignedEnvelope, TopologySnapshot,
-    TransportCredentialBinding, TransportKind, WireGuardBinding, MAX_SECURITY_EVENTS,
-    MAX_SECURITY_FINDINGS, PROTOCOL_VERSION,
+    HostHealth, PackageManifest, PeerEndpointObservation, PeerEvent, PeerHello, PeerInterface,
+    PeerMessage, Platform, ProcessHealth, ReleaseManifest, SecurityEventBatch, SecurityPosture,
+    SignedEnvelope, TopologySnapshot, TransportCredentialBinding, TransportKind, WireGuardBinding,
+    MAX_SECURITY_EVENTS, MAX_SECURITY_FINDINGS, PROTOCOL_VERSION,
 };
 use rand_core::OsRng;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
@@ -47,6 +47,7 @@ pub struct PeerView {
     pub health: Option<HostHealth>,
     pub hardware: Option<HardwareSnapshot>,
     pub transports: Vec<TransportCredentialBinding>,
+    pub observed_endpoints: Vec<PeerEndpointObservation>,
     pub last_seen: u64,
 }
 
@@ -125,6 +126,7 @@ impl Mesh {
                     "security.posture".into(),
                     "transport.identity-binding".into(),
                 ],
+                interfaces: Vec::new(),
             },
             sequence: AtomicU64::new(0),
             observations: Mutex::new(BTreeMap::new()),
@@ -183,6 +185,7 @@ impl Mesh {
             architecture: std::env::consts::ARCH.into(),
             daemon_version: crate::VERSION.into(),
             capabilities,
+            interfaces: collect_interfaces(),
         };
         let allowed_origins = std::env::var("MYCELIUM_PEER_ALLOW").ok().map(|value| {
             value
@@ -328,6 +331,7 @@ impl Mesh {
     pub async fn views(&self) -> Vec<PeerView> {
         let observations = self.observations.lock().await;
         let mut views = BTreeMap::<String, PeerView>::new();
+        let mut endpoints = Vec::new();
         for envelope in observations.values() {
             let view = views.entry(envelope.origin.clone()).or_insert(PeerView {
                 origin: envelope.origin.clone(),
@@ -335,6 +339,7 @@ impl Mesh {
                 health: None,
                 hardware: None,
                 transports: Vec::new(),
+                observed_endpoints: Vec::new(),
                 last_seen: 0,
             });
             view.last_seen = view.last_seen.max(envelope.emitted_at);
@@ -345,6 +350,7 @@ impl Mesh {
                 PeerEvent::Release(_) => {}
                 PeerEvent::Package(_) => {}
                 PeerEvent::Authority(_) => {}
+                PeerEvent::Endpoint(endpoint) => endpoints.push(endpoint.clone()),
                 PeerEvent::Access(_) => {}
                 PeerEvent::Transport(binding) => view.transports.push(binding.clone()),
                 PeerEvent::WireGuard(binding) => view.transports.push(binding.credential.clone()),
@@ -352,6 +358,11 @@ impl Mesh {
                 PeerEvent::SecurityPosture(_) => {}
                 PeerEvent::SecurityEvents(_) => {}
                 PeerEvent::Unknown => {}
+            }
+        }
+        for endpoint in endpoints {
+            if let Some(view) = views.get_mut(&endpoint.peer) {
+                view.observed_endpoints.push(endpoint);
             }
         }
         views.into_values().collect()
@@ -1008,7 +1019,9 @@ impl Mesh {
                     Ok(stream) => {
                         let fingerprint =
                             tls_peer_fingerprint(stream.get_ref().1.peer_certificates());
-                        if let Err(error) = mesh.run_stream(stream, fingerprint).await {
+                        if let Err(error) =
+                            mesh.run_stream(stream, fingerprint, Some(peer.ip())).await
+                        {
                             eprintln!("myceliumd: peer {peer}: {error}");
                         }
                     }
@@ -1034,6 +1047,7 @@ impl Mesh {
         let tcp = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(seed))
             .await
             .map_err(|_| "TCP connection timed out")??;
+        let observed_address = tcp.peer_addr().ok().map(|address| address.ip());
         let host = seed
             .rsplit_once(':')
             .map(|(host, _)| host)
@@ -1043,13 +1057,14 @@ impl Mesh {
             .await
             .map_err(|_| "TLS handshake timed out")??;
         let fingerprint = tls_peer_fingerprint(stream.get_ref().1.peer_certificates());
-        self.run_stream(stream, fingerprint).await
+        self.run_stream(stream, fingerprint, observed_address).await
     }
 
     async fn run_stream<S>(
         &self,
         stream: S,
         peer_certificate: Option<String>,
+        observed_address: Option<IpAddr>,
     ) -> Result<(), AnyError>
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -1077,6 +1092,7 @@ impl Mesh {
         let mut remote_identity = None::<String>;
         let mut binding_required = self.require_transport_binding;
         let mut transport_authenticated = false;
+        let mut endpoint_published = false;
         loop {
             tokio::select! {
                 result = lines.next_line() => {
@@ -1091,6 +1107,21 @@ impl Mesh {
                                 transport_authenticated = self
                                     .has_transport_binding(node_id, TransportKind::Mtls, fingerprint)
                                     .await;
+                            }
+                            if transport_authenticated && !endpoint_published {
+                                if let (Some(peer), Some(address)) =
+                                    (remote_identity.clone(), observed_address)
+                                {
+                                    if is_publishable_address(&address) {
+                                        self.publish(PeerEvent::Endpoint(PeerEndpointObservation {
+                                            observer: self.hello.node_id.clone(),
+                                            peer,
+                                            address,
+                                            observed_at: now(),
+                                        })).await?;
+                                        endpoint_published = true;
+                                    }
+                                }
                             }
                         }
                         PeerMessage::Digest(remote) => {
@@ -1454,6 +1485,16 @@ fn event_is_authorized(
     resolver: &crate::authority::AuthorityResolver<'_>,
 ) -> bool {
     match &envelope.event {
+        PeerEvent::Hello(hello) => {
+            hello.interfaces.len() <= 64
+                && hello.interfaces.iter().all(|interface| {
+                    !interface.name.is_empty()
+                        && interface.name.len() <= 64
+                        && interface.addresses.len() <= 32
+                        && interface.addresses.iter().all(is_publishable_address)
+                        && interface.mac.as_deref().is_none_or(is_public_mac)
+                })
+        }
         PeerEvent::Release(release) => {
             release.verify().is_ok() && resolver.release(&release.signer).authorized
         }
@@ -1462,6 +1503,11 @@ fn event_is_authorized(
         }
         PeerEvent::Authority(record) => {
             authority_roots.contains(&record.signer) && record.verify().is_ok()
+        }
+        PeerEvent::Endpoint(endpoint) => {
+            endpoint.observer == envelope.origin
+                && decode_hex(&endpoint.peer).is_ok_and(|value| value.len() == 32)
+                && is_publishable_address(&endpoint.address)
         }
         PeerEvent::Access(record) => {
             record.verify().is_ok() && resolver.access(&record.signer).authorized
@@ -1500,6 +1546,10 @@ fn event_key(envelope: &SignedEnvelope) -> String {
                 format!("authority:{}:revoke:{revocation_id}", record.signer)
             }
         },
+        PeerEvent::Endpoint(endpoint) => format!(
+            "{}:endpoint:{}:{}",
+            envelope.origin, endpoint.peer, endpoint.address
+        ),
         PeerEvent::Access(record) => match &record.statement {
             AccessStatement::Grant { grant_id, .. } => {
                 format!("access:{}:grant:{grant_id}", record.signer)
@@ -1528,6 +1578,7 @@ fn event_origin_matches(envelope: &SignedEnvelope) -> bool {
         | PeerEvent::Package(_)
         | PeerEvent::Authority(_)
         | PeerEvent::Access(_) => true,
+        PeerEvent::Endpoint(endpoint) => endpoint.observer == envelope.origin,
         PeerEvent::Transport(binding) => binding.validate_for(&envelope.origin).is_ok(),
         PeerEvent::WireGuard(binding) => binding.validate_for(&envelope.origin).is_ok(),
         PeerEvent::Hardware(snapshot) => snapshot.validate_for(&envelope.origin).is_ok(),
@@ -1574,6 +1625,109 @@ fn configured_node_facts() -> impl Iterator<Item = String> {
         .map(str::to_owned)
         .collect::<Vec<_>>()
         .into_iter()
+}
+
+fn collect_interfaces() -> Vec<PeerInterface> {
+    #[cfg(target_os = "linux")]
+    {
+        let Ok(text) = output("ip", &["-j", "address", "show"]) else {
+            return Vec::new();
+        };
+        let Ok(rows) = serde_json::from_str::<Vec<serde_json::Value>>(&text) else {
+            return Vec::new();
+        };
+        return rows
+            .into_iter()
+            .filter_map(|row| {
+                let name = row["ifname"].as_str()?.to_owned();
+                if name == "lo" {
+                    return None;
+                }
+                let mac = row["address"]
+                    .as_str()
+                    .filter(|value| is_public_mac(value))
+                    .map(str::to_lowercase);
+                let addresses = row["addr_info"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|address| address["local"].as_str()?.parse().ok())
+                    .filter(is_publishable_address)
+                    .collect::<Vec<_>>();
+                (!addresses.is_empty() || mac.is_some()).then_some(PeerInterface {
+                    name,
+                    mac,
+                    addresses,
+                })
+            })
+            .collect();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let Ok(text) = output("ifconfig", &[]) else {
+            return Vec::new();
+        };
+        let mut interfaces = Vec::new();
+        let mut current = None::<PeerInterface>;
+        for line in text.lines() {
+            if !line.starts_with(char::is_whitespace) {
+                if let Some(interface) = current
+                    .take()
+                    .filter(|interface| !interface.addresses.is_empty() || interface.mac.is_some())
+                {
+                    interfaces.push(interface);
+                }
+                let name = line.split(':').next().unwrap_or_default();
+                current = (name != "lo0").then(|| PeerInterface {
+                    name: name.to_owned(),
+                    mac: None,
+                    addresses: Vec::new(),
+                });
+                continue;
+            }
+            let Some(interface) = current.as_mut() else {
+                continue;
+            };
+            let fields = line.split_whitespace().collect::<Vec<_>>();
+            match fields.as_slice() {
+                ["ether", mac, ..] if is_public_mac(mac) => {
+                    interface.mac = Some(mac.to_lowercase());
+                }
+                ["inet", address, ..] | ["inet6", address, ..] => {
+                    let address = address.split('%').next().unwrap_or(address);
+                    if let Ok(address) = address.parse::<IpAddr>() {
+                        if is_publishable_address(&address) {
+                            interface.addresses.push(address);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let Some(interface) =
+            current.filter(|interface| !interface.addresses.is_empty() || interface.mac.is_some())
+        {
+            interfaces.push(interface);
+        }
+        return interfaces;
+    }
+    #[allow(unreachable_code)]
+    Vec::new()
+}
+
+fn is_publishable_address(address: &IpAddr) -> bool {
+    match address {
+        IpAddr::V4(address) => {
+            !address.is_loopback() && !address.is_unspecified() && !address.is_link_local()
+        }
+        IpAddr::V6(address) => {
+            !address.is_loopback() && !address.is_unspecified() && !address.is_unicast_link_local()
+        }
+    }
+}
+
+fn is_public_mac(value: &str) -> bool {
+    value != "00:00:00:00:00:00" && value.split(':').count() == 6
 }
 
 fn validate_digest(digest: &str) -> Result<(), AnyError> {
@@ -2216,6 +2370,7 @@ mod tests {
             architecture: "x86_64".into(),
             daemon_version: "test".into(),
             capabilities: Vec::new(),
+            interfaces: Vec::new(),
         }
     }
 

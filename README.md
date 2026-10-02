@@ -786,6 +786,23 @@ driver is for observation, recovery, and explicit adoption operations.
 
 ## Topology and resources
 
+Enrolled peers publish public interface facts—interface names, IP addresses,
+and MAC addresses—as part of their signed identity observation. A receiving
+peer separately gossips the source address it observed on an authenticated mTLS
+connection. The topology projection correlates those independent facts with
+ARP, DHCP, mDNS, switch, and controller observations:
+
+- Matching MAC evidence merges an anonymous discovered node into the stable
+  peer identity.
+- Receiver-observed addresses provide reachability evidence when DNS is absent.
+- Conflicting IP/MAC evidence remains separate and produces a topology
+  conflict; it is never silently merged.
+- These are public inventory facts. They contain no credentials and grant no
+  access or authority.
+
+SSH planning prefers a correlated RFC1918 address, then another reachable
+address, and only falls back to the hostname when no address evidence exists.
+
 Each peer periodically publishes a signed, bounded hardware graph covering
 PCIe, USB, storage, and accelerators. Stable identities derive from the peer
 identity plus the platform locator; raw device serial numbers are never

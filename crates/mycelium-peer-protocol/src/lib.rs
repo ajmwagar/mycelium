@@ -1,6 +1,7 @@
 //! Symmetric, transport-neutral messages exchanged by Mycelium peers.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::net::IpAddr;
 
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
@@ -56,6 +57,28 @@ pub struct PeerHello {
     pub architecture: String,
     pub daemon_version: String,
     pub capabilities: Vec<String>,
+    /// Public attachment facts asserted by this signed peer identity.
+    #[serde(default)]
+    pub interfaces: Vec<PeerInterface>,
+}
+
+/// One local network interface claimed by its owning peer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerInterface {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mac: Option<String>,
+    #[serde(default)]
+    pub addresses: Vec<IpAddr>,
+}
+
+/// A receiver's signed observation of an authenticated peer connection.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerEndpointObservation {
+    pub observer: String,
+    pub peer: String,
+    pub address: IpAddr,
+    pub observed_at: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -100,6 +123,7 @@ pub enum PeerEvent {
     Release(ReleaseManifest),
     Package(PackageManifest),
     Authority(AuthorityRecord),
+    Endpoint(PeerEndpointObservation),
     Access(AccessRecord),
     Transport(TransportCredentialBinding),
     WireGuard(WireGuardBinding),
@@ -120,6 +144,7 @@ enum KnownPeerEvent {
     Release(ReleaseManifest),
     Package(PackageManifest),
     Authority(AuthorityRecord),
+    Endpoint(PeerEndpointObservation),
     Access(AccessRecord),
     Transport(TransportCredentialBinding),
     WireGuard(WireGuardBinding),
@@ -143,6 +168,7 @@ impl<'de> Deserialize<'de> for PeerEvent {
                     | "release"
                     | "package"
                     | "authority"
+                    | "endpoint"
                     | "access"
                     | "transport"
                     | "wire_guard"
@@ -163,6 +189,7 @@ impl<'de> Deserialize<'de> for PeerEvent {
             KnownPeerEvent::Release(value) => Self::Release(value),
             KnownPeerEvent::Package(value) => Self::Package(value),
             KnownPeerEvent::Authority(value) => Self::Authority(value),
+            KnownPeerEvent::Endpoint(value) => Self::Endpoint(value),
             KnownPeerEvent::Access(value) => Self::Access(value),
             KnownPeerEvent::Transport(value) => Self::Transport(value),
             KnownPeerEvent::WireGuard(value) => Self::WireGuard(value),
@@ -1061,6 +1088,22 @@ mod tests {
     }
 
     #[test]
+    fn legacy_peer_hello_defaults_to_no_interface_claims() {
+        let hello: PeerHello = serde_json::from_value(serde_json::json!({
+            "node_id": "11".repeat(32),
+            "protocol_version": 1,
+            "site": "home",
+            "hostname": "old-peer",
+            "platform": "linux",
+            "architecture": "aarch64",
+            "daemon_version": "0.1.0",
+            "capabilities": []
+        }))
+        .unwrap();
+        assert!(hello.interfaces.is_empty());
+    }
+
+    #[test]
     fn forwarded_envelopes_remain_origin_authenticated() {
         let key = SigningKey::from_bytes(&[7; 32]);
         let event = PeerEvent::Hello(PeerHello {
@@ -1072,6 +1115,7 @@ mod tests {
             architecture: "x86_64".into(),
             daemon_version: "0.1.0".into(),
             capabilities: vec!["system.health".into()],
+            interfaces: Vec::new(),
         });
         let mut envelope = SignedEnvelope::sign(&key, 1, 2, event).unwrap();
         envelope.verify().unwrap();

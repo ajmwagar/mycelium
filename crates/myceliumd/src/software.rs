@@ -593,10 +593,12 @@ mod tests {
                 architecture: architecture.into(),
                 daemon_version: "test".into(),
                 capabilities: capabilities.iter().map(|v| (*v).into()).collect(),
+                interfaces: Vec::new(),
             }),
             health: None,
             hardware: None,
             transports: vec![],
+            observed_endpoints: vec![],
             last_seen: 1,
         }
     }

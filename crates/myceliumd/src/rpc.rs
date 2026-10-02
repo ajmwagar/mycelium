@@ -6,10 +6,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use mycelium_core::{
     AllocationReceipt, AllocationValue, CredentialSet, DeviceId, DeviceMeta, DhcpScopeIntent,
-    DiscoveryRequest, DiscoveryScope, Driver, Inventory, LogicalNetwork, MeshControlPlane,
-    MeshCoordinator, MeshProtocol, MyceliumError, NetworkBinding, NetworkDriftReport,
-    NetworkDriftState, Observation, Origin, OverlayPeerRecord, Result, Secret, Target, Topology,
-    Transport, Value,
+    DiscoveryRequest, DiscoveryScope, Driver, Inventory, LogicalNetwork, MacAddress,
+    MeshControlPlane, MeshCoordinator, MeshProtocol, MyceliumError, NetworkBinding,
+    NetworkDriftReport, NetworkDriftState, Observation, Origin, OverlayPeerRecord, Result, Secret,
+    Target, Topology, Transport, Value,
 };
 use mycelium_driver_darwin::DarwinDriver;
 use mycelium_driver_edgeos::{EdgeOsDriver, SshSession};
@@ -356,6 +356,50 @@ impl Daemon {
                 })?;
             topology.merge_snapshot(remote);
         }
+        let peer_identity_observations = self
+            .mesh
+            .views()
+            .await
+            .into_iter()
+            .flat_map(|view| {
+                let Some(hello) = view.hello else {
+                    return Vec::new();
+                };
+                let mut observations = hello
+                    .interfaces
+                    .iter()
+                    .map(|interface| Observation::DeviceIdentity {
+                        device: hello.node_id.clone(),
+                        hostname: hello.hostname.clone(),
+                        port: interface.name.clone(),
+                        mac: interface.mac.as_deref().and_then(MacAddress::parse),
+                        ips: interface.addresses.clone(),
+                        origin: Origin::new(&hello.hostname, "peer-identity").at_site(&hello.site),
+                    })
+                    .collect::<Vec<_>>();
+                let claimed = hello
+                    .interfaces
+                    .iter()
+                    .flat_map(|interface| interface.addresses.iter().copied())
+                    .collect::<BTreeSet<_>>();
+                observations.extend(
+                    view.observed_endpoints
+                        .into_iter()
+                        .filter(|endpoint| !claimed.contains(&endpoint.address))
+                        .map(|endpoint| Observation::DeviceIdentity {
+                            device: hello.node_id.clone(),
+                            hostname: hello.hostname.clone(),
+                            port: format!("observed/{}", endpoint.observer),
+                            mac: None,
+                            ips: vec![endpoint.address],
+                            origin: Origin::new(&endpoint.observer, "authenticated-peer")
+                                .at_site(&hello.site),
+                        }),
+                );
+                observations
+            })
+            .collect::<Vec<_>>();
+        topology.observe_all(peer_identity_observations);
         let observations = self
             .mesh
             .wireguard_bindings()
@@ -2348,9 +2392,16 @@ impl Daemon {
                             hello.hostname
                         ))
                     })?;
+                let topology = self.converged_topology().await?;
+                let host = topology
+                    .nodes
+                    .get(&hello.node_id)
+                    .and_then(|node| preferred_ssh_address(node.ips.keys().copied()))
+                    .map(|address| address.to_string())
+                    .unwrap_or_else(|| hello.hostname.clone());
                 to_value(serde_json::json!({
                     "device": hello.node_id,
-                    "host": hello.hostname,
+                    "host": host,
                     "username": username,
                     "port": 22,
                     "jump": null,
@@ -2825,6 +2876,19 @@ fn node_matches(id: &str, node: &mycelium_core::TopoNode, selector: &str) -> boo
             .name
             .as_deref()
             .is_some_and(|name| name.eq_ignore_ascii_case(selector))
+}
+
+fn preferred_ssh_address(
+    addresses: impl IntoIterator<Item = std::net::IpAddr>,
+) -> Option<std::net::IpAddr> {
+    let mut addresses = addresses.into_iter().collect::<Vec<_>>();
+    addresses.sort_by_key(|address| match address {
+        std::net::IpAddr::V4(value) if value.is_private() => (0, address.to_string()),
+        std::net::IpAddr::V6(value) if value.is_unique_local() => (1, address.to_string()),
+        std::net::IpAddr::V4(_) => (2, address.to_string()),
+        std::net::IpAddr::V6(_) => (3, address.to_string()),
+    });
+    addresses.into_iter().next()
 }
 
 fn validate_annotation(name: Option<&str>, kind: Option<&str>) -> Result<()> {
