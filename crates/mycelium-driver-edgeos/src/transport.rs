@@ -98,7 +98,7 @@ impl SshSession {
         if jump.is_some() || (creds.key_path.is_none() && password.is_none()) {
             let mut args = vec![
                 "-o".to_owned(),
-                "BatchMode=yes".to_owned(),
+                batch_mode(password.is_some()).to_owned(),
                 "-o".to_owned(),
                 "ConnectTimeout=8".to_owned(),
                 "-p".to_owned(),
@@ -362,6 +362,14 @@ fn sshpass_argv(ssh_argv: Vec<String>) -> Vec<String> {
     wrapped
 }
 
+fn batch_mode(has_password: bool) -> &'static str {
+    if has_password {
+        "BatchMode=no"
+    } else {
+        "BatchMode=yes"
+    }
+}
+
 fn which(bin: &str) -> Option<std::path::PathBuf> {
     let configured = std::env::var_os("PATH")
         .map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
@@ -390,7 +398,7 @@ pub fn wrap_cli(command: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{sshpass_argv, wrap_cli};
+    use super::{batch_mode, sshpass_argv, wrap_cli};
 
     #[test]
     fn escapes_dollar_and_quotes() {
@@ -411,6 +419,12 @@ mod tests {
             "show version".into(),
         ]);
         assert_eq!(&wrapped[..4], ["-e", "ssh", "-J", "pris"]);
+    }
+
+    #[test]
+    fn password_authentication_allows_an_askpass_prompt() {
+        assert_eq!(batch_mode(true), "BatchMode=no");
+        assert_eq!(batch_mode(false), "BatchMode=yes");
     }
 }
 
