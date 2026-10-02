@@ -465,7 +465,7 @@ impl Daemon {
                     candidates.entry(address).or_default().extend(
                         node.sites
                             .iter()
-                            .filter(|site| live_peers.contains(*site))
+                            .filter(|site| live_peers.contains(*site) && rule.matches_site(site))
                             .cloned(),
                     );
                 }
@@ -483,7 +483,9 @@ impl Daemon {
                             origin
                                 .split_once('/')
                                 .map(|(observer, _)| observer.to_owned())
-                                .filter(|observer| live_peers.contains(observer))
+                                .filter(|observer| {
+                                    live_peers.contains(observer) && rule.matches_site(observer)
+                                })
                         }));
                     }
                 }
@@ -522,6 +524,13 @@ impl Daemon {
                     continue;
                 }
                 let mut targets = Vec::new();
+                if observers.is_empty() && !rule.sites.is_empty() {
+                    warnings.push(format!(
+                        "credential rule `{}` found {address}, but no selected site is currently observing it",
+                        rule.name
+                    ));
+                    continue;
+                }
                 let locally_attached = observers.is_empty() || observers.contains(&local_hostname);
                 if locally_attached {
                     targets.push(Target::host(&address_text));

@@ -139,6 +139,11 @@ mycelium credentials map set network-appliances \
   --password-env GATEWAY_PASS \
   --write
 
+# Reused RFC1918 addresses remain distinct by network vantage point.
+mycelium credentials map set lab-gateway \
+  --driver edgeos --address 192.168.1.1 --site pris \
+  --user ubnt --password-env LAB_GATEWAY_PASS --write
+
 mycelium scan
 mycelium targets
 ```

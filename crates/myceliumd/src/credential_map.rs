@@ -12,6 +12,11 @@ pub struct CredentialRule {
     pub addresses: Vec<IpAddr>,
     #[serde(default)]
     pub cidrs: Vec<String>,
+    /// Optional topology observer/site constraints. These disambiguate
+    /// overlapping private address space without baking jump hosts into a
+    /// device record.
+    #[serde(default)]
+    pub sites: Vec<String>,
     pub username: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub password_env: Option<String>,
@@ -60,6 +65,10 @@ impl CredentialRule {
             })
     }
 
+    pub fn matches_site(&self, site: &str) -> bool {
+        self.sites.is_empty() || self.sites.iter().any(|candidate| candidate == site)
+    }
+
     pub fn credentials(&self) -> CredentialSet {
         CredentialSet {
             username: Some(self.username.clone()),
@@ -98,6 +107,7 @@ mod tests {
             driver: None,
             addresses: vec!["192.168.99.1".parse().unwrap()],
             cidrs: vec!["192.168.1.0/24".into()],
+            sites: vec!["lab".into()],
             username: "operator".into(),
             password_env: Some("GATEWAY_PASS".into()),
             key_path: None,
@@ -106,6 +116,8 @@ mod tests {
         assert!(rule.matches("192.168.1.1".parse().unwrap()));
         assert!(rule.matches("192.168.99.1".parse().unwrap()));
         assert!(!rule.matches("192.168.2.1".parse().unwrap()));
+        assert!(rule.matches_site("lab"));
+        assert!(!rule.matches_site("home"));
         let encoded = serde_json::to_string(&rule).unwrap();
         assert!(encoded.contains("GATEWAY_PASS"));
         assert!(!encoded.contains("password\":"));

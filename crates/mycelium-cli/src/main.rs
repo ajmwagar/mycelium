@@ -92,7 +92,7 @@ usage:
   mycelium add <host[:port]> [--name NAME] [--driver NAME] [--user U] [--password-env VAR] [--key PATH]
   mycelium targets [--json]
   mycelium credentials map list [--json]
-  mycelium credentials map set NAME [--driver DRIVER] [--address IP]... [--cidr CIDR]... --user USER (--password-env ENV | --key PATH) --write
+  mycelium credentials map set NAME [--driver DRIVER] [--address IP]... [--cidr CIDR]... [--site SITE]... --user USER (--password-env ENV | --key PATH) --write
   mycelium credentials map remove NAME --write
   mycelium describe <id> [--json]
   mycelium call <id> <capability> [--param k=v ...] [--write] [--dry-run]
@@ -2131,10 +2131,17 @@ async fn credential_map(args: &[String]) -> Result<Vec<String>, ClientError> {
                     .collect::<Vec<_>>()
                     .join(",");
                 lines.push(format!(
-                    "  {} driver={} selectors={} user={} secret={}",
+                    "  {} driver={} selectors={} sites={} user={} secret={}",
                     rule["name"].as_str().unwrap_or("?"),
                     rule["driver"].as_str().unwrap_or("auto"),
                     selectors,
+                    rule["sites"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(serde_json::Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(","),
                     rule["username"].as_str().unwrap_or("?"),
                     rule["password_env"]
                         .as_str()
@@ -2153,6 +2160,7 @@ async fn credential_map(args: &[String]) -> Result<Vec<String>, ClientError> {
             let mut driver = None;
             let mut addresses = Vec::new();
             let mut cidrs = Vec::new();
+            let mut sites = Vec::new();
             let mut username = None;
             let mut password_env = None;
             let mut key_path = None;
@@ -2172,6 +2180,7 @@ async fn credential_map(args: &[String]) -> Result<Vec<String>, ClientError> {
                             .map_err(|_| err_usage("--address needs an IP address"))?,
                     ),
                     "--cidr" => cidrs.push(value(index, "--cidr")?),
+                    "--site" => sites.push(value(index, "--site")?),
                     "--user" => username = Some(value(index, "--user")?),
                     "--password-env" => password_env = Some(value(index, "--password-env")?),
                     "--key" => key_path = Some(value(index, "--key")?),
@@ -2193,6 +2202,7 @@ async fn credential_map(args: &[String]) -> Result<Vec<String>, ClientError> {
                 driver,
                 addresses,
                 cidrs,
+                sites,
                 username: username.ok_or_else(|| err_usage("credential map needs --user"))?,
                 password_env,
                 key_path,
