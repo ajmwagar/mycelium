@@ -132,6 +132,27 @@ On an enrolled Linux host, apply the bundle transactionally:
 sudo -E mycelium access ssh host-apply --bundle /path/to/host-bundle --write
 ```
 
+## Automatic certificate renewal
+
+The invitation is a one-time enrollment mechanism, not a renewable bearer
+token. After enrollment, authorize the stable peer identity at the SSH
+authority:
+
+```sh
+mycelium access ssh renewal-authorize \
+  --node PEER_NODE_ID --unix-user USER --role ROLE \
+  --credential-ttl 7d --write
+```
+
+The peer signs renewal requests with its persistent Ed25519 mesh identity and
+sends them through the existing mTLS peer connection. Possession of a node TLS
+certificate alone is insufficient because the request signature must match the
+explicitly authorized node ID. The authority keeps the OpenSSH CA private key;
+no CA material is copied to clients. Renewal is attempted at two thirds of the
+issued lifetime, with node-derived startup jitter and bounded mesh reconnect
+backoff. A laptop that sleeps past expiry renews after reconnecting because the
+peer identity is independent of the short-lived SSH certificate.
+
 This retains a rollback copy, validates with `sshd -t`, reloads only after
 validation, and restores prior files if installation fails. The equivalent
 manual procedure is:

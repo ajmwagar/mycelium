@@ -533,6 +533,68 @@ pub enum PeerMessage {
         data: String,
         complete: bool,
     },
+    SshRenewalRequest(SshRenewalRequest),
+    SshRenewalResponse(SshRenewalResponse),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SshRenewalRequest {
+    pub request_id: String,
+    pub node_id: String,
+    pub requested_at: u64,
+    pub public_key: String,
+    pub signature: String,
+}
+
+impl SshRenewalRequest {
+    pub fn sign(
+        request_id: String,
+        requested_at: u64,
+        public_key: String,
+        key: &SigningKey,
+    ) -> Result<Self, String> {
+        let node_id = encode_hex(key.verifying_key().as_bytes());
+        let bytes = renewal_signing_bytes(&request_id, &node_id, requested_at, &public_key)?;
+        Ok(Self {
+            request_id,
+            node_id,
+            requested_at,
+            public_key,
+            signature: encode_hex(&key.sign(&bytes).to_bytes()),
+        })
+    }
+
+    pub fn verify(&self) -> Result<(), String> {
+        let key = VerifyingKey::from_bytes(&decode_array::<32>(&self.node_id)?)
+            .map_err(|error| error.to_string())?;
+        let signature = Signature::from_bytes(&decode_array::<64>(&self.signature)?);
+        let bytes = renewal_signing_bytes(
+            &self.request_id,
+            &self.node_id,
+            self.requested_at,
+            &self.public_key,
+        )?;
+        key.verify(&bytes, &signature)
+            .map_err(|error| error.to_string())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SshRenewalResponse {
+    pub request_id: String,
+    pub certificate: Option<String>,
+    pub expires_at: Option<u64>,
+    pub error: Option<String>,
+}
+
+fn renewal_signing_bytes(
+    request_id: &str,
+    node_id: &str,
+    requested_at: u64,
+    public_key: &str,
+) -> Result<Vec<u8>, String> {
+    serde_json::to_vec(&(request_id, node_id, requested_at, public_key))
+        .map_err(|error| error.to_string())
 }
 
 pub fn sha256_hex(bytes: &[u8]) -> String {

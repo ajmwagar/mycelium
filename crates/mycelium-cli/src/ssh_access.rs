@@ -32,6 +32,7 @@ pub fn run(args: &[String], state: &Value) -> Result<Vec<String>, String> {
         Some("host-bundle") => host_bundle(args),
         Some("host-apply") => host_apply(args),
         Some("host-rollout") => host_rollout(args),
+        Some("renewal-authorize") => renewal_authorize(args),
         Some("client-config") => client_config(args),
         Some(action) => Err(format!("unknown access ssh action `{action}`")),
         None => Err(
@@ -39,6 +40,30 @@ pub fn run(args: &[String], state: &Value) -> Result<Vec<String>, String> {
                 .into(),
         ),
     }
+}
+
+fn renewal_authorize(args: &[String]) -> Result<Vec<String>, String> {
+    require_write(args)?;
+    let node_id = required(args, "--node")?.to_owned();
+    let unix_users = repeated(args, "--unix-user")
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    let roles = repeated(args, "--role")
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    let credential_ttl = parse_duration(value(args, "--credential-ttl").unwrap_or("7d"))?;
+    myceliumd::ssh_renewal::authorize(myceliumd::ssh_renewal::RenewalBinding {
+        node_id: node_id.clone(),
+        unix_users,
+        roles,
+        credential_ttl,
+        revoked: false,
+    })?;
+    Ok(vec![format!(
+        "authorized SSH certificate renewal for peer {node_id}"
+    )])
 }
 
 fn host_rollout(args: &[String]) -> Result<Vec<String>, String> {

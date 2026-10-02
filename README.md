@@ -436,6 +436,33 @@ mycelium access ssh host-rollout \
   --write
 ```
 
+Enrolled peers can renew role-bound SSH certificates without reusing an invite
+or depending on a still-valid SSH login. The authority explicitly binds the
+peer's stable node identity to its Unix account and role once:
+
+```sh
+mycelium access ssh renewal-authorize \
+  --node PEER_NODE_ID \
+  --unix-user mames \
+  --role home-operator \
+  --credential-ttl 7d \
+  --write
+```
+
+An authority is simply an enrolled peer whose Mycelium home contains both
+`ssh/user_ca` and `ssh/renewal-bindings.json`. Ordinary peers never receive the
+CA private key. Their daemon signs a renewal request with its persistent peer
+identity and sends it over the existing mutually authenticated mesh. The
+authority issues only the roles in the binding. The client atomically replaces
+`ssh/user-cert.pub` after two thirds of its lifetime; if the machine is asleep
+or disconnected, normal mesh reconnect backoff retries renewal when it returns.
+An expired SSH certificate therefore does not prevent renewal.
+
+The peer setup flow records the public half of the SSH identity at
+`ssh/public-key.pub`. Existing installations fall back to
+`~/.ssh/id_ed25519.pub`, so they can adopt renewal during a binary update without
+being paired again.
+
 Rollout is fail-fast: each target must accept key-based bootstrap SSH and
 passwordless invocation of the narrow host-apply command. Every target still
 validates locally and retains its own rollback copy before sshd reload.

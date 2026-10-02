@@ -30,6 +30,7 @@ use tokio_rustls::{TlsAcceptor, TlsConnector};
 const HEALTH_INTERVAL: Duration = Duration::from_secs(60);
 const SECURITY_INTERVAL: Duration = Duration::from_secs(15 * 60);
 const DIGEST_INTERVAL: Duration = Duration::from_secs(15);
+const SSH_RENEWAL_INTERVAL: Duration = Duration::from_secs(15 * 60);
 const DEFAULT_ARTIFACT_REQUEST_INTERVAL: Duration = Duration::from_secs(5);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_OBSERVATIONS_PER_MESSAGE: usize = 64;
@@ -784,6 +785,13 @@ impl Mesh {
             .unwrap_or(DEFAULT_ARTIFACT_REQUEST_INTERVAL);
         let mut artifact_interval = tokio::time::interval(artifact_request_interval);
         artifact_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let renewal_jitter = self.key.to_bytes()[0] as u64 % 60;
+        let mut renewal_interval = tokio::time::interval_at(
+            tokio::time::Instant::now() + Duration::from_secs(renewal_jitter),
+            SSH_RENEWAL_INTERVAL,
+        );
+        renewal_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut pending_renewal = None::<String>;
         loop {
             tokio::select! {
                 result = lines.next_line() => {
@@ -838,6 +846,20 @@ impl Mesh {
                                 }
                             }
                         }
+                        PeerMessage::SshRenewalRequest(request) => {
+                            if let Some(response) = crate::ssh_renewal::issue(&request, now()) {
+                                send(&mut writer, &PeerMessage::SshRenewalResponse(response)).await?;
+                            }
+                        }
+                        PeerMessage::SshRenewalResponse(response) => {
+                            if pending_renewal.as_deref() == Some(response.request_id.as_str()) {
+                                match crate::ssh_renewal::install(&response, now()) {
+                                    Ok(()) => {}
+                                    Err(error) => eprintln!("myceliumd: SSH certificate renewal: {error}"),
+                                }
+                                pending_renewal = None;
+                            }
+                        }
                         PeerMessage::Hello(_) | PeerMessage::Ping { .. } => {}
                     }
                 }
@@ -854,6 +876,18 @@ impl Mesh {
                 _ = artifact_interval.tick() => {
                     if let Some(request) = self.next_artifact_request().await? {
                         send(&mut writer, &request).await?;
+                    }
+                }
+                _ = renewal_interval.tick() => {
+                    if pending_renewal.is_none() {
+                        match crate::ssh_renewal::renewal_request(&self.key, now()) {
+                            Ok(Some(request)) => {
+                                pending_renewal = Some(request.request_id.clone());
+                                send(&mut writer, &PeerMessage::SshRenewalRequest(request)).await?;
+                            }
+                            Ok(None) => {}
+                            Err(error) => eprintln!("myceliumd: prepare SSH certificate renewal: {error}"),
+                        }
                     }
                 }
             }

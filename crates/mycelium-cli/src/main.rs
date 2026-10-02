@@ -127,6 +127,7 @@ usage:
   mycelium access ssh client-config --host ALIAS --hostname HOST --user USER --identity PATH --certificate PATH --path FILE --write [--json]
   mycelium access ssh host-apply --bundle DIR --write
   mycelium access ssh host-rollout --bundle DIR --target SSH-HOST... [--remote-bin PATH] --write
+  mycelium access ssh renewal-authorize --node NODE-ID --unix-user USER --role ROLE [--credential-ttl 7d] --write
   mycelium access oidc verify --issuer URL --audience ID --token-env VAR [--json]
   mycelium access oidc ssh-issue --issuer URL --audience ID --token-env VAR --public-key PATH --ca PRIVATE-KEY --path CERT [--grant ID] [--ttl 8h] --write [--json]
   mycelium access oidc gateway --listen 127.0.0.1:8787 --issuer URL --audience ID --client-id ID --client-secret-env VAR --callback-url HTTPS-URL --ca PRIVATE-KEY [--invite-store PATH] --write

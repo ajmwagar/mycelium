@@ -23,6 +23,7 @@ pub mod protocol;
 pub mod rpc;
 mod security;
 pub mod siem;
+pub mod ssh_renewal;
 mod state_change;
 
 use std::path::PathBuf;

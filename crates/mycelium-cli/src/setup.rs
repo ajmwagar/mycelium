@@ -88,6 +88,7 @@ pub async fn run(args: &[String]) -> Result<Vec<String>, String> {
         copy_option(args, "--token-env", &mut request);
         crate::oidc_gateway::join(&request).await?
     };
+    persist_renewal_public_key(&public_key, &myceliumd::home_dir())?;
     lines.push(format!(
         "setup complete; SSH identity: {}, certificate: {}",
         private_key.display(),
@@ -173,9 +174,23 @@ async fn setup_peer(
     ];
     let result = crate::oidc_gateway::redeem(&request).await;
     if result.is_ok() {
+        persist_renewal_public_key(&ssh_public, &home)?;
         let _ = fs::remove_dir_all(&staging);
     }
     result
+}
+
+fn persist_renewal_public_key(public_key: &Path, home: &Path) -> Result<(), String> {
+    let destination = home.join("ssh/public-key.pub");
+    fs::create_dir_all(destination.parent().expect("SSH state has a parent"))
+        .map_err(|error| format!("create SSH renewal state: {error}"))?;
+    fs::copy(public_key, &destination).map_err(|error| {
+        format!(
+            "install SSH renewal public key {}: {error}",
+            destination.display()
+        )
+    })?;
+    Ok(())
 }
 
 fn command(program: &str, args: &[&str]) -> Result<(), String> {
