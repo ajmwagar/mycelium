@@ -51,6 +51,7 @@ struct OpenSsh {
     jump: Option<String>,
     args: Vec<String>,
     password: Option<String>,
+    timeout: Duration,
 }
 
 struct Verifier;
@@ -100,6 +101,10 @@ impl SshSession {
                 "-o".to_owned(),
                 batch_mode(password.is_some()).to_owned(),
                 "-o".to_owned(),
+                "StrictHostKeyChecking=accept-new".to_owned(),
+                "-o".to_owned(),
+                "NumberOfPasswordPrompts=1".to_owned(),
+                "-o".to_owned(),
                 "ConnectTimeout=8".to_owned(),
                 "-p".to_owned(),
                 port.to_string(),
@@ -116,6 +121,7 @@ impl SshSession {
                     jump: jump.map(str::to_owned),
                     args,
                     password,
+                    timeout,
                 })),
             });
         }
@@ -343,10 +349,9 @@ impl OpenSsh {
         if let Some(pw) = &self.password {
             cmd.env("SSHPASS", pw);
         }
-        let out = cmd
-            .args(&argv_final)
-            .output()
+        let out = tokio::time::timeout(self.timeout, cmd.args(&argv_final).output())
             .await
+            .map_err(|_| transport_str("OpenSSH command timed out"))?
             .map_err(|e| transport_str(&format!("spawn {}: {e}", prog.display())))?;
         Ok(ExecOutcome {
             exit_code: out.status.code().unwrap_or(-1),
