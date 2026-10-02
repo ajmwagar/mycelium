@@ -95,6 +95,10 @@ pub struct Mesh {
 }
 
 impl Mesh {
+    pub fn hostname(&self) -> &str {
+        &self.hello.hostname
+    }
+
     #[cfg(test)]
     pub fn ephemeral_for_test() -> Arc<Self> {
         let key = SigningKey::from_bytes(&[3; 32]);

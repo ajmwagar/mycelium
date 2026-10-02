@@ -17,6 +17,7 @@
 //! `devices.json` stores variable names, not values.
 
 pub mod client;
+pub mod credential_map;
 mod execution;
 mod hardware;
 pub mod peer;
@@ -67,6 +68,10 @@ pub fn pid_path() -> PathBuf {
 
 pub fn devices_path() -> PathBuf {
     home_dir().join("devices.json")
+}
+
+pub fn credential_map_path() -> PathBuf {
+    home_dir().join("credential-map.json")
 }
 
 pub fn topology_path() -> PathBuf {

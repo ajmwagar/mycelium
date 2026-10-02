@@ -134,6 +134,7 @@ pub struct Daemon {
     pub topology: Mutex<Topology>,
     topology_feed: Mutex<crate::topology_feed::TopologyFeed>,
     saved: Mutex<BTreeMap<DeviceId, SavedDevice>>,
+    credential_rules: Mutex<BTreeMap<String, crate::credential_map::CredentialRule>>,
     discovery_scopes: Mutex<BTreeMap<String, DiscoveryScope>>,
     allocations: Mutex<BTreeMap<String, AllocationReceipt>>,
     networks: Mutex<BTreeMap<String, LogicalNetwork>>,
@@ -212,6 +213,15 @@ impl Daemon {
             .ok()
             .and_then(|t| serde_json::from_str(&t).ok())
             .unwrap_or_else(Topology::empty);
+        let credential_rules = match std::fs::read_to_string(crate::credential_map_path()) {
+            Ok(text) => serde_json::from_str::<Vec<crate::credential_map::CredentialRule>>(&text)
+                .map_err(|error| MyceliumError::Parse(format!("credential-map.json: {error}")))?
+                .into_iter()
+                .map(|rule| (rule.name.clone(), rule))
+                .collect(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
+            Err(error) => return Err(MyceliumError::Io(error)),
+        };
         let discovery_scopes = match std::fs::read_to_string(crate::discovery_path()) {
             Ok(text) => serde_json::from_str::<Vec<DiscoveryScope>>(&text)
                 .map_err(|error| MyceliumError::Parse(format!("discovery.json: {error}")))?
@@ -268,6 +278,7 @@ impl Daemon {
             topology: Mutex::new(topology),
             topology_feed: Mutex::new(topology_feed),
             saved: Mutex::new(saved_map),
+            credential_rules: Mutex::new(credential_rules),
             discovery_scopes: Mutex::new(discovery_scopes),
             allocations: Mutex::new(allocations),
             networks: Mutex::new(networks),
@@ -305,6 +316,21 @@ impl Daemon {
         std::fs::write(
             crate::devices_path(),
             serde_json::to_string_pretty(&saved).map_err(json_err)?,
+        )?;
+        Ok(())
+    }
+
+    async fn persist_credential_rules(&self) -> Result<()> {
+        let rules = self
+            .credential_rules
+            .lock()
+            .await
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        std::fs::write(
+            crate::credential_map_path(),
+            serde_json::to_string_pretty(&rules).map_err(json_err)?,
         )?;
         Ok(())
     }
@@ -385,6 +411,190 @@ impl Daemon {
 
     async fn converged_resources(&self) -> fpl_resource_observation::ResourceCatalog {
         crate::resources::project(self.mesh.hardware_snapshots().await)
+    }
+
+    async fn discover_managed_targets(&self) -> (Vec<String>, Vec<String>) {
+        let rules = self
+            .credential_rules
+            .lock()
+            .await
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        if rules.is_empty() {
+            return (Vec::new(), Vec::new());
+        }
+        let topology = match self.converged_topology().await {
+            Ok(topology) => topology,
+            Err(error) => return (Vec::new(), vec![format!("target discovery: {error}")]),
+        };
+        let live_peers = self
+            .mesh
+            .views()
+            .await
+            .into_iter()
+            .filter_map(|view| view.hello.map(|hello| hello.hostname))
+            .collect::<BTreeSet<_>>();
+        let local_hostname = self.mesh.hostname().to_owned();
+        let mut already_saved = self
+            .saved
+            .lock()
+            .await
+            .values()
+            .map(|saved| (saved.meta.driver.clone(), saved.meta.address.clone()))
+            .collect::<BTreeSet<_>>();
+        let mut discovered = Vec::new();
+        let mut warnings = Vec::new();
+        for rule in rules {
+            let mut candidates = BTreeMap::<std::net::IpAddr, BTreeSet<String>>::new();
+            for address in &rule.addresses {
+                candidates.entry(*address).or_default();
+            }
+            for node in topology.nodes.values() {
+                for address in node.ips.keys().copied().filter(|address| {
+                    rule.matches(*address)
+                        && (node.services.values().any(|service| {
+                            matches!(service.port, 22 | 80 | 161 | 443 | 623 | 8443)
+                        }) || rule.addresses.contains(address)
+                            || rule.driver.as_deref() == Some("edgeos")
+                                && address
+                                    .to_string()
+                                    .rsplit_once('.')
+                                    .is_some_and(|(_, host)| host == "1"))
+                }) {
+                    candidates.entry(address).or_default().extend(
+                        node.sites
+                            .iter()
+                            .filter(|site| live_peers.contains(*site))
+                            .cloned(),
+                    );
+                }
+            }
+            for segment in topology.segments.values() {
+                if let Some(gateway) = segment.gw.filter(|gateway| rule.matches(*gateway)) {
+                    candidates.entry(gateway).or_default();
+                }
+                let Some((network, prefix)) = segment.subnet else {
+                    continue;
+                };
+                for (address, observers) in &mut candidates {
+                    if mycelium_core::ipv4_in_cidr(*address, network, prefix) {
+                        observers.extend(segment.origins.iter().filter_map(|origin| {
+                            origin
+                                .split_once('/')
+                                .map(|(observer, _)| observer.to_owned())
+                                .filter(|observer| live_peers.contains(observer))
+                        }));
+                    }
+                }
+            }
+            if candidates.len() > 128 {
+                warnings.push(format!(
+                    "credential rule `{}` matched {} candidates; maximum is 128",
+                    rule.name,
+                    candidates.len()
+                ));
+                continue;
+            }
+            let drivers = self
+                .drivers
+                .iter()
+                .filter(|driver| {
+                    rule.driver
+                        .as_deref()
+                        .is_none_or(|name| name == driver.name())
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            if drivers.is_empty() {
+                warnings.push(format!(
+                    "credential rule `{}` selects unknown driver `{}`",
+                    rule.name,
+                    rule.driver.as_deref().unwrap_or("*")
+                ));
+                continue;
+            }
+            for (address, observers) in candidates {
+                let address_text = address.to_string();
+                if drivers.iter().any(|driver| {
+                    already_saved.contains(&(driver.name().to_owned(), address_text.clone()))
+                }) {
+                    continue;
+                }
+                let mut targets = Vec::new();
+                let locally_attached = observers.is_empty() || observers.contains(&local_hostname);
+                if locally_attached {
+                    targets.push(Target::host(&address_text));
+                } else if let Some(observer) = observers
+                    .into_iter()
+                    .filter(|observer| observer != &local_hostname)
+                    // A live peer on the destination LAN is sufficient;
+                    // bounded discovery must not fan one probe through
+                    // every equivalent jump host.
+                    .take(1)
+                    .next()
+                {
+                    targets.push(Target::host(&address_text).with_jump(Some(observer)));
+                }
+                let credentials = rule.credentials();
+                'probe: for target in targets {
+                    for driver in &drivers {
+                        match driver.recognizes(&target, &credentials).await {
+                            Ok(true) => {
+                                match driver.attach(&target, &credentials, &self.inventory).await {
+                                    Ok(id) => {
+                                        let meta = match self.inventory.get(&id.to_string()) {
+                                            Ok(device) => device.meta().clone(),
+                                            Err(error) => {
+                                                warnings.push(format!(
+                                                    "target discovery {target}: {error}"
+                                                ));
+                                                break 'probe;
+                                            }
+                                        };
+                                        self.saved.lock().await.insert(
+                                            id,
+                                            SavedDevice {
+                                                meta: meta.clone(),
+                                                target: target.to_string(),
+                                                name: None,
+                                                username: Some(rule.username.clone()),
+                                                password_env: rule.password_env.clone(),
+                                                key_path: rule.key_path.clone(),
+                                            },
+                                        );
+                                        already_saved
+                                            .insert((meta.driver.clone(), meta.address.clone()));
+                                        discovered.push(format!(
+                                            "{} via {} ({})",
+                                            meta.id,
+                                            target,
+                                            driver.name()
+                                        ));
+                                        break 'probe;
+                                    }
+                                    Err(error) => warnings.push(format!(
+                                        "target discovery attach {target} with {}: {error}",
+                                        driver.name()
+                                    )),
+                                }
+                            }
+                            Ok(false) => {}
+                            Err(error) => warnings.push(format!(
+                                "target discovery probe {target} with {}: {error}",
+                                driver.name()
+                            )),
+                        }
+                    }
+                }
+            }
+        }
+        if !discovered.is_empty() {
+            if let Err(error) = self.persist().await {
+                warnings.push(format!("persist discovered targets: {error}"));
+            }
+        }
+        (discovered, warnings)
     }
 
     async fn persist_discovery(&self) -> Result<()> {
@@ -583,6 +793,39 @@ impl Daemon {
                 let caps = self.inventory.capabilities(&id)?;
                 to_value(&caps).map_err(json_err)
             }
+            Request::CredentialMapList => to_value(
+                self.credential_rules
+                    .lock()
+                    .await
+                    .values()
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            )
+            .map_err(json_err),
+            Request::CredentialMapSet { rule, write } => {
+                if !write {
+                    return Err(MyceliumError::WritesNotPermitted(
+                        "credential map changes require --write".into(),
+                    ));
+                }
+                rule.validate()?;
+                self.credential_rules
+                    .lock()
+                    .await
+                    .insert(rule.name.clone(), rule.clone());
+                self.persist_credential_rules().await?;
+                to_value(rule).map_err(json_err)
+            }
+            Request::CredentialMapRemove { name, write } => {
+                if !write {
+                    return Err(MyceliumError::WritesNotPermitted(
+                        "credential map changes require --write".into(),
+                    ));
+                }
+                let removed = self.credential_rules.lock().await.remove(&name).is_some();
+                self.persist_credential_rules().await?;
+                to_value(serde_json::json!({"name": name, "removed": removed})).map_err(json_err)
+            }
             Request::DeviceCall {
                 id,
                 capability,
@@ -671,7 +914,7 @@ impl Daemon {
                 to_value(crate::execution::list_receipts()?).map_err(json_err)
             }
             Request::Scan => {
-                let mut warnings = Vec::new();
+                let (discovered_targets, mut warnings) = self.discover_managed_targets().await;
                 let mut observations = Vec::new();
                 for dev in self.inventory.devices() {
                     match dev.observe().await {
@@ -755,6 +998,7 @@ impl Daemon {
                 to_value(serde_json::json!({
                     "report": report,
                     "warnings": warnings,
+                    "discovered_targets": discovered_targets,
                     "nodes": self.topology.lock().await.nodes.len(),
                     "segments": self.topology.lock().await.segments.len(),
                 }))
@@ -2634,6 +2878,7 @@ mod tests {
                 .unwrap(),
             ),
             saved: Mutex::new(BTreeMap::new()),
+            credential_rules: Mutex::new(BTreeMap::new()),
             discovery_scopes: Mutex::new(BTreeMap::new()),
             allocations: Mutex::new(BTreeMap::new()),
             networks: Mutex::new(BTreeMap::new()),

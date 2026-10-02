@@ -124,6 +124,29 @@ Credentials are referenced by environment-variable name and are not persisted
 in inventory. Use a dedicated `MYCELIUM_HOME` when evaluating against a test
 network.
 
+For automatic managed-target discovery, configure credential selectors rather
+than a static device list. Addresses are derived from the converged topology;
+the selected drivers identify the device, and Mycelium derives a healthy peer
+on the matching LAN as an SSH jump when the local node is not attached:
+
+```sh
+mycelium credentials map set network-appliances \
+  --driver edgeos \
+  --cidr 192.168.0.0/16 \
+  --user ubnt \
+  --password-env GATEWAY_PASS \
+  --write
+
+mycelium scan
+mycelium targets
+```
+
+The credential map persists selectors and environment-variable/key references,
+never secret values. A mapping authorizes an authentication attempt; driver
+recognition still determines what the endpoint is. Successful discoveries are
+persisted as managed targets, while failures appear in scan warnings instead of
+being silently classified.
+
 ## Design
 
 - One shared representation; vendor drivers translate capabilities at the edge.

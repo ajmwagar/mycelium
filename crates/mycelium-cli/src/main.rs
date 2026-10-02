@@ -91,6 +91,9 @@ usage:
   mycelium drivers
   mycelium add <host[:port]> [--name NAME] [--driver NAME] [--user U] [--password-env VAR] [--key PATH]
   mycelium targets [--json]
+  mycelium credentials map list [--json]
+  mycelium credentials map set NAME [--driver DRIVER] [--address IP]... [--cidr CIDR]... --user USER (--password-env ENV | --key PATH) --write
+  mycelium credentials map remove NAME --write
   mycelium describe <id> [--json]
   mycelium call <id> <capability> [--param k=v ...] [--write] [--dry-run]
   mycelium plan switch <id> --desired <startup-config> [--json]
@@ -479,6 +482,7 @@ async fn run(cmd: &str, args: &[String]) -> Result<Vec<String>, ClientError> {
             }
             Ok(render_devices(&v))
         }
+        "credentials" => credential_map(args).await,
         "describe" => {
             let f = parse_flags(args);
             let id = f.rest.first().ok_or(err_usage("describe needs an id"))?;
@@ -2104,6 +2108,124 @@ async fn resources(args: &[String]) -> Result<Vec<String>, ClientError> {
     Ok(render_resources(&catalog))
 }
 
+async fn credential_map(args: &[String]) -> Result<Vec<String>, ClientError> {
+    if args.first().map(String::as_str) != Some("map") {
+        return Err(err_usage("credentials needs `map list|set|remove`"));
+    }
+    let action = args.get(1).map(String::as_str).unwrap_or("list");
+    match action {
+        "list" => {
+            let mut client = connect().await?;
+            let value = client.call(&Request::CredentialMapList).await?;
+            if args.iter().any(|argument| argument == "--json") {
+                return Ok(vec![value.to_string()]);
+            }
+            let mut lines = vec!["credential mappings:".into()];
+            for rule in value.as_array().into_iter().flatten() {
+                let selectors = rule["addresses"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .chain(rule["cidrs"].as_array().into_iter().flatten())
+                    .filter_map(serde_json::Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(",");
+                lines.push(format!(
+                    "  {} driver={} selectors={} user={} secret={}",
+                    rule["name"].as_str().unwrap_or("?"),
+                    rule["driver"].as_str().unwrap_or("auto"),
+                    selectors,
+                    rule["username"].as_str().unwrap_or("?"),
+                    rule["password_env"]
+                        .as_str()
+                        .map(|name| format!("env:{name}"))
+                        .or_else(|| rule["key_path"].as_str().map(|_| "key".into()))
+                        .unwrap_or_else(|| "missing".into())
+                ));
+            }
+            Ok(lines)
+        }
+        "set" => {
+            let name = args
+                .get(2)
+                .ok_or_else(|| err_usage("credentials map set needs NAME"))?
+                .clone();
+            let mut driver = None;
+            let mut addresses = Vec::new();
+            let mut cidrs = Vec::new();
+            let mut username = None;
+            let mut password_env = None;
+            let mut key_path = None;
+            let mut write = false;
+            let mut index = 3;
+            while index < args.len() {
+                let value = |index: usize, flag: &str| {
+                    args.get(index + 1)
+                        .cloned()
+                        .ok_or_else(|| err_usage(&format!("{flag} needs a value")))
+                };
+                match args[index].as_str() {
+                    "--driver" => driver = Some(value(index, "--driver")?),
+                    "--address" => addresses.push(
+                        value(index, "--address")?
+                            .parse()
+                            .map_err(|_| err_usage("--address needs an IP address"))?,
+                    ),
+                    "--cidr" => cidrs.push(value(index, "--cidr")?),
+                    "--user" => username = Some(value(index, "--user")?),
+                    "--password-env" => password_env = Some(value(index, "--password-env")?),
+                    "--key" => key_path = Some(value(index, "--key")?),
+                    "--write" => {
+                        write = true;
+                        index += 1;
+                        continue;
+                    }
+                    argument => {
+                        return Err(err_usage(&format!(
+                            "unknown credential map argument `{argument}`"
+                        )))
+                    }
+                }
+                index += 2;
+            }
+            let rule = myceliumd::credential_map::CredentialRule {
+                name,
+                driver,
+                addresses,
+                cidrs,
+                username: username.ok_or_else(|| err_usage("credential map needs --user"))?,
+                password_env,
+                key_path,
+            };
+            let mut client = connect().await?;
+            let value = client
+                .call(&Request::CredentialMapSet { rule, write })
+                .await?;
+            Ok(vec![format!(
+                "saved credential mapping {}",
+                value["name"].as_str().unwrap_or("?")
+            )])
+        }
+        "remove" => {
+            let name = args
+                .get(2)
+                .ok_or_else(|| err_usage("credentials map remove needs NAME"))?
+                .clone();
+            let write = args.iter().any(|argument| argument == "--write");
+            let mut client = connect().await?;
+            let value = client
+                .call(&Request::CredentialMapRemove { name, write })
+                .await?;
+            Ok(vec![format!(
+                "credential mapping {} removed={}",
+                value["name"].as_str().unwrap_or("?"),
+                value["removed"].as_bool().unwrap_or(false)
+            )])
+        }
+        _ => Err(err_usage("credentials map needs list, set, or remove")),
+    }
+}
+
 fn filter_resources(
     mut catalog: fpl_resource_observation::ResourceCatalog,
     resource_id: Option<&str>,
@@ -3494,6 +3616,14 @@ fn render_scan(v: &serde_json::Value) -> Vec<String> {
     if let Some(w) = v["warnings"].as_array() {
         for warn in w {
             out.push(format!("warning: {}", warn.as_str().unwrap_or("?")));
+        }
+    }
+    if let Some(targets) = v["discovered_targets"].as_array() {
+        for target in targets {
+            out.push(format!(
+                "discovered target: {}",
+                target.as_str().unwrap_or("?")
+            ));
         }
     }
     out

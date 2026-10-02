@@ -44,6 +44,17 @@ pub enum Request {
         #[serde(default)]
         dry_run: bool,
     },
+    CredentialMapList,
+    CredentialMapSet {
+        rule: crate::credential_map::CredentialRule,
+        #[serde(default)]
+        write: bool,
+    },
+    CredentialMapRemove {
+        name: String,
+        #[serde(default)]
+        write: bool,
+    },
     ActionPlanApply {
         plan: mycelium_core::ActionPlan,
         #[serde(default)]
