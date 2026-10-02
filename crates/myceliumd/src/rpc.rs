@@ -1707,6 +1707,16 @@ impl Daemon {
                     .map_err(json_err)
             }
             Request::PeerList => to_value(self.mesh.views().await).map_err(json_err),
+            Request::EgressList => {
+                to_value(self.mesh.egress_observations().await).map_err(json_err)
+            }
+            Request::EgressPublish { observation } => {
+                self.mesh
+                    .publish_egress(observation.clone())
+                    .await
+                    .map_err(|error| MyceliumError::Validation(error.to_string()))?;
+                to_value(observation).map_err(json_err)
+            }
             Request::WireGuardBindingList => {
                 to_value(self.mesh.wireguard_bindings().await).map_err(json_err)
             }

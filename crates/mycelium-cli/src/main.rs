@@ -166,6 +166,7 @@ usage:
   mycelium wireguard init --subnet CIDR... [--endpoint HOST:PORT]
     [--probe-server HOST:PORT... --bind IP] [--listen-port PORT] --write [--dry-run] [--json]
   mycelium wireguard bindings [--json]
+  mycelium egress list [--json]
   mycelium egress probe --server HOST:PORT... [--bind IP] [--port PORT] [--json]
   mycelium dns zone [--suffix DOMAIN] [--json]
   mycelium security status|events [--json]
@@ -1233,8 +1234,17 @@ async fn software(args: &[String]) -> Result<Vec<String>, ClientError> {
 }
 
 async fn egress_command(args: &[String]) -> Result<Vec<String>, ClientError> {
+    if args.first().map(String::as_str) == Some("list") {
+        let mut client = connect().await?;
+        let value = client.call(&Request::EgressList).await?;
+        return Ok(vec![if args.iter().any(|arg| arg == "--json") {
+            value.to_string()
+        } else {
+            serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string())
+        }]);
+    }
     if args.first().map(String::as_str) != Some("probe") {
-        return Err(err_usage("egress currently supports `probe`"));
+        return Err(err_usage("egress supports `list` and `probe`"));
     }
     let servers = args
         .windows(2)
@@ -1269,6 +1279,44 @@ async fn egress_command(args: &[String]) -> Result<Vec<String>, ClientError> {
             report.failures.join("; ")
         )));
     }
+    let mut latencies = report
+        .results
+        .iter()
+        .map(|result| result.latency_ms as u64)
+        .collect::<Vec<_>>();
+    latencies.sort_unstable();
+    let hostname = std::process::Command::new("hostname")
+        .arg("-s")
+        .output()
+        .map_err(ClientError::Io)?;
+    let hostname = String::from_utf8_lossy(&hostname.stdout).trim().to_owned();
+    let mut client = connect().await?;
+    let peers = client.call(&Request::PeerList).await?;
+    let hello = peers
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|peer| peer.get("hello"))
+        .find(|hello| hello["hostname"].as_str() == Some(&hostname))
+        .ok_or_else(|| err_usage("local peer identity is not published yet"))?;
+    let observation = mycelium_peer_protocol::EgressObservation {
+        node_id: hello["node_id"].as_str().unwrap_or_default().into(),
+        hostname: hostname.clone(),
+        site: hello["site"].as_str().unwrap_or_default().into(),
+        observed_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+        mapped_endpoints: report
+            .results
+            .iter()
+            .map(|result| result.mapped.to_string())
+            .collect(),
+        public_ip_stable: report.public_ip_stable,
+        mapping_varies_by_destination: report.mapping_varies_by_destination,
+        median_latency_ms: latencies.get(latencies.len() / 2).copied().unwrap_or(0),
+    };
+    client.call(&Request::EgressPublish { observation }).await?;
     let report = serde_json::to_value(report)
         .map_err(|error| err_usage(&format!("serialize STUN report: {error}")))?;
     if args.iter().any(|arg| arg == "--json") {

@@ -12,11 +12,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use ed25519_dalek::SigningKey;
 use mycelium_peer_protocol::{
     decode_hex, encode_hex, local_build_target, local_compatible_targets, sha256_hex, AccessRecord,
-    AccessStatement, AuthorityRecord, AuthorityStatement, FilesystemHealth, HardwareSnapshot,
-    HostHealth, PackageManifest, PeerEndpointObservation, PeerEvent, PeerHello, PeerInterface,
-    PeerMessage, Platform, ProcessHealth, ReleaseManifest, SecurityEventBatch, SecurityPosture,
-    SignedEnvelope, TopologySnapshot, TransportCredentialBinding, TransportKind, WireGuardBinding,
-    MAX_SECURITY_EVENTS, MAX_SECURITY_FINDINGS, PROTOCOL_VERSION,
+    AccessStatement, AuthorityRecord, AuthorityStatement, EgressObservation, FilesystemHealth,
+    HardwareSnapshot, HostHealth, PackageManifest, PeerEndpointObservation, PeerEvent, PeerHello,
+    PeerInterface, PeerMessage, Platform, ProcessHealth, ReleaseManifest, SecurityEventBatch,
+    SecurityPosture, SignedEnvelope, TopologySnapshot, TransportCredentialBinding, TransportKind,
+    WireGuardBinding, MAX_SECURITY_EVENTS, MAX_SECURITY_FINDINGS, PROTOCOL_VERSION,
 };
 use rand_core::OsRng;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
@@ -351,6 +351,7 @@ impl Mesh {
                 PeerEvent::Package(_) => {}
                 PeerEvent::Authority(_) => {}
                 PeerEvent::Endpoint(endpoint) => endpoints.push(endpoint.clone()),
+                PeerEvent::Egress(_) => {}
                 PeerEvent::Access(_) => {}
                 PeerEvent::Transport(binding) => view.transports.push(binding.clone()),
                 PeerEvent::WireGuard(binding) => view.transports.push(binding.credential.clone()),
@@ -420,6 +421,25 @@ impl Mesh {
                 _ => None,
             })
             .collect()
+    }
+
+    pub async fn egress_observations(&self) -> Vec<EgressObservation> {
+        self.observations
+            .lock()
+            .await
+            .values()
+            .filter_map(|envelope| match &envelope.event {
+                PeerEvent::Egress(value) => Some(value.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub async fn publish_egress(&self, value: EgressObservation) -> Result<(), AnyError> {
+        if value.node_id != self.hello.node_id {
+            return Err("egress observation must describe the local peer".into());
+        }
+        self.publish(PeerEvent::Egress(value)).await
     }
 
     pub async fn hardware_snapshots(&self) -> Vec<HardwareSnapshot> {
@@ -1509,6 +1529,9 @@ fn event_is_authorized(
                 && decode_hex(&endpoint.peer).is_ok_and(|value| value.len() == 32)
                 && is_publishable_address(&endpoint.address)
         }
+        PeerEvent::Egress(value) => {
+            value.node_id == envelope.origin && value.mapped_endpoints.len() <= 16
+        }
         PeerEvent::Access(record) => {
             record.verify().is_ok() && resolver.access(&record.signer).authorized
         }
@@ -1550,6 +1573,7 @@ fn event_key(envelope: &SignedEnvelope) -> String {
             "{}:endpoint:{}:{}",
             envelope.origin, endpoint.peer, endpoint.address
         ),
+        PeerEvent::Egress(_) => format!("{}:egress", envelope.origin),
         PeerEvent::Access(record) => match &record.statement {
             AccessStatement::Grant { grant_id, .. } => {
                 format!("access:{}:grant:{grant_id}", record.signer)
@@ -1579,6 +1603,7 @@ fn event_origin_matches(envelope: &SignedEnvelope) -> bool {
         | PeerEvent::Authority(_)
         | PeerEvent::Access(_) => true,
         PeerEvent::Endpoint(endpoint) => endpoint.observer == envelope.origin,
+        PeerEvent::Egress(value) => value.node_id == envelope.origin,
         PeerEvent::Transport(binding) => binding.validate_for(&envelope.origin).is_ok(),
         PeerEvent::WireGuard(binding) => binding.validate_for(&envelope.origin).is_ok(),
         PeerEvent::Hardware(snapshot) => snapshot.validate_for(&envelope.origin).is_ok(),

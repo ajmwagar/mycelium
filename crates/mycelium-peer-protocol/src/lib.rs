@@ -81,6 +81,18 @@ pub struct PeerEndpointObservation {
     pub observed_at: u64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EgressObservation {
+    pub node_id: String,
+    pub hostname: String,
+    pub site: String,
+    pub observed_at: u64,
+    pub mapped_endpoints: Vec<String>,
+    pub public_ip_stable: bool,
+    pub mapping_varies_by_destination: bool,
+    pub median_latency_ms: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FilesystemHealth {
     pub mount: String,
@@ -124,6 +136,7 @@ pub enum PeerEvent {
     Package(PackageManifest),
     Authority(AuthorityRecord),
     Endpoint(PeerEndpointObservation),
+    Egress(EgressObservation),
     Access(AccessRecord),
     Transport(TransportCredentialBinding),
     WireGuard(WireGuardBinding),
@@ -145,6 +158,7 @@ enum KnownPeerEvent {
     Package(PackageManifest),
     Authority(AuthorityRecord),
     Endpoint(PeerEndpointObservation),
+    Egress(EgressObservation),
     Access(AccessRecord),
     Transport(TransportCredentialBinding),
     WireGuard(WireGuardBinding),
@@ -169,6 +183,7 @@ impl<'de> Deserialize<'de> for PeerEvent {
                     | "package"
                     | "authority"
                     | "endpoint"
+                    | "egress"
                     | "access"
                     | "transport"
                     | "wire_guard"
@@ -190,6 +205,7 @@ impl<'de> Deserialize<'de> for PeerEvent {
             KnownPeerEvent::Package(value) => Self::Package(value),
             KnownPeerEvent::Authority(value) => Self::Authority(value),
             KnownPeerEvent::Endpoint(value) => Self::Endpoint(value),
+            KnownPeerEvent::Egress(value) => Self::Egress(value),
             KnownPeerEvent::Access(value) => Self::Access(value),
             KnownPeerEvent::Transport(value) => Self::Transport(value),
             KnownPeerEvent::WireGuard(value) => Self::WireGuard(value),

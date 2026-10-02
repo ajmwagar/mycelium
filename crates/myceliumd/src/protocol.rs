@@ -172,6 +172,10 @@ pub enum Request {
     },
     /// Return the locally converged view of signed peer observations.
     PeerList,
+    EgressList,
+    EgressPublish {
+        observation: mycelium_peer_protocol::EgressObservation,
+    },
     WireGuardBindingList,
     WireGuardBindingInit {
         advertised_prefixes: Vec<String>,
