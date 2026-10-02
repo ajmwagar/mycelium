@@ -251,6 +251,11 @@ impl Mesh {
                     .await
                 {
                     eprintln!("myceliumd: collect security posture: {error}");
+                } else {
+                    let events = security_collector.security_events().await;
+                    if let Err(error) = crate::siem::export(&events, None, false, true).await {
+                        eprintln!("myceliumd: export security events: {error}");
+                    }
                 }
                 tokio::time::sleep(SECURITY_INTERVAL).await;
             }

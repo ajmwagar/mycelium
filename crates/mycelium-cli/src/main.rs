@@ -24,6 +24,7 @@ use mycelium_core::{
 use mycelium_driver_netgear_fastpath::{FastpathConfig, FastpathIntent, SnmpSwitchState};
 use myceliumd::client::{Client, ClientError};
 use myceliumd::protocol::Request;
+use myceliumd::siem::SinkConfig;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -143,6 +144,11 @@ usage:
   mycelium dns zone [--suffix DOMAIN] [--json]
   mycelium security status|events [--json]
   mycelium security scan [--stig-content PATH --stig-profile ID] [--remediation-plan] [--json]
+  mycelium security sinks list [--json]
+  mycelium security sinks add jsonl NAME ABSOLUTE_PATH --write [--dry-run]
+  mycelium security sinks add loki NAME URL [--token-env ENV] [--tenant ID] --write [--dry-run]
+  mycelium security export status [--json]
+  mycelium security export run [--sink NAME] --write [--dry-run] [--json]
   mycelium security remediation list [--json]
   mycelium security remediation apply DIGEST --write [--json]
   mycelium security remediation verify DIGEST [--json]
@@ -1047,23 +1053,21 @@ async fn dns_command(args: &[String]) -> Result<Vec<String>, ClientError> {
 
 async fn security_command(args: &[String]) -> Result<Vec<String>, ClientError> {
     let action = args.first().map(String::as_str).unwrap_or("status");
-    let request =
-        match action {
-            "status" => Request::SecurityPostureList,
-            "events" => Request::SecurityEventList,
-            "scan" => {
-                let value = |flag: &str| {
-                    args.windows(2)
-                        .find(|pair| pair[0] == flag)
-                        .map(|pair| pair[1].clone())
-                };
-                Request::SecurityScan {
-                    stig_content: value("--stig-content"),
-                    stig_profile: value("--stig-profile"),
-                    remediation_plan: args.iter().any(|arg| arg == "--remediation-plan"),
-                }
-            }
-            "remediation" => match args.get(1).map(String::as_str).unwrap_or("list") {
+    let value = |flag: &str| {
+        args.windows(2)
+            .find(|pair| pair[0] == flag)
+            .map(|pair| pair[1].clone())
+    };
+    let request = match action {
+        "status" => Request::SecurityPostureList,
+        "events" => Request::SecurityEventList,
+        "scan" => Request::SecurityScan {
+            stig_content: value("--stig-content"),
+            stig_profile: value("--stig-profile"),
+            remediation_plan: args.iter().any(|arg| arg == "--remediation-plan"),
+        },
+        "remediation" => {
+            match args.get(1).map(String::as_str).unwrap_or("list") {
                 "list" => Request::SecurityRemediationList,
                 "apply" => Request::SecurityRemediationApply {
                     digest: args.get(2).cloned().ok_or_else(|| {
@@ -1077,13 +1081,57 @@ async fn security_command(args: &[String]) -> Result<Vec<String>, ClientError> {
                     })?,
                 },
                 other => return Err(err_usage(&format!("unknown remediation action `{other}`"))),
-            },
-            _ => {
-                return Err(err_usage(
-                    "security supports `status`, `scan`, and `events`",
-                ))
             }
-        };
+        }
+        "sinks" => match args.get(1).map(String::as_str).unwrap_or("list") {
+            "list" => Request::SecuritySinkList,
+            "add" => {
+                let kind = args
+                    .get(2)
+                    .map(String::as_str)
+                    .ok_or_else(|| err_usage("security sinks add needs jsonl or loki"))?;
+                let name = args
+                    .get(3)
+                    .cloned()
+                    .ok_or_else(|| err_usage("security sinks add needs NAME"))?;
+                let target = args
+                    .get(4)
+                    .cloned()
+                    .ok_or_else(|| err_usage("security sinks add needs PATH or URL"))?;
+                let config = match kind {
+                    "jsonl" => SinkConfig::Jsonl {
+                        name,
+                        path: target.into(),
+                    },
+                    "loki" => SinkConfig::Loki {
+                        name,
+                        url: target,
+                        token_env: value("--token-env"),
+                        tenant: value("--tenant"),
+                    },
+                    other => return Err(err_usage(&format!("unknown SIEM sink kind `{other}`"))),
+                };
+                Request::SecuritySinkAdd {
+                    config,
+                    write: args.iter().any(|arg| arg == "--write"),
+                    dry_run: args.iter().any(|arg| arg == "--dry-run"),
+                }
+            }
+            other => return Err(err_usage(&format!("unknown sinks action `{other}`"))),
+        },
+        "export" => match args.get(1).map(String::as_str).unwrap_or("status") {
+            "status" => Request::SecurityExportStatus,
+            "run" => Request::SecurityExportRun {
+                sink: value("--sink"),
+                write: args.iter().any(|arg| arg == "--write"),
+                dry_run: args.iter().any(|arg| arg == "--dry-run"),
+            },
+            other => return Err(err_usage(&format!("unknown export action `{other}`"))),
+        },
+        _ => return Err(err_usage(
+            "security supports `status`, `scan`, `events`, `remediation`, `sinks`, and `export`",
+        )),
+    };
     let mut client = connect().await?;
     let value = client.call(&request).await?;
     if args.iter().any(|arg| arg == "--json") {
@@ -1118,6 +1166,17 @@ async fn security_command(args: &[String]) -> Result<Vec<String>, ClientError> {
                     event["message"].as_str().unwrap_or("unknown event")
                 ));
             }
+        }
+        return Ok(lines);
+    }
+    if action == "sinks" || action == "export" {
+        let values = value.as_array().cloned().unwrap_or_else(|| vec![value]);
+        let mut lines = vec![format!("Security {action}:")];
+        for item in values {
+            lines.push(format!(
+                "  {}",
+                serde_json::to_string(&item).map_err(|error| err_usage(&error.to_string()))?
+            ));
         }
         return Ok(lines);
     }

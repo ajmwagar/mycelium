@@ -642,6 +642,41 @@ mycelium security remediation apply <plan-sha256> --write
 mycelium security remediation verify <plan-sha256>
 ```
 
+### SIEM export (JSONL and Loki)
+
+Security events are signed and gossiped independently of SIEM delivery. An
+authorized node can export its converged view through a durable, bounded spool;
+an event is marked delivered only after the sink confirms it. Credentials are
+never written to sink configuration—Loki stores only the name of an environment
+variable containing its bearer token.
+
+```bash
+# Portable/manual runbook sink (also useful for testing parsers).
+mycelium security sinks add jsonl local \
+  /var/log/mycelium/security.jsonl --write
+
+# Loki's native push endpoint. Tenant is optional.
+export FPL_LOKI_TOKEN='...'
+mycelium security sinks add loki central \
+  https://loki.example.net/loki/api/v1/push \
+  --token-env FPL_LOKI_TOKEN --tenant fpl --write
+
+mycelium security sinks list
+mycelium security export run --dry-run
+mycelium security export run --sink central --write
+mycelium security export status
+```
+
+Configured sinks run automatically after the daemon's bounded 15-minute
+security collection. `export run` is the deterministic manual runbook and
+retry path.
+
+Loki labels are deliberately low-cardinality: `site`, `hostname`, `category`,
+`severity`, and `outcome`. Node and event IDs plus arbitrary event fields remain
+in the structured JSON log line. Sink configuration and delivery state live in
+`$MYCELIUM_HOME/security/siem/`; the spool refuses new events at its bound rather
+than silently dropping them.
+
 Fleet operations are projections over the same converged peer state. Node
 classes are derived from signed platform, architecture, and site identity
 rather than duplicated in a second inventory:

@@ -1360,6 +1360,38 @@ impl Daemon {
             Request::SecurityEventList => {
                 to_value(self.mesh.security_events().await).map_err(json_err)
             }
+            Request::SecuritySinkList => to_value(
+                crate::siem::list()
+                    .map_err(|error| MyceliumError::Validation(error.to_string()))?,
+            )
+            .map_err(json_err),
+            Request::SecuritySinkAdd {
+                config,
+                write,
+                dry_run,
+            } => to_value(
+                crate::siem::add(config, write, dry_run)
+                    .map_err(|error| MyceliumError::Validation(error.to_string()))?,
+            )
+            .map_err(json_err),
+            Request::SecurityExportStatus => to_value(
+                crate::siem::status()
+                    .map_err(|error| MyceliumError::Validation(error.to_string()))?,
+            )
+            .map_err(json_err),
+            Request::SecurityExportRun {
+                sink,
+                write,
+                dry_run,
+            } => {
+                let batches = self.mesh.security_events().await;
+                to_value(
+                    crate::siem::export(&batches, sink.as_deref(), dry_run, write)
+                        .await
+                        .map_err(|error| MyceliumError::Validation(error.to_string()))?,
+                )
+                .map_err(json_err)
+            }
             Request::SecurityScan {
                 stig_content,
                 stig_profile,

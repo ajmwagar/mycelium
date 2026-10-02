@@ -158,6 +158,23 @@ pub enum Request {
     },
     SecurityPostureList,
     SecurityEventList,
+    SecuritySinkList,
+    SecuritySinkAdd {
+        config: crate::siem::SinkConfig,
+        #[serde(default)]
+        write: bool,
+        #[serde(default)]
+        dry_run: bool,
+    },
+    SecurityExportStatus,
+    SecurityExportRun {
+        #[serde(default)]
+        sink: Option<String>,
+        #[serde(default)]
+        write: bool,
+        #[serde(default)]
+        dry_run: bool,
+    },
     SecurityScan {
         #[serde(default)]
         stig_content: Option<String>,

@@ -21,6 +21,7 @@ pub mod peer;
 pub mod protocol;
 pub mod rpc;
 mod security;
+pub mod siem;
 
 use std::path::PathBuf;
 
@@ -84,6 +85,10 @@ pub fn network_bindings_path() -> PathBuf {
 
 pub fn dhcp_scopes_path() -> PathBuf {
     home_dir().join("dhcp-scopes.json")
+}
+
+pub fn siem_dir() -> PathBuf {
+    home_dir().join("security").join("siem")
 }
 
 pub fn peer_key_path() -> PathBuf {
