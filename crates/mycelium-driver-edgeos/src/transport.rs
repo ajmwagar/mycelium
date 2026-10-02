@@ -346,6 +346,7 @@ impl OpenSsh {
         };
 
         let mut cmd = Command::new(&prog);
+        cmd.kill_on_drop(true);
         if let Some(pw) = &self.password {
             cmd.env("SSHPASS", pw);
         }
