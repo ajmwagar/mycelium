@@ -66,6 +66,9 @@ legacy roots during migration. `authority explain` reports `legacy` when one of
 those settings authorized the operation. New enrollment bundles also propagate
 `MYCELIUM_AUTHORITY_KEYS`.
 
-Fab/Fabd remains the build producer and Bifrost remains the service lifecycle
-owner. Mycelium authorizes, transports, caches, and atomically selects package
-artifacts; it does not rebuild either system's responsibility.
+Fab/Fabd may produce builds, but Mycelium does not depend on it at runtime.
+Mycelium authorizes, transports, caches, and atomically selects package
+artifacts. A bounded native lifecycle adapter may request a restart, verify
+health, and roll back; general process supervision remains with systemd,
+launchd, or the host's chosen supervisor. Bifrost owns inference and is not a
+service-lifecycle dependency.

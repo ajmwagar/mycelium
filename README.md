@@ -351,20 +351,21 @@ example `MYCELIUM_NODE_FACTS=role.jarvis,role.shroud`. Conflicting channels for
 the same package and node fail the plan. Activation verifies the signature,
 size, and digest again, writes a versioned executable below
 `$MYCELIUM_HOME/software`, and atomically switches `current`; it never executes
-publisher-supplied installation commands. Service lifecycle and fleet
-reconciliation belong to Bifrost. Mycelium only verifies and caches immutable
-artifacts, maintains a versioned package directory, atomically advances the
-`current` pointer, and writes `$MYCELIUM_HOME/software-state.json` for Bifrost
-to consume. It never starts, stops, drains, or health-checks application
-services.
+publisher-supplied installation commands. Service orchestration remains outside
+Mycelium. Mycelium verifies and caches immutable artifacts, maintains a
+versioned package directory, atomically advances the `current` pointer, and
+writes `$MYCELIUM_HOME/software-state.json` for any local consumer. A bounded
+systemd, launchd, or other explicit native adapter may restart the affected
+unit, validate its health, and roll back the selection; Mycelium does not
+become a general process supervisor.
 
 Update policy is resolved per package. A document-level `defaults.updates`
 applies when a package has no override; an override may select `manual` or
 `automatic` with its own cache soak, deterministic rollout window, and retry
 backoff. Automatic updates require one manually selected version and accept
-strictly newer versions only. `software auto-run` performs one bounded pass;
-Bifrost or another scheduler may invoke it without transferring service
-ownership to Mycelium.
+strictly newer versions only. `software auto-run` performs one bounded pass; a
+systemd timer, launchd agent, cron, or another scheduler may invoke it without
+transferring service ownership to Mycelium.
 
 ## Distributed access state
 
