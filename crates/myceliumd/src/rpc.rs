@@ -1,11 +1,14 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Write;
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use mycelium_core::{
     AllocationReceipt, AllocationValue, CredentialSet, DeviceId, DeviceMeta, DiscoveryRequest,
-    DiscoveryScope, Driver, Inventory, LogicalNetwork, MyceliumError, NetworkDriftReport,
-    NetworkDriftState, Result, Secret, Target, Topology, Transport, Value,
+    DiscoveryScope, Driver, Inventory, LogicalNetwork, MeshControlPlane, MeshCoordinator,
+    MeshProtocol, MyceliumError, NetworkDriftReport, NetworkDriftState, Observation, Origin,
+    OverlayPeerRecord, Result, Secret, Target, Topology, Transport, Value,
 };
 use mycelium_driver_darwin::DarwinDriver;
 use mycelium_driver_edgeos::{EdgeOsDriver, SshSession};
@@ -26,6 +29,89 @@ fn unix_now() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+fn validate_cidr(value: &str) -> Result<()> {
+    let (address, length) = value
+        .split_once('/')
+        .ok_or_else(|| MyceliumError::Validation(format!("`{value}` is not CIDR notation")))?;
+    let address = address
+        .parse::<std::net::IpAddr>()
+        .map_err(|_| MyceliumError::Validation(format!("invalid address in `{value}`")))?;
+    let length = length
+        .parse::<u8>()
+        .map_err(|_| MyceliumError::Validation(format!("invalid prefix length in `{value}`")))?;
+    let maximum = if address.is_ipv4() { 32 } else { 128 };
+    if length > maximum {
+        return Err(MyceliumError::Validation(format!(
+            "prefix length in `{value}` exceeds {maximum}"
+        )));
+    }
+    Ok(())
+}
+
+fn load_or_create_wireguard_key() -> Result<String> {
+    let path = crate::wireguard_private_key_path();
+    let private = match std::fs::read_to_string(&path) {
+        Ok(value) => value,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let output = Command::new("wg").arg("genkey").output().map_err(|error| {
+                MyceliumError::Validation(format!(
+                    "WireGuard runtime is unavailable (`wg genkey`): {error}"
+                ))
+            })?;
+            if !output.status.success() {
+                return Err(MyceliumError::Validation(
+                    "WireGuard key generation failed".into(),
+                ));
+            }
+            let value = String::from_utf8(output.stdout)
+                .map_err(|_| MyceliumError::Validation("wg returned a non-UTF-8 key".into()))?;
+            std::fs::create_dir_all(crate::wireguard_dir())?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(
+                    crate::wireguard_dir(),
+                    std::fs::Permissions::from_mode(0o700),
+                )?;
+            }
+            let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
+            std::fs::write(&temporary, value.as_bytes())?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o600))?;
+            }
+            std::fs::rename(temporary, &path)?;
+            value
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let mut child = Command::new("wg")
+        .arg("pubkey")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .map_err(|error| {
+            MyceliumError::Validation(format!(
+                "WireGuard runtime is unavailable (`wg pubkey`): {error}"
+            ))
+        })?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| MyceliumError::Validation("cannot open wg stdin".into()))?
+        .write_all(private.as_bytes())?;
+    let output = child.wait_with_output()?;
+    if !output.status.success() {
+        return Err(MyceliumError::Validation(
+            "stored WireGuard private key is invalid".into(),
+        ));
+    }
+    String::from_utf8(output.stdout)
+        .map(|value| value.trim().to_owned())
+        .map_err(|_| MyceliumError::Validation("wg returned a non-UTF-8 public key".into()))
 }
 
 /// One saved device: enough to reconnect it at boot. Contains env-var
@@ -487,6 +573,51 @@ impl Daemon {
                         })?;
                     topology.merge_snapshot(remote);
                 }
+                let observations = self
+                    .mesh
+                    .wireguard_bindings()
+                    .await
+                    .into_iter()
+                    .map(|binding| {
+                        let hostname = binding.hostname.to_lowercase();
+                        let device = topology
+                            .nodes
+                            .iter()
+                            .find(|(_, node)| node.hostnames.contains(&hostname))
+                            .map(|(id, _)| id.clone())
+                            .unwrap_or_else(|| binding.hostname.clone());
+                        Observation::OverlaySelf {
+                            device,
+                            ips: Vec::new(),
+                            hostname: binding.hostname.clone(),
+                            record: OverlayPeerRecord {
+                                network: "mycelium0".into(),
+                                protocol: MeshProtocol::WireGuard,
+                                control_plane: MeshControlPlane {
+                                    coordinator: MeshCoordinator::Custom,
+                                    url: None,
+                                },
+                                self_node: true,
+                                tailnet: None,
+                                dns_name: Some(format!(
+                                    "{}.{}.mycelium",
+                                    binding.hostname, binding.site
+                                )),
+                                backend_state: Some("signed_planned".into()),
+                                observer: binding.node_id,
+                                online: false,
+                                active: false,
+                                relay: None,
+                                endpoint: binding.endpoint,
+                                routed_lans: binding.advertised_prefixes.into_iter().collect(),
+                                observed_at: binding.generation,
+                                origin: Origin::new(&binding.hostname, "wireguard-binding")
+                                    .at_site(&binding.site),
+                            },
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                topology.observe_all(observations);
                 to_value(topology).map_err(json_err)
             }
             Request::DiscoveryScopeList => {
@@ -821,6 +952,46 @@ impl Daemon {
                 to_value(reports).map_err(json_err)
             }
             Request::PeerList => to_value(self.mesh.views().await).map_err(json_err),
+            Request::WireGuardBindingList => {
+                to_value(self.mesh.wireguard_bindings().await).map_err(json_err)
+            }
+            Request::WireGuardBindingInit {
+                advertised_prefixes,
+                endpoint,
+                write,
+                dry_run,
+            } => {
+                if advertised_prefixes.is_empty() {
+                    return Err(MyceliumError::Validation(
+                        "a WireGuard gateway must advertise at least one prefix".into(),
+                    ));
+                }
+                for prefix in &advertised_prefixes {
+                    validate_cidr(prefix)?;
+                }
+                if dry_run {
+                    return to_value(serde_json::json!({
+                        "dry_run": true,
+                        "private_key": crate::wireguard_private_key_path(),
+                        "advertised_prefixes": advertised_prefixes,
+                        "endpoint": endpoint,
+                        "requires": ["wg"],
+                    }))
+                    .map_err(json_err);
+                }
+                if !write {
+                    return Err(MyceliumError::WritesNotPermitted(
+                        "WireGuard key initialization requires --write".into(),
+                    ));
+                }
+                let public_key = load_or_create_wireguard_key()?;
+                let binding = self
+                    .mesh
+                    .publish_wireguard_binding(public_key, endpoint, advertised_prefixes)
+                    .await
+                    .map_err(|error| MyceliumError::Validation(error.to_string()))?;
+                to_value(binding).map_err(json_err)
+            }
             Request::ReleaseList => to_value(self.mesh.releases().await).map_err(json_err),
             Request::ReleaseKeygen { path, write } => {
                 if !write {

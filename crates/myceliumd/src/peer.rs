@@ -13,7 +13,8 @@ use ed25519_dalek::SigningKey;
 use mycelium_peer_protocol::{
     decode_hex, encode_hex, local_build_target, local_compatible_targets, sha256_hex, AccessRecord,
     AccessStatement, FilesystemHealth, HostHealth, PeerEvent, PeerHello, PeerMessage, Platform,
-    ProcessHealth, ReleaseManifest, SignedEnvelope, TopologySnapshot, PROTOCOL_VERSION,
+    ProcessHealth, ReleaseManifest, SignedEnvelope, TopologySnapshot, WireGuardBinding,
+    PROTOCOL_VERSION,
 };
 use rand_core::OsRng;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
@@ -278,6 +279,7 @@ impl Mesh {
                 PeerEvent::Topology(_) => {}
                 PeerEvent::Release(_) => {}
                 PeerEvent::Access(_) => {}
+                PeerEvent::WireGuard(_) => {}
                 PeerEvent::Unknown => {}
             }
         }
@@ -294,6 +296,37 @@ impl Mesh {
                 _ => None,
             })
             .collect()
+    }
+
+    pub async fn wireguard_bindings(&self) -> Vec<WireGuardBinding> {
+        self.observations
+            .lock()
+            .await
+            .values()
+            .filter_map(|envelope| match &envelope.event {
+                PeerEvent::WireGuard(binding) => Some(binding.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub async fn publish_wireguard_binding(
+        &self,
+        public_key: String,
+        endpoint: Option<String>,
+        advertised_prefixes: Vec<String>,
+    ) -> Result<WireGuardBinding, AnyError> {
+        let binding = WireGuardBinding {
+            node_id: self.hello.node_id.clone(),
+            hostname: self.hello.hostname.clone(),
+            site: self.hello.site.clone(),
+            public_key,
+            endpoint,
+            advertised_prefixes,
+            generation: now(),
+        };
+        self.publish(PeerEvent::WireGuard(binding.clone())).await?;
+        Ok(binding)
     }
 
     pub async fn topology_snapshots(&self) -> Vec<TopologySnapshot> {
@@ -584,6 +617,7 @@ impl Mesh {
                 PeerEvent::Access(record) => {
                     self.trusted_access_keys.contains(&record.signer) && record.verify().is_ok()
                 }
+                PeerEvent::WireGuard(binding) => binding.node_id == envelope.origin,
                 _ => true,
             };
             if !authorized
@@ -895,6 +929,7 @@ fn event_key(envelope: &SignedEnvelope) -> String {
                 format!("access:{}:revoke:{revocation_id}", record.signer)
             }
         },
+        PeerEvent::WireGuard(_) => format!("{}:wireguard", envelope.origin),
         PeerEvent::Unknown => format!("{}:unknown", envelope.origin),
     }
 }
@@ -906,6 +941,7 @@ fn event_origin_matches(envelope: &SignedEnvelope) -> bool {
         | PeerEvent::Topology(_)
         | PeerEvent::Release(_)
         | PeerEvent::Access(_) => true,
+        PeerEvent::WireGuard(binding) => binding.node_id == envelope.origin,
         PeerEvent::Unknown => false,
     }
 }

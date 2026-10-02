@@ -93,6 +93,14 @@ pub fn update_state_path() -> PathBuf {
     home_dir().join("update-state.json")
 }
 
+pub fn wireguard_dir() -> PathBuf {
+    home_dir().join("wireguard")
+}
+
+pub fn wireguard_private_key_path() -> PathBuf {
+    wireguard_dir().join("private.key")
+}
+
 pub fn read_update_state() -> UpdateState {
     std::fs::read(update_state_path())
         .ok()

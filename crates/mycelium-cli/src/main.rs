@@ -5,6 +5,7 @@
 //! explicit `--write`, and `--dry-run` always shows the plan instead of
 //! applying it.
 
+mod dns;
 mod enroll;
 mod invite;
 mod oidc;
@@ -120,10 +121,14 @@ usage:
     [--provider NAME] [--providers PATH]
   mycelium update status [--channel CHANNEL] [--fleet] [--json]
   mycelium update apply [--channel CHANNEL] [--path INSTALLED-BINARY] --write
-  mycelium wireguard plan LEFT RIGHT --left-subnet CIDR... --right-subnet CIDR...
+  mycelium wireguard plan LEFT RIGHT [--left-subnet CIDR...] [--right-subnet CIDR...]
     [--left-endpoint HOST:PORT] [--right-endpoint HOST:PORT]
     [--left-key PUBLIC-KEY] [--right-key PUBLIC-KEY] [--interface NAME] [--json]
-  mycelium egress probe --server HOST:PORT... [--bind IP] [--json]
+  mycelium wireguard init --subnet CIDR... [--endpoint HOST:PORT]
+    [--probe-server HOST:PORT... --bind IP] [--listen-port PORT] --write [--dry-run] [--json]
+  mycelium wireguard bindings [--json]
+  mycelium egress probe --server HOST:PORT... [--bind IP] [--port PORT] [--json]
+  mycelium dns zone [--suffix DOMAIN] [--json]
   mycelium enroll init [--path CA-DIR] --write
   mycelium enroll issue NAME --site SITE --address DNS-OR-IP [--san DNS-OR-IP]... --binary PATH --target TRIPLE [--peer HOST:PORT]... [--ca CA-DIR] [--path OUTPUT-DIR] --write
   mycelium enroll install --bundle DIR [--path MYCELIUM-HOME] --write
@@ -511,6 +516,7 @@ async fn run(cmd: &str, args: &[String]) -> Result<Vec<String>, ClientError> {
         "update" => update(args).await,
         "wireguard" => wireguard_command(args).await,
         "egress" => egress_command(args).await,
+        "dns" => dns_command(args).await,
         "enroll" => enroll_command(args).await,
         "annotate" => {
             let f = parse_flags(args);
@@ -838,39 +844,22 @@ async fn egress_command(args: &[String]) -> Result<Vec<String>, ClientError> {
                 .map_err(|_| err_usage(&format!("invalid bind address `{}`", pair[1])))
         })
         .transpose()?;
-    let mut results = Vec::new();
-    let mut failures = Vec::new();
-    let mut source = bind.map(|address| std::net::SocketAddr::new(address, 0));
-    for server in servers {
-        match stun::probe(&server, source).await {
-            Ok(result) => {
-                source = Some(result.source);
-                results.push(result);
-            }
-            Err(error) => failures.push(error),
-        }
-    }
-    if results.is_empty() {
+    let source_port = args
+        .windows(2)
+        .find(|pair| pair[0] == "--port")
+        .map(|pair| pair[1].parse::<u16>())
+        .transpose()
+        .map_err(|_| err_usage("--port must be a valid UDP port"))?
+        .unwrap_or(0);
+    let report = stun::probe_many(&servers, bind, source_port).await;
+    if report.results.is_empty() {
         return Err(err_usage(&format!(
             "every STUN probe failed: {}",
-            failures.join("; ")
+            report.failures.join("; ")
         )));
     }
-    let mapped_ips = results
-        .iter()
-        .map(|result| result.mapped.ip())
-        .collect::<std::collections::BTreeSet<_>>();
-    let mapped_endpoints = results
-        .iter()
-        .map(|result| result.mapped)
-        .collect::<std::collections::BTreeSet<_>>();
-    let report = serde_json::json!({
-        "bind": bind,
-        "results": results,
-        "failures": failures,
-        "public_ip_stable": mapped_ips.len() == 1,
-        "mapping_varies_by_destination": mapped_endpoints.len() > 1,
-    });
+    let report = serde_json::to_value(report)
+        .map_err(|error| err_usage(&format!("serialize STUN report: {error}")))?;
     if args.iter().any(|arg| arg == "--json") {
         return Ok(vec![report.to_string()]);
     }
@@ -899,9 +888,149 @@ async fn egress_command(args: &[String]) -> Result<Vec<String>, ClientError> {
     Ok(lines)
 }
 
+async fn dns_command(args: &[String]) -> Result<Vec<String>, ClientError> {
+    if args.first().map(String::as_str) != Some("zone") {
+        return Err(err_usage("dns currently supports `zone`"));
+    }
+    let suffix = args
+        .windows(2)
+        .find(|pair| pair[0] == "--suffix")
+        .map(|pair| pair[1].as_str())
+        .unwrap_or("mycelium");
+    let mut client = connect().await?;
+    let topology: Topology = serde_json::from_value(client.call(&Request::Topology).await?)
+        .map_err(|error| err_usage(&format!("invalid topology response: {error}")))?;
+    let bindings: Vec<mycelium_peer_protocol::WireGuardBinding> =
+        serde_json::from_value(client.call(&Request::WireGuardBindingList).await?)
+            .map_err(|error| err_usage(&format!("invalid WireGuard bindings: {error}")))?;
+    let records =
+        dns::derive_records(&topology, &bindings, suffix).map_err(|error| err_usage(&error))?;
+    if args.iter().any(|arg| arg == "--json") {
+        return Ok(vec![serde_json::to_string(&records).map_err(|error| {
+            err_usage(&format!("serialize DNS records: {error}"))
+        })?]);
+    }
+    let mut lines = vec![format!("# Mycelium-derived hosts for {suffix}")];
+    lines.extend(
+        records
+            .iter()
+            .map(|record| format!("{} {}", record.address, record.name)),
+    );
+    Ok(lines)
+}
+
+fn observed_string(binding: Option<&serde_json::Value>, field: &str) -> Option<String> {
+    binding?
+        .get(field)?
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+fn observed_prefixes(
+    binding: Option<&serde_json::Value>,
+) -> Result<Vec<wireguard::Prefix>, ClientError> {
+    binding
+        .and_then(|binding| binding["advertised_prefixes"].as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(|prefix| wireguard::parse_prefix(prefix).map_err(|error| err_usage(&error)))
+        .collect()
+}
+
 async fn wireguard_command(args: &[String]) -> Result<Vec<String>, ClientError> {
-    if args.first().map(String::as_str) != Some("plan") {
-        return Err(err_usage("wireguard currently supports `plan`"));
+    let action = args.first().map(String::as_str).unwrap_or("bindings");
+    if action == "bindings" {
+        let mut client = connect().await?;
+        let bindings = client.call(&Request::WireGuardBindingList).await?;
+        if args.iter().any(|arg| arg == "--json") {
+            return Ok(vec![bindings.to_string()]);
+        }
+        let mut lines = vec!["WireGuard bindings:".into()];
+        for binding in bindings.as_array().into_iter().flatten() {
+            lines.push(format!(
+                "  {} site={} endpoint={} prefixes={}",
+                binding["hostname"].as_str().unwrap_or("?"),
+                binding["site"].as_str().unwrap_or("?"),
+                binding["endpoint"].as_str().unwrap_or("unobserved"),
+                binding["advertised_prefixes"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(serde_json::Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ));
+        }
+        return Ok(lines);
+    }
+    if action == "init" {
+        let prefixes = args
+            .windows(2)
+            .filter(|pair| pair[0] == "--subnet")
+            .map(|pair| pair[1].clone())
+            .collect::<Vec<_>>();
+        let mut endpoint = args
+            .windows(2)
+            .find(|pair| pair[0] == "--endpoint")
+            .map(|pair| pair[1].clone());
+        let probe_servers = args
+            .windows(2)
+            .filter(|pair| pair[0] == "--probe-server")
+            .map(|pair| pair[1].clone())
+            .collect::<Vec<_>>();
+        if endpoint.is_none() && !probe_servers.is_empty() {
+            let bind = args
+                .windows(2)
+                .find(|pair| pair[0] == "--bind")
+                .ok_or_else(|| err_usage("endpoint probing requires --bind IP"))?[1]
+                .parse::<std::net::IpAddr>()
+                .map_err(|_| err_usage("invalid --bind IP"))?;
+            let listen_port = args
+                .windows(2)
+                .find(|pair| pair[0] == "--listen-port")
+                .map(|pair| pair[1].parse::<u16>())
+                .transpose()
+                .map_err(|_| err_usage("--listen-port must be a valid UDP port"))?
+                .unwrap_or(51820);
+            let report = stun::probe_many(&probe_servers, Some(bind), listen_port).await;
+            if report.results.is_empty() {
+                return Err(err_usage(&format!(
+                    "WireGuard endpoint probing failed: {}",
+                    report.failures.join("; ")
+                )));
+            }
+            if !report.public_ip_stable || report.mapping_varies_by_destination {
+                return Err(err_usage(
+                    "WireGuard endpoint mapping is not stable across STUN destinations",
+                ));
+            }
+            endpoint = report
+                .results
+                .first()
+                .map(|result| result.mapped.to_string());
+        }
+        let request = Request::WireGuardBindingInit {
+            advertised_prefixes: prefixes,
+            endpoint,
+            write: args.iter().any(|arg| arg == "--write"),
+            dry_run: args.iter().any(|arg| arg == "--dry-run"),
+        };
+        let mut client = connect().await?;
+        let result = client.call(&request).await?;
+        return if args.iter().any(|arg| arg == "--json") {
+            Ok(vec![result.to_string()])
+        } else {
+            Ok(vec![
+                serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string())
+            ])
+        };
+    }
+    if action != "plan" {
+        return Err(err_usage(
+            "wireguard supports `bindings`, `init`, and `plan`",
+        ));
     }
     let left_selector = args
         .get(1)
@@ -924,10 +1053,11 @@ async fn wireguard_command(args: &[String]) -> Result<Vec<String>, ClientError> 
             .map(|prefix| wireguard::parse_prefix(prefix).map_err(|error| err_usage(&error)))
             .collect()
     };
-    let left_prefixes = prefixes("--left-subnet")?;
-    let right_prefixes = prefixes("--right-subnet")?;
+    let mut left_prefixes = prefixes("--left-subnet")?;
+    let mut right_prefixes = prefixes("--right-subnet")?;
     let mut client = connect().await?;
     let peers = client.call(&Request::PeerList).await?;
+    let bindings = client.call(&Request::WireGuardBindingList).await?;
     let resolve = |selector: &str| -> Result<wireguard::GatewayIdentity, ClientError> {
         let matching = peers
             .as_array()
@@ -954,18 +1084,50 @@ async fn wireguard_command(args: &[String]) -> Result<Vec<String>, ClientError> 
             site: hello["site"].as_str().unwrap_or_default().into(),
         })
     };
+    let left_identity = resolve(left_selector)?;
+    let right_identity = resolve(right_selector)?;
+    let binding_for = |node_id: &str| {
+        bindings
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|binding| binding["node_id"].as_str() == Some(node_id))
+    };
+    let left_observed = binding_for(&left_identity.node_id);
+    let right_observed = binding_for(&right_identity.node_id);
+    if left_prefixes.is_empty() {
+        left_prefixes = observed_prefixes(left_observed)?;
+    }
+    if right_prefixes.is_empty() {
+        right_prefixes = observed_prefixes(right_observed)?;
+    }
+    if left_prefixes.is_empty() || right_prefixes.is_empty() {
+        let topology: Topology = serde_json::from_value(client.call(&Request::Topology).await?)
+            .map_err(|error| err_usage(&format!("invalid topology response: {error}")))?;
+        if left_prefixes.is_empty() {
+            left_prefixes = wireguard::derive_physical_prefixes(&topology, &left_identity.hostname);
+        }
+        if right_prefixes.is_empty() {
+            right_prefixes =
+                wireguard::derive_physical_prefixes(&topology, &right_identity.hostname);
+        }
+    }
     let plan = wireguard::plan_link(
         value("--interface").unwrap_or_else(|| "mycelium0".into()),
         wireguard::GatewayBinding {
-            identity: resolve(left_selector)?,
-            public_key: value("--left-key"),
-            endpoint: value("--left-endpoint"),
+            identity: left_identity,
+            public_key: value("--left-key")
+                .or_else(|| observed_string(left_observed, "public_key")),
+            endpoint: value("--left-endpoint")
+                .or_else(|| observed_string(left_observed, "endpoint")),
             advertised_prefixes: left_prefixes,
         },
         wireguard::GatewayBinding {
-            identity: resolve(right_selector)?,
-            public_key: value("--right-key"),
-            endpoint: value("--right-endpoint"),
+            identity: right_identity,
+            public_key: value("--right-key")
+                .or_else(|| observed_string(right_observed, "public_key")),
+            endpoint: value("--right-endpoint")
+                .or_else(|| observed_string(right_observed, "endpoint")),
             advertised_prefixes: right_prefixes,
         },
     )

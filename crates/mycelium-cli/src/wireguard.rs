@@ -1,7 +1,8 @@
 use std::net::IpAddr;
 
 use mycelium_core::topology::{
-    MeshControlPlane, MeshCoordinator, MeshProtocol, Observation, Origin, OverlayPeerRecord,
+    LinkMedium, LinkState, MeshControlPlane, MeshCoordinator, MeshProtocol, Observation, Origin,
+    OverlayPeerRecord, Topology,
 };
 use serde::Serialize;
 use std::collections::BTreeSet;
@@ -194,6 +195,46 @@ pub(crate) fn parse_prefix(value: &str) -> Result<Prefix, String> {
     })
 }
 
+/// Candidate site routes are derived only from connected routes whose source
+/// interface is currently-up physical Ethernet or Wi-Fi on the selected node.
+/// Reconciliation still records the chosen prefixes explicitly in the signed
+/// binding, so a later topology change cannot silently widen AllowedIPs.
+pub(crate) fn derive_physical_prefixes(topology: &Topology, hostname: &str) -> Vec<Prefix> {
+    let physical = topology
+        .nodes
+        .values()
+        .find(|node| node.hostnames.contains(hostname))
+        .map(|node| {
+            node.ports
+                .iter()
+                .filter(|(_, link)| {
+                    link.state == LinkState::Up
+                        && matches!(link.medium, Some(LinkMedium::Ethernet | LinkMedium::Wifi))
+                })
+                .map(|(name, _)| name.as_str())
+                .collect::<BTreeSet<_>>()
+        })
+        .unwrap_or_default();
+    let prefix = format!("{hostname}/");
+    let mut routes = topology
+        .segments
+        .values()
+        .filter(|segment| segment.id.starts_with(&prefix))
+        .filter(|segment| {
+            segment.origins.iter().any(|origin| {
+                origin
+                    .rsplit_once(":ip-route:")
+                    .is_some_and(|(_, interface)| physical.contains(interface))
+            })
+        })
+        .filter_map(|segment| segment.subnet)
+        .map(|(address, length)| Prefix { address, length })
+        .collect::<Vec<_>>();
+    routes.sort_by_key(|route| (route.address, route.length));
+    routes.dedup();
+    routes
+}
+
 fn prefixes_overlap(a: &Prefix, b: &Prefix) -> bool {
     if a.address.is_ipv4() != b.address.is_ipv4() {
         return false;
@@ -282,5 +323,57 @@ mod tests {
         right.public_key = Some("right-key".into());
         right.endpoint = Some("203.0.113.20:51820".into());
         assert!(plan_link("mycelium0".into(), left, right).unwrap().ready);
+    }
+
+    #[test]
+    fn route_derivation_excludes_virtual_and_down_interfaces() {
+        use mycelium_core::topology::{Link, PortRef, Segment};
+
+        let mut topology = Topology::empty();
+        let mut node = mycelium_core::topology::TopoNode::default();
+        node.hostnames.insert("gateway".into());
+        for (name, medium, state) in [
+            ("eth0", LinkMedium::Ethernet, LinkState::Up),
+            ("docker0", LinkMedium::Virtual, LinkState::Up),
+            ("wlan0", LinkMedium::Wifi, LinkState::Down),
+        ] {
+            node.ports.insert(
+                name.into(),
+                Link {
+                    a: PortRef {
+                        device: "gateway".into(),
+                        port: name.into(),
+                        vif: None,
+                    },
+                    b: None,
+                    state,
+                    medium: Some(medium),
+                    speed_mbps: None,
+                    duplex: None,
+                    origins: BTreeSet::new(),
+                },
+            );
+        }
+        topology.nodes.insert("gateway".into(), node);
+        for (cidr, interface) in [
+            ("192.168.10.0/24", "eth0"),
+            ("172.17.0.0/16", "docker0"),
+            ("192.168.20.0/24", "wlan0"),
+        ] {
+            let route = parse_prefix(cidr).unwrap();
+            topology.segments.insert(
+                format!("gateway/{cidr}"),
+                Segment {
+                    id: format!("gateway/{cidr}"),
+                    subnet: Some((route.address, route.length)),
+                    origins: [format!("gateway/linux-gateway:ip-route:{interface}")].into(),
+                    ..Segment::default()
+                },
+            );
+        }
+        assert_eq!(
+            derive_physical_prefixes(&topology, "gateway"),
+            vec![parse_prefix("192.168.10.0/24").unwrap()]
+        );
     }
 }

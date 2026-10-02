@@ -99,6 +99,7 @@ pub enum PeerEvent {
     Topology(TopologySnapshot),
     Release(ReleaseManifest),
     Access(AccessRecord),
+    WireGuard(WireGuardBinding),
     /// A future event kind this binary does not understand. Receivers discard
     /// it without rejecting the other independently signed observations.
     Unknown,
@@ -112,6 +113,7 @@ enum KnownPeerEvent {
     Topology(TopologySnapshot),
     Release(ReleaseManifest),
     Access(AccessRecord),
+    WireGuard(WireGuardBinding),
 }
 
 impl<'de> Deserialize<'de> for PeerEvent {
@@ -122,7 +124,7 @@ impl<'de> Deserialize<'de> for PeerEvent {
         let value = serde_json::Value::deserialize(deserializer)?;
         let known = matches!(
             value.get("kind").and_then(serde_json::Value::as_str),
-            Some("hello" | "health" | "topology" | "release" | "access")
+            Some("hello" | "health" | "topology" | "release" | "access" | "wire_guard")
         );
         if !known {
             return Ok(Self::Unknown);
@@ -135,8 +137,24 @@ impl<'de> Deserialize<'de> for PeerEvent {
             KnownPeerEvent::Topology(value) => Self::Topology(value),
             KnownPeerEvent::Release(value) => Self::Release(value),
             KnownPeerEvent::Access(value) => Self::Access(value),
+            KnownPeerEvent::WireGuard(value) => Self::WireGuard(value),
         })
     }
+}
+
+/// A WireGuard transport key and the routes it may advertise, authorized by
+/// the surrounding signed envelope from the node's Mycelium identity.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireGuardBinding {
+    pub node_id: String,
+    pub hostname: String,
+    pub site: String,
+    pub public_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    #[serde(default)]
+    pub advertised_prefixes: Vec<String>,
+    pub generation: u64,
 }
 
 /// A signed, schema-versioned topology snapshot. The topology schema remains
@@ -534,6 +552,32 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(event, PeerEvent::Unknown);
+    }
+
+    #[test]
+    fn wireguard_binding_is_covered_by_node_identity_signature() {
+        let key = SigningKey::from_bytes(&[19; 32]);
+        let node_id = encode_hex(key.verifying_key().as_bytes());
+        let mut envelope = SignedEnvelope::sign(
+            &key,
+            1,
+            1,
+            PeerEvent::WireGuard(WireGuardBinding {
+                node_id,
+                hostname: "gateway".into(),
+                site: "home".into(),
+                public_key: "wireguard-public-key".into(),
+                endpoint: Some("198.51.100.10:51820".into()),
+                advertised_prefixes: vec!["192.168.10.0/24".into()],
+                generation: 1,
+            }),
+        )
+        .unwrap();
+        envelope.verify().unwrap();
+        if let PeerEvent::WireGuard(binding) = &mut envelope.event {
+            binding.advertised_prefixes.push("10.0.0.0/8".into());
+        }
+        assert!(envelope.verify().is_err());
     }
 
     #[test]

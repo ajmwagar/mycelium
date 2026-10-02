@@ -104,6 +104,16 @@ pub enum Request {
     },
     /// Return the locally converged view of signed peer observations.
     PeerList,
+    WireGuardBindingList,
+    WireGuardBindingInit {
+        advertised_prefixes: Vec<String>,
+        #[serde(default)]
+        endpoint: Option<String>,
+        #[serde(default)]
+        write: bool,
+        #[serde(default)]
+        dry_run: bool,
+    },
     ReleaseList,
     ReleaseKeygen {
         path: String,

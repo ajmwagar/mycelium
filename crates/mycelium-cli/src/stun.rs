@@ -19,6 +19,49 @@ pub(crate) struct ProbeResult {
     pub latency_ms: u128,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub(crate) struct ProbeReport {
+    pub bind: Option<IpAddr>,
+    pub results: Vec<ProbeResult>,
+    pub failures: Vec<String>,
+    pub public_ip_stable: bool,
+    pub mapping_varies_by_destination: bool,
+}
+
+pub(crate) async fn probe_many(
+    servers: &[String],
+    bind: Option<IpAddr>,
+    source_port: u16,
+) -> ProbeReport {
+    let mut results = Vec::new();
+    let mut failures = Vec::new();
+    let mut source = bind.map(|address| SocketAddr::new(address, source_port));
+    for server in servers {
+        match probe(server, source).await {
+            Ok(result) => {
+                source = Some(result.source);
+                results.push(result);
+            }
+            Err(error) => failures.push(error),
+        }
+    }
+    let mapped_ips = results
+        .iter()
+        .map(|result| result.mapped.ip())
+        .collect::<std::collections::BTreeSet<_>>();
+    let mapped_endpoints = results
+        .iter()
+        .map(|result| result.mapped)
+        .collect::<std::collections::BTreeSet<_>>();
+    ProbeReport {
+        bind,
+        public_ip_stable: mapped_ips.len() == 1,
+        mapping_varies_by_destination: mapped_endpoints.len() > 1,
+        results,
+        failures,
+    }
+}
+
 pub(crate) async fn probe(server: &str, bind: Option<SocketAddr>) -> Result<ProbeResult, String> {
     let mut addresses = tokio::net::lookup_host(server)
         .await
