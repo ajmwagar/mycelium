@@ -1,5 +1,11 @@
 {
   "schema_version": 1,
+  "automatic": {
+    "enabled": false,
+    "minimum_cache_age_secs": 900,
+    "rollout_window_secs": 1800,
+    "retry_backoff_secs": 3600
+  },
   "rules": [
     {
       "name": "base-mesh",

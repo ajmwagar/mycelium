@@ -129,6 +129,8 @@ usage:
   mycelium software plan POLICY.json [--json]
   mycelium software policy set POLICY.json --write [--dry-run] [--json]
   mycelium software activate NAME [--channel CHANNEL] --write [--dry-run] [--json]
+  mycelium software reconcile (--write | --dry-run) [--json]
+  mycelium software auto-run
   mycelium access list [--json]
   mycelium access keygen --path PATH --write [--json]
   mycelium access publish --statement PATH --signing-key PATH --write [--dry-run] [--json]
@@ -1132,6 +1134,11 @@ async fn software(args: &[String]) -> Result<Vec<String>, ClientError> {
             write: flags.write,
             dry_run: flags.dry_run,
         },
+        "reconcile" => Request::SoftwareReconcile {
+            write: flags.write,
+            dry_run: flags.dry_run,
+        },
+        "auto-run" => Request::SoftwareAutoRun,
         "policy" if flags.rest.get(1).map(String::as_str) == Some("set") => {
             Request::SoftwarePolicySet {
                 policy: flags
@@ -1147,7 +1154,14 @@ async fn software(args: &[String]) -> Result<Vec<String>, ClientError> {
     };
     let mut client = connect().await?;
     let value = client.call(&request).await?;
-    if flags.json || action == "activate" {
+    if action == "policy" && flags.write && !flags.dry_run {
+        let policy = myceliumd::software::read_policy(&myceliumd::software_policy_path())
+            .map_err(|error| err_usage(&format!("installed software policy: {error}")))?;
+        if policy.automatic.enabled {
+            install_software_scheduler()?;
+        }
+    }
+    if flags.json || action != "plan" {
         return Ok(vec![
             serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string())
         ]);
@@ -2121,30 +2135,65 @@ fn automatic_upgrade_allowed(active: Option<&str>, candidate: &str) -> Result<()
 }
 
 fn install_update_scheduler() -> Result<(), ClientError> {
+    install_cli_scheduler(
+        "dev.fpl.mycelium-updater",
+        "mycelium-update",
+        "Mycelium safe automatic update",
+        &["update", "auto-run"],
+        &myceliumd::home_dir().join("update.log"),
+    )
+}
+
+fn install_software_scheduler() -> Result<(), ClientError> {
+    install_cli_scheduler(
+        "dev.fpl.mycelium-software",
+        "mycelium-software",
+        "Mycelium desired software reconciliation",
+        &["software", "auto-run"],
+        &myceliumd::home_dir().join("software-update.log"),
+    )
+}
+
+fn install_cli_scheduler(
+    launch_label: &str,
+    unit_stem: &str,
+    description: &str,
+    arguments: &[&str],
+    log: &std::path::Path,
+) -> Result<(), ClientError> {
     let executable = std::env::current_exe().map_err(ClientError::Io)?;
     if cfg!(target_os = "macos") {
         let home = std::env::var_os("HOME")
             .map(std::path::PathBuf::from)
             .ok_or_else(|| err_usage("HOME is not set"))?;
-        let path = home.join("Library/LaunchAgents/dev.fpl.mycelium-updater.plist");
-        let log = myceliumd::home_dir().join("update.log");
+        let path = home
+            .join("Library/LaunchAgents")
+            .join(format!("{launch_label}.plist"));
+        let program_arguments = arguments
+            .iter()
+            .map(|argument| format!("<string>{}</string>", xml_update(argument)))
+            .collect::<String>();
         let plist = format!(
-            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n<key>Label</key><string>dev.fpl.mycelium-updater</string>\n<key>ProgramArguments</key><array><string>{}</string><string>update</string><string>auto-run</string></array>\n<key>EnvironmentVariables</key><dict><key>MYCELIUM_NO_AUTOSTART</key><string>1</string></dict>\n<key>StartInterval</key><integer>300</integer><key>RunAtLoad</key><true/>\n<key>StandardOutPath</key><string>{}</string><key>StandardErrorPath</key><string>{}</string>\n</dict></plist>\n",
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n<key>Label</key><string>{}</string>\n<key>ProgramArguments</key><array><string>{}</string>{}</array>\n<key>EnvironmentVariables</key><dict><key>MYCELIUM_NO_AUTOSTART</key><string>1</string></dict>\n<key>StartInterval</key><integer>300</integer><key>RunAtLoad</key><true/>\n<key>StandardOutPath</key><string>{}</string><key>StandardErrorPath</key><string>{}</string>\n</dict></plist>\n",
+            xml_update(launch_label),
             xml_update(&executable.to_string_lossy()),
+            program_arguments,
             xml_update(&log.to_string_lossy()),
             xml_update(&log.to_string_lossy())
         );
         std::fs::write(&path, plist).map_err(ClientError::Io)?;
         let domain = format!("gui/{}", uid()?);
         let _ = std::process::Command::new("launchctl")
-            .args(["bootout", &format!("{domain}/dev.fpl.mycelium-updater")])
+            .args(["bootout", &format!("{domain}/{launch_label}")])
             .status();
         let status = std::process::Command::new("launchctl")
             .args(["bootstrap", &domain, &path.to_string_lossy()])
             .status()
             .map_err(ClientError::Io)?;
         if !status.success() {
-            return Err(err_usage("could not install automatic update LaunchAgent"));
+            return Err(err_usage(
+                "could not install automatic reconciliation LaunchAgent",
+            ));
         }
         return Ok(());
     }
@@ -2159,17 +2208,18 @@ fn install_update_scheduler() -> Result<(), ClientError> {
             ));
         }
         std::fs::create_dir_all(&dir).map_err(ClientError::Io)?;
+        let argument_text = arguments.join(" ");
         std::fs::write(
-            dir.join("mycelium-update.service"),
+            dir.join(format!("{unit_stem}.service")),
             format!(
-                "[Unit]\nDescription=Mycelium safe automatic update\nAfter=mycelium.service\n\n[Service]\nType=oneshot\nEnvironment=MYCELIUM_NO_AUTOSTART=1\nExecStart={} update auto-run\n",
-                executable.to_string_lossy()
+                "[Unit]\nDescription={description}\nAfter=mycelium.service\n\n[Service]\nType=oneshot\nEnvironment=MYCELIUM_NO_AUTOSTART=1\nExecStart={} {argument_text}\n",
+                executable.to_string_lossy(),
             ),
         )
         .map_err(ClientError::Io)?;
         std::fs::write(
-            dir.join("mycelium-update.timer"),
-            "[Unit]\nDescription=Check for Mycelium updates\n\n[Timer]\nOnBootSec=2m\nOnUnitActiveSec=5m\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n",
+            dir.join(format!("{unit_stem}.timer")),
+            format!("[Unit]\nDescription={description}\n\n[Timer]\nOnBootSec=2m\nOnUnitActiveSec=5m\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n"),
         )
         .map_err(ClientError::Io)?;
         let status = std::process::Command::new("systemctl")
@@ -2180,11 +2230,11 @@ fn install_update_scheduler() -> Result<(), ClientError> {
             return Err(err_usage("systemd user daemon-reload failed"));
         }
         let status = std::process::Command::new("systemctl")
-            .args(["--user", "enable", "--now", "mycelium-update.timer"])
+            .args(["--user", "enable", "--now", &format!("{unit_stem}.timer")])
             .status()
             .map_err(ClientError::Io)?;
         if !status.success() {
-            return Err(err_usage("could not enable Mycelium update timer"));
+            return Err(err_usage("could not enable Mycelium reconciliation timer"));
         }
         return Ok(());
     }

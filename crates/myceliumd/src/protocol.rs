@@ -288,6 +288,13 @@ pub enum Request {
         #[serde(default)]
         dry_run: bool,
     },
+    SoftwareReconcile {
+        #[serde(default)]
+        write: bool,
+        #[serde(default)]
+        dry_run: bool,
+    },
+    SoftwareAutoRun,
     AccessList,
     AccessKeygen {
         path: String,

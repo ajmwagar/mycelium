@@ -96,6 +96,10 @@ pub struct Mesh {
 }
 
 impl Mesh {
+    pub fn node_id(&self) -> &str {
+        &self.hello.node_id
+    }
+
     pub fn hostname(&self) -> &str {
         &self.hello.hostname
     }
