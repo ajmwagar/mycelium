@@ -132,6 +132,7 @@ pub struct Daemon {
     pub inventory: Inventory,
     drivers: Vec<Arc<dyn Driver>>,
     pub topology: Mutex<Topology>,
+    topology_feed: Mutex<crate::topology_feed::TopologyFeed>,
     saved: Mutex<BTreeMap<DeviceId, SavedDevice>>,
     discovery_scopes: Mutex<BTreeMap<String, DiscoveryScope>>,
     allocations: Mutex<BTreeMap<String, AllocationReceipt>>,
@@ -259,10 +260,13 @@ impl Daemon {
 
         let mesh = crate::peer::Mesh::boot()
             .map_err(|error| MyceliumError::Validation(format!("peer mesh: {error}")))?;
+        let topology_feed = crate::topology_feed::TopologyFeed::load(crate::topology_feed_path())
+            .map_err(MyceliumError::Parse)?;
         let me = Self {
             inventory: Inventory::new(),
             drivers,
             topology: Mutex::new(topology),
+            topology_feed: Mutex::new(topology_feed),
             saved: Mutex::new(saved_map),
             discovery_scopes: Mutex::new(discovery_scopes),
             allocations: Mutex::new(allocations),
@@ -312,6 +316,63 @@ impl Daemon {
             serde_json::to_string_pretty(&*topo).map_err(json_err)?,
         )?;
         Ok(())
+    }
+
+    async fn converged_topology(&self) -> Result<Topology> {
+        let mut topology = self.topology.lock().await.clone();
+        for snapshot in self.mesh.topology_snapshots().await {
+            if snapshot.schema_version != 1 {
+                continue;
+            }
+            let remote =
+                serde_json::from_value::<Topology>(snapshot.topology).map_err(|error| {
+                    MyceliumError::Parse(format!("peer topology snapshot: {error}"))
+                })?;
+            topology.merge_snapshot(remote);
+        }
+        let observations = self
+            .mesh
+            .wireguard_bindings()
+            .await
+            .into_iter()
+            .map(|binding| {
+                let hostname = binding.hostname.to_lowercase();
+                let device = topology
+                    .nodes
+                    .iter()
+                    .find(|(_, node)| node.hostnames.contains(&hostname))
+                    .map(|(id, _)| id.clone())
+                    .unwrap_or_else(|| binding.hostname.clone());
+                Observation::OverlaySelf {
+                    device,
+                    ips: Vec::new(),
+                    hostname: binding.hostname.clone(),
+                    record: OverlayPeerRecord {
+                        network: "mycelium0".into(),
+                        protocol: MeshProtocol::WireGuard,
+                        control_plane: MeshControlPlane {
+                            coordinator: MeshCoordinator::Custom,
+                            url: None,
+                        },
+                        self_node: true,
+                        tailnet: None,
+                        dns_name: Some(format!("{}.{}.mycelium", binding.hostname, binding.site)),
+                        backend_state: Some("signed_planned".into()),
+                        observer: binding.node_id,
+                        online: false,
+                        active: false,
+                        relay: None,
+                        endpoint: binding.endpoint,
+                        routed_lans: binding.advertised_prefixes.into_iter().collect(),
+                        observed_at: binding.generation,
+                        origin: Origin::new(&binding.hostname, "wireguard-binding")
+                            .at_site(&binding.site),
+                    },
+                }
+            })
+            .collect::<Vec<_>>();
+        topology.observe_all(observations);
+        Ok(topology)
     }
 
     async fn persist_discovery(&self) -> Result<()> {
@@ -687,64 +748,17 @@ impl Daemon {
                 }))
                 .map_err(json_err)
             }
-            Request::Topology => {
-                let mut topology = self.topology.lock().await.clone();
-                for snapshot in self.mesh.topology_snapshots().await {
-                    if snapshot.schema_version != 1 {
-                        continue;
-                    }
-                    let remote =
-                        serde_json::from_value::<Topology>(snapshot.topology).map_err(|error| {
-                            MyceliumError::Parse(format!("peer topology snapshot: {error}"))
-                        })?;
-                    topology.merge_snapshot(remote);
+            Request::Topology => to_value(self.converged_topology().await?).map_err(json_err),
+            Request::TopologyWatch { since, limit } => {
+                if limit == 0 || limit > 32 {
+                    return Err(MyceliumError::Validation(
+                        "topology watch limit must be between 1 and 32".into(),
+                    ));
                 }
-                let observations = self
-                    .mesh
-                    .wireguard_bindings()
-                    .await
-                    .into_iter()
-                    .map(|binding| {
-                        let hostname = binding.hostname.to_lowercase();
-                        let device = topology
-                            .nodes
-                            .iter()
-                            .find(|(_, node)| node.hostnames.contains(&hostname))
-                            .map(|(id, _)| id.clone())
-                            .unwrap_or_else(|| binding.hostname.clone());
-                        Observation::OverlaySelf {
-                            device,
-                            ips: Vec::new(),
-                            hostname: binding.hostname.clone(),
-                            record: OverlayPeerRecord {
-                                network: "mycelium0".into(),
-                                protocol: MeshProtocol::WireGuard,
-                                control_plane: MeshControlPlane {
-                                    coordinator: MeshCoordinator::Custom,
-                                    url: None,
-                                },
-                                self_node: true,
-                                tailnet: None,
-                                dns_name: Some(format!(
-                                    "{}.{}.mycelium",
-                                    binding.hostname, binding.site
-                                )),
-                                backend_state: Some("signed_planned".into()),
-                                observer: binding.node_id,
-                                online: false,
-                                active: false,
-                                relay: None,
-                                endpoint: binding.endpoint,
-                                routed_lans: binding.advertised_prefixes.into_iter().collect(),
-                                observed_at: binding.generation,
-                                origin: Origin::new(&binding.hostname, "wireguard-binding")
-                                    .at_site(&binding.site),
-                            },
-                        }
-                    })
-                    .collect::<Vec<_>>();
-                topology.observe_all(observations);
-                to_value(topology).map_err(json_err)
+                let topology = self.converged_topology().await?;
+                let mut feed = self.topology_feed.lock().await;
+                feed.observe(topology).map_err(MyceliumError::Parse)?;
+                to_value(feed.read_since(since, limit)).map_err(json_err)
             }
             Request::DiscoveryScopeList => {
                 let scopes = self
@@ -2593,10 +2607,19 @@ mod tests {
     }
 
     fn daemon_with_fake() -> Daemon {
+        static NEXT_FEED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         Daemon {
             inventory: Inventory::new(),
             drivers: vec![Arc::new(FakeDriver)],
             topology: Mutex::new(Topology::empty()),
+            topology_feed: Mutex::new(
+                crate::topology_feed::TopologyFeed::load(std::env::temp_dir().join(format!(
+                    "mycelium-rpc-topology-feed-{}-{}.json",
+                    std::process::id(),
+                    NEXT_FEED.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                )))
+                .unwrap(),
+            ),
             saved: Mutex::new(BTreeMap::new()),
             discovery_scopes: Mutex::new(BTreeMap::new()),
             allocations: Mutex::new(BTreeMap::new()),

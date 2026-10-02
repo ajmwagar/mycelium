@@ -61,6 +61,12 @@ pub enum Request {
     /// Pull observations from every open device and merge the topology.
     Scan,
     Topology,
+    TopologyWatch {
+        #[serde(default)]
+        since: u64,
+        #[serde(default = "default_topology_watch_limit")]
+        limit: usize,
+    },
     DiscoveryScopeList,
     DiscoveryScopeSet {
         observer: String,
@@ -285,6 +291,10 @@ pub enum Request {
     },
     /// Persist state and exit.
     Shutdown,
+}
+
+fn default_topology_watch_limit() -> usize {
+    32
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

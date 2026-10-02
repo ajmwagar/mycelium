@@ -25,6 +25,7 @@ mod security;
 pub mod siem;
 pub mod ssh_renewal;
 mod state_change;
+pub mod topology_feed;
 
 use std::path::PathBuf;
 
@@ -68,6 +69,10 @@ pub fn devices_path() -> PathBuf {
 
 pub fn topology_path() -> PathBuf {
     home_dir().join("topology.json")
+}
+
+pub fn topology_feed_path() -> PathBuf {
+    home_dir().join("topology-feed.json")
 }
 
 pub fn discovery_path() -> PathBuf {

@@ -26,6 +26,7 @@ use mycelium_driver_netgear_fastpath::{FastpathConfig, FastpathIntent, SnmpSwitc
 use myceliumd::client::{Client, ClientError};
 use myceliumd::protocol::Request;
 use myceliumd::siem::SinkConfig;
+use std::io::Write;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -96,6 +97,7 @@ usage:
   mycelium executions [--json]
   mycelium scan
   mycelium topology [--json]
+  mycelium topology watch [--since SEQUENCE] [--once]
   mycelium discovery scopes [--json]
   mycelium discovery scope set <observer> --protocol ssdp|mdns --segment ID... --write [--dry-run]
   mycelium discovery scope remove <observer> --write [--dry-run]
@@ -540,6 +542,9 @@ async fn run(cmd: &str, args: &[String]) -> Result<Vec<String>, ClientError> {
             }
             Ok(render_scan(&v))
         }
+        "topology" if args.first().is_some_and(|argument| argument == "watch") => {
+            topology_watch(&args[1..]).await
+        }
         "topology" | "map" => {
             let f = parse_flags(args);
             let mut c = connect().await?;
@@ -635,6 +640,58 @@ async fn run(cmd: &str, args: &[String]) -> Result<Vec<String>, ClientError> {
         other => Err(err_usage(&format!(
             "unknown command `{other}` (see `mycelium`)"
         ))),
+    }
+}
+
+async fn topology_watch(args: &[String]) -> Result<Vec<String>, ClientError> {
+    let mut since = 0;
+    let mut once = false;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--once" => once = true,
+            "--since" => {
+                index += 1;
+                since = args
+                    .get(index)
+                    .ok_or_else(|| err_usage("topology watch --since needs a sequence"))?
+                    .parse::<u64>()
+                    .map_err(|_| err_usage("topology watch --since needs an unsigned sequence"))?;
+            }
+            argument => {
+                return Err(err_usage(&format!(
+                    "unknown topology watch argument `{argument}`"
+                )));
+            }
+        }
+        index += 1;
+    }
+    let mut client = connect().await?;
+    loop {
+        let value = client
+            .call(&Request::TopologyWatch { since, limit: 32 })
+            .await?;
+        let read: myceliumd::topology_feed::TopologyFeedRead = serde_json::from_value(value)
+            .map_err(|error| err_usage(&format!("bad topology watch response: {error}")))?;
+        if read.missed > 0 {
+            eprintln!(
+                "mycelium: topology watch resumed after a retention gap of {} generation(s)",
+                read.missed
+            );
+        }
+        for event in read.events {
+            println!(
+                "{}",
+                serde_json::to_string(&event)
+                    .map_err(|error| err_usage(&format!("encode topology generation: {error}")))?
+            );
+        }
+        std::io::stdout().flush().map_err(ClientError::Io)?;
+        since = read.position;
+        if once {
+            return Ok(Vec::new());
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
 }
 

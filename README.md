@@ -181,6 +181,26 @@ observer's local topology. Other peers merge those snapshots when rendering
 merged view, so discovery from multiple LAN vantage points converges without
 recursive gossip amplification. Scan credentials and execution remain local.
 
+For retained integrations, stream complete content-addressed generations as
+newline-delimited JSON instead of repeatedly treating one-shot output as an
+event source:
+
+```sh
+mycelium topology watch
+mycelium topology watch --since 1842
+mycelium topology watch --once
+```
+
+Each line carries `schema_version`, a `sha256:` generation digest, a monotonic
+sequence, observation time, provenance, and the complete converged topology.
+The daemon retains and atomically persists the latest 32 changed generations;
+unchanged polling produces no new event. `--since` resumes exclusively after a
+previous sequence. If that cursor predates retention, the CLI reports the gap
+on stderr before continuing with the oldest available complete generation.
+Here `complete` means the topology is an atomic projection rather than a
+fragment; provenance and timestamps remain the honest account of which
+observers contributed and how fresh their evidence is.
+
 Direct peer links are optional and mutually authenticated. Configure any node
 as a listener, a dialer, or both:
 
