@@ -790,10 +790,9 @@ impl Mesh {
     async fn dial_forever(self: Arc<Self>, seed: String, connector: TlsConnector) {
         let mut delay = Duration::from_secs(1);
         loop {
-            match tokio::time::timeout(CONNECT_TIMEOUT, self.dial(&seed, connector.clone())).await {
-                Ok(Ok(())) => delay = Duration::from_secs(1),
-                Ok(Err(error)) => eprintln!("myceliumd: peer seed {seed}: {error}"),
-                Err(_) => eprintln!("myceliumd: peer seed {seed}: connection timed out"),
+            match self.dial(&seed, connector.clone()).await {
+                Ok(()) => delay = Duration::from_secs(1),
+                Err(error) => eprintln!("myceliumd: peer seed {seed}: {error}"),
             }
             tokio::time::sleep(delay).await;
             delay = (delay * 2).min(Duration::from_secs(60));
@@ -801,13 +800,17 @@ impl Mesh {
     }
 
     async fn dial(&self, seed: &str, connector: TlsConnector) -> Result<(), AnyError> {
-        let tcp = TcpStream::connect(seed).await?;
+        let tcp = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(seed))
+            .await
+            .map_err(|_| "TCP connection timed out")??;
         let host = seed
             .rsplit_once(':')
             .map(|(host, _)| host)
             .ok_or("seed must be host:port")?;
         let name = server_name(host.trim_matches(&['[', ']'][..]))?;
-        let stream = connector.connect(name, tcp).await?;
+        let stream = tokio::time::timeout(CONNECT_TIMEOUT, connector.connect(name, tcp))
+            .await
+            .map_err(|_| "TLS handshake timed out")??;
         let fingerprint = tls_peer_fingerprint(stream.get_ref().1.peer_certificates());
         self.run_stream(stream, fingerprint).await
     }
