@@ -691,6 +691,25 @@ marks a plan verified when its post-apply scan has passing rules with no failed
 or errored rules. Fleet drain and reboot policy remain separate orchestration
 steps rather than being hidden inside a compliance script.
 
+## Agent skills
+
+The release binary carries the repo-owned skills under `skills/`, so the same
+operational guidance can travel with a signed Mycelium update. Inspect or
+install them without cloning the repository:
+
+```sh
+mycelium skills list
+mycelium skills sync --dry-run
+mycelium skills sync --write                       # Codex default
+mycelium skills sync --target agents --write
+mycelium skills install mycelium-network-operator --target claude --write
+```
+
+`--path DIR` supports another compatible agent. Installation writes the
+standard `SKILL.md` plus optional `agents/openai.yaml` metadata atomically.
+The repository files remain the sole source of truth; the CLI uses
+`include_str!` rather than maintaining a second embedded copy.
+
 ## Development
 
 ```sh

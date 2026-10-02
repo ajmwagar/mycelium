@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mycelium Driver Development"
+  short_description: "Build interoperable Mycelium device drivers"
+  default_prompt: "Use $mycelium-driver-development to add or improve a Mycelium driver."

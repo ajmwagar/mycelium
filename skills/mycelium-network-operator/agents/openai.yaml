@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mycelium Network Operator"
+  short_description: "Plan and operate Mycelium-managed networks"
+  default_prompt: "Use $mycelium-network-operator to inspect and safely change this network."

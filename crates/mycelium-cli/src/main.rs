@@ -12,6 +12,7 @@ mod oidc;
 mod oidc_gateway;
 mod pair;
 mod setup;
+mod skills;
 mod ssh_access;
 mod stun;
 mod wireguard;
@@ -81,6 +82,9 @@ usage:
   mycelium pair --kind peer --name NAME --site SITE --peer HOST:PORT... [--unix-user USER --role ROLE]... [--ca PATH] [--enrollment-ca DIR] [--listen ADDR] [--advertise URL] [--ttl 15m]
   mycelium invite create --kind access|peer --name NAME [--unix-user USER]... [--role ROLE]... [--site SITE] [--peer HOST:PORT]... [--ttl 15m] [--credential-ttl 8h] [--uses 1] --write
   mycelium daemon status|start|stop
+  mycelium skills list [--json]
+  mycelium skills install [NAME] [--target codex|agents|claude] [--path DIR] --write [--dry-run] [--json]
+  mycelium skills sync [--target codex|agents|claude] [--path DIR] --write [--dry-run] [--json]
   mycelium drivers
   mycelium add <host[:port]> [--name NAME] [--driver NAME] [--user U] [--password-env VAR] [--key PATH]
   mycelium devices [--json]
@@ -412,6 +416,7 @@ async fn run(cmd: &str, args: &[String]) -> Result<Vec<String>, ClientError> {
         "pair" => pair::run(args).await.map_err(access_error),
         "invite" => invite::run(args).map_err(access_error),
         "daemon" => daemon(args).await,
+        "skills" => skills::run(args),
         "help" | "--help" | "-h" => Ok(usage()),
         "drivers" => {
             let mut c = connect().await?;

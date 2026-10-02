@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mycelium Fleet Security"
+  short_description: "Audit and remediate fleet security posture"
+  default_prompt: "Use $mycelium-fleet-security to assess and improve this fleet safely."
