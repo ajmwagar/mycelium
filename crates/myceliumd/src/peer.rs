@@ -13,7 +13,8 @@ use ed25519_dalek::SigningKey;
 use mycelium_peer_protocol::{
     decode_hex, encode_hex, local_build_target, local_compatible_targets, sha256_hex, AccessRecord,
     AccessStatement, FilesystemHealth, HostHealth, PeerEvent, PeerHello, PeerMessage, Platform,
-    ProcessHealth, ReleaseManifest, SignedEnvelope, TopologySnapshot, WireGuardBinding,
+    ProcessHealth, ReleaseManifest, SecurityEventBatch, SecurityPosture, SignedEnvelope,
+    TopologySnapshot, WireGuardBinding, MAX_SECURITY_EVENTS, MAX_SECURITY_FINDINGS,
     PROTOCOL_VERSION,
 };
 use rand_core::OsRng;
@@ -27,6 +28,7 @@ use tokio::sync::Mutex;
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 
 const HEALTH_INTERVAL: Duration = Duration::from_secs(60);
+const SECURITY_INTERVAL: Duration = Duration::from_secs(15 * 60);
 const DIGEST_INTERVAL: Duration = Duration::from_secs(15);
 const ARTIFACT_REQUEST_INTERVAL: Duration = Duration::from_secs(1);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
@@ -102,7 +104,7 @@ impl Mesh {
                 platform: Platform::Linux,
                 architecture: "test".into(),
                 daemon_version: crate::VERSION.into(),
-                capabilities: vec!["system.health".into()],
+                capabilities: vec!["system.health".into(), "security.posture".into()],
             },
             sequence: AtomicU64::new(0),
             observations: Mutex::new(BTreeMap::new()),
@@ -149,7 +151,7 @@ impl Mesh {
             platform: platform(),
             architecture: std::env::consts::ARCH.into(),
             daemon_version: crate::VERSION.into(),
-            capabilities: vec!["system.health".into()],
+            capabilities: vec!["system.health".into(), "security.posture".into()],
         };
         let allowed_origins = std::env::var("MYCELIUM_PEER_ALLOW").ok().map(|value| {
             value
@@ -241,6 +243,19 @@ impl Mesh {
             }
         });
 
+        let security_collector = self.clone();
+        tokio::spawn(async move {
+            loop {
+                if let Err(error) = security_collector
+                    .collect_and_publish_security(None, None, false)
+                    .await
+                {
+                    eprintln!("myceliumd: collect security posture: {error}");
+                }
+                tokio::time::sleep(SECURITY_INTERVAL).await;
+            }
+        });
+
         if let Some(tls) = TlsSettings::from_env()? {
             let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
             if let Some(address) = tls.listen.clone() {
@@ -280,6 +295,8 @@ impl Mesh {
                 PeerEvent::Release(_) => {}
                 PeerEvent::Access(_) => {}
                 PeerEvent::WireGuard(_) => {}
+                PeerEvent::SecurityPosture(_) => {}
+                PeerEvent::SecurityEvents(_) => {}
                 PeerEvent::Unknown => {}
             }
         }
@@ -308,6 +325,56 @@ impl Mesh {
                 _ => None,
             })
             .collect()
+    }
+
+    pub async fn security_postures(&self) -> Vec<SecurityPosture> {
+        self.observations
+            .lock()
+            .await
+            .values()
+            .filter_map(|envelope| match &envelope.event {
+                PeerEvent::SecurityPosture(posture) => Some(posture.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub async fn security_events(&self) -> Vec<SecurityEventBatch> {
+        self.observations
+            .lock()
+            .await
+            .values()
+            .filter_map(|envelope| match &envelope.event {
+                PeerEvent::SecurityEvents(events) => Some(events.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub async fn collect_and_publish_security(
+        &self,
+        stig_content: Option<String>,
+        stig_profile: Option<String>,
+        remediation_plan: bool,
+    ) -> Result<SecurityPosture, AnyError> {
+        let hello = self.hello.clone();
+        let (posture, events) = tokio::task::spawn_blocking(move || {
+            let stig = match (stig_content.as_deref(), stig_profile.as_deref()) {
+                (Some(content), Some(profile)) => Some(crate::security::StigScan {
+                    content,
+                    profile,
+                    remediation_plan,
+                }),
+                (None, None) => None,
+                _ => return Err("STIG scanning requires both content and profile".into()),
+            };
+            crate::security::collect(&hello, stig)
+        })
+        .await??;
+        self.publish(PeerEvent::SecurityPosture(posture.clone()))
+            .await?;
+        self.publish(PeerEvent::SecurityEvents(events)).await?;
+        Ok(posture)
     }
 
     pub async fn publish_wireguard_binding(
@@ -618,6 +685,13 @@ impl Mesh {
                     self.trusted_access_keys.contains(&record.signer) && record.verify().is_ok()
                 }
                 PeerEvent::WireGuard(binding) => binding.node_id == envelope.origin,
+                PeerEvent::SecurityPosture(posture) => {
+                    posture.node_id == envelope.origin
+                        && posture.findings.len() <= MAX_SECURITY_FINDINGS
+                }
+                PeerEvent::SecurityEvents(events) => {
+                    events.node_id == envelope.origin && events.events.len() <= MAX_SECURITY_EVENTS
+                }
                 _ => true,
             };
             if !authorized
@@ -930,6 +1004,8 @@ fn event_key(envelope: &SignedEnvelope) -> String {
             }
         },
         PeerEvent::WireGuard(_) => format!("{}:wireguard", envelope.origin),
+        PeerEvent::SecurityPosture(_) => format!("{}:security-posture", envelope.origin),
+        PeerEvent::SecurityEvents(_) => format!("{}:security-events", envelope.origin),
         PeerEvent::Unknown => format!("{}:unknown", envelope.origin),
     }
 }
@@ -942,6 +1018,8 @@ fn event_origin_matches(envelope: &SignedEnvelope) -> bool {
         | PeerEvent::Release(_)
         | PeerEvent::Access(_) => true,
         PeerEvent::WireGuard(binding) => binding.node_id == envelope.origin,
+        PeerEvent::SecurityPosture(posture) => posture.node_id == envelope.origin,
+        PeerEvent::SecurityEvents(events) => events.node_id == envelope.origin,
         PeerEvent::Unknown => false,
     }
 }
@@ -1234,7 +1312,7 @@ fn platform() -> Platform {
     Platform::Linux
 }
 
-fn now() -> u64 {
+pub(crate) fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()

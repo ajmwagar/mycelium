@@ -1,6 +1,6 @@
 //! Symmetric, transport-neutral messages exchanged by Mycelium peers.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
@@ -100,6 +100,8 @@ pub enum PeerEvent {
     Release(ReleaseManifest),
     Access(AccessRecord),
     WireGuard(WireGuardBinding),
+    SecurityPosture(SecurityPosture),
+    SecurityEvents(SecurityEventBatch),
     /// A future event kind this binary does not understand. Receivers discard
     /// it without rejecting the other independently signed observations.
     Unknown,
@@ -114,6 +116,8 @@ enum KnownPeerEvent {
     Release(ReleaseManifest),
     Access(AccessRecord),
     WireGuard(WireGuardBinding),
+    SecurityPosture(SecurityPosture),
+    SecurityEvents(SecurityEventBatch),
 }
 
 impl<'de> Deserialize<'de> for PeerEvent {
@@ -124,7 +128,16 @@ impl<'de> Deserialize<'de> for PeerEvent {
         let value = serde_json::Value::deserialize(deserializer)?;
         let known = matches!(
             value.get("kind").and_then(serde_json::Value::as_str),
-            Some("hello" | "health" | "topology" | "release" | "access" | "wire_guard")
+            Some(
+                "hello"
+                    | "health"
+                    | "topology"
+                    | "release"
+                    | "access"
+                    | "wire_guard"
+                    | "security_posture"
+                    | "security_events"
+            )
         );
         if !known {
             return Ok(Self::Unknown);
@@ -138,8 +151,95 @@ impl<'de> Deserialize<'de> for PeerEvent {
             KnownPeerEvent::Release(value) => Self::Release(value),
             KnownPeerEvent::Access(value) => Self::Access(value),
             KnownPeerEvent::WireGuard(value) => Self::WireGuard(value),
+            KnownPeerEvent::SecurityPosture(value) => Self::SecurityPosture(value),
+            KnownPeerEvent::SecurityEvents(value) => Self::SecurityEvents(value),
         })
     }
+}
+
+pub const MAX_SECURITY_FINDINGS: usize = 256;
+pub const MAX_SECURITY_EVENTS: usize = 128;
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SecuritySeverity {
+    Informational,
+    Low,
+    Medium,
+    High,
+    Critical,
+    Unknown,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecurityFinding {
+    pub id: String,
+    pub source: String,
+    pub category: String,
+    pub severity: SecuritySeverity,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub component: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installed_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fixed_version: Option<String>,
+    #[serde(default)]
+    pub references: BTreeSet<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ComplianceSummary {
+    pub profile: String,
+    pub passed: u32,
+    pub failed: u32,
+    pub errors: u32,
+    pub not_applicable: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_digest: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecurityPosture {
+    pub schema_version: u16,
+    pub node_id: String,
+    pub hostname: String,
+    pub site: String,
+    pub observed_at: u64,
+    pub platform: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub os_version: Option<String>,
+    pub security_updates_available: u32,
+    pub reboot_required: bool,
+    #[serde(default)]
+    pub scanners: BTreeMap<String, String>,
+    #[serde(default)]
+    pub findings: Vec<SecurityFinding>,
+    #[serde(default)]
+    pub compliance: Vec<ComplianceSummary>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecurityEvent {
+    pub id: String,
+    pub observed_at: u64,
+    pub category: String,
+    pub action: String,
+    pub outcome: String,
+    pub severity: SecuritySeverity,
+    pub message: String,
+    #[serde(default)]
+    pub fields: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecurityEventBatch {
+    pub schema_version: u16,
+    pub node_id: String,
+    pub hostname: String,
+    pub site: String,
+    pub observed_at: u64,
+    pub events: Vec<SecurityEvent>,
 }
 
 /// A WireGuard transport key and the routes it may advertise, authorized by
@@ -576,6 +676,37 @@ mod tests {
         envelope.verify().unwrap();
         if let PeerEvent::WireGuard(binding) = &mut envelope.event {
             binding.advertised_prefixes.push("10.0.0.0/8".into());
+        }
+        assert!(envelope.verify().is_err());
+    }
+
+    #[test]
+    fn security_posture_is_covered_by_node_identity_signature() {
+        let key = SigningKey::from_bytes(&[23; 32]);
+        let node_id = encode_hex(key.verifying_key().as_bytes());
+        let mut envelope = SignedEnvelope::sign(
+            &key,
+            1,
+            1,
+            PeerEvent::SecurityPosture(SecurityPosture {
+                schema_version: 1,
+                node_id,
+                hostname: "gateway".into(),
+                site: "home".into(),
+                observed_at: 1,
+                platform: "linux".into(),
+                os_version: Some("Test Linux".into()),
+                security_updates_available: 0,
+                reboot_required: false,
+                scanners: BTreeMap::new(),
+                findings: Vec::new(),
+                compliance: Vec::new(),
+            }),
+        )
+        .unwrap();
+        envelope.verify().unwrap();
+        if let PeerEvent::SecurityPosture(posture) = &mut envelope.event {
+            posture.security_updates_available = 1;
         }
         assert!(envelope.verify().is_err());
     }

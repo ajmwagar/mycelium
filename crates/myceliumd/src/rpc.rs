@@ -992,6 +992,24 @@ impl Daemon {
                     .map_err(|error| MyceliumError::Validation(error.to_string()))?;
                 to_value(binding).map_err(json_err)
             }
+            Request::SecurityPostureList => {
+                to_value(self.mesh.security_postures().await).map_err(json_err)
+            }
+            Request::SecurityEventList => {
+                to_value(self.mesh.security_events().await).map_err(json_err)
+            }
+            Request::SecurityScan {
+                stig_content,
+                stig_profile,
+                remediation_plan,
+            } => {
+                let posture = self
+                    .mesh
+                    .collect_and_publish_security(stig_content, stig_profile, remediation_plan)
+                    .await
+                    .map_err(|error| MyceliumError::Validation(error.to_string()))?;
+                to_value(posture).map_err(json_err)
+            }
             Request::ReleaseList => to_value(self.mesh.releases().await).map_err(json_err),
             Request::ReleaseKeygen { path, write } => {
                 if !write {

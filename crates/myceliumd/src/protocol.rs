@@ -114,6 +114,16 @@ pub enum Request {
         #[serde(default)]
         dry_run: bool,
     },
+    SecurityPostureList,
+    SecurityEventList,
+    SecurityScan {
+        #[serde(default)]
+        stig_content: Option<String>,
+        #[serde(default)]
+        stig_profile: Option<String>,
+        #[serde(default)]
+        remediation_plan: bool,
+    },
     ReleaseList,
     ReleaseKeygen {
         path: String,

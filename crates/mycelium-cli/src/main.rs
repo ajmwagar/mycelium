@@ -129,6 +129,8 @@ usage:
   mycelium wireguard bindings [--json]
   mycelium egress probe --server HOST:PORT... [--bind IP] [--port PORT] [--json]
   mycelium dns zone [--suffix DOMAIN] [--json]
+  mycelium security status|events [--json]
+  mycelium security scan [--stig-content PATH --stig-profile ID] [--remediation-plan] [--json]
   mycelium enroll init [--path CA-DIR] --write
   mycelium enroll issue NAME --site SITE --address DNS-OR-IP [--san DNS-OR-IP]... --binary PATH --target TRIPLE [--peer HOST:PORT]... [--ca CA-DIR] [--path OUTPUT-DIR] --write
   mycelium enroll install --bundle DIR [--path MYCELIUM-HOME] --write
@@ -517,6 +519,7 @@ async fn run(cmd: &str, args: &[String]) -> Result<Vec<String>, ClientError> {
         "wireguard" => wireguard_command(args).await,
         "egress" => egress_command(args).await,
         "dns" => dns_command(args).await,
+        "security" => security_command(args).await,
         "enroll" => enroll_command(args).await,
         "annotate" => {
             let f = parse_flags(args);
@@ -916,6 +919,91 @@ async fn dns_command(args: &[String]) -> Result<Vec<String>, ClientError> {
             .iter()
             .map(|record| format!("{} {}", record.address, record.name)),
     );
+    Ok(lines)
+}
+
+async fn security_command(args: &[String]) -> Result<Vec<String>, ClientError> {
+    let action = args.first().map(String::as_str).unwrap_or("status");
+    let request = match action {
+        "status" => Request::SecurityPostureList,
+        "events" => Request::SecurityEventList,
+        "scan" => {
+            let value = |flag: &str| {
+                args.windows(2)
+                    .find(|pair| pair[0] == flag)
+                    .map(|pair| pair[1].clone())
+            };
+            Request::SecurityScan {
+                stig_content: value("--stig-content"),
+                stig_profile: value("--stig-profile"),
+                remediation_plan: args.iter().any(|arg| arg == "--remediation-plan"),
+            }
+        }
+        _ => {
+            return Err(err_usage(
+                "security supports `status`, `scan`, and `events`",
+            ))
+        }
+    };
+    let mut client = connect().await?;
+    let value = client.call(&request).await?;
+    if args.iter().any(|arg| arg == "--json") {
+        return Ok(vec![value.to_string()]);
+    }
+    if action == "scan" {
+        return render_security_postures(&serde_json::Value::Array(vec![value]));
+    }
+    if action == "events" {
+        let mut lines = vec!["Security events:".into()];
+        for batch in value.as_array().into_iter().flatten() {
+            let host = batch["hostname"].as_str().unwrap_or("unknown");
+            for event in batch["events"].as_array().into_iter().flatten() {
+                lines.push(format!(
+                    "  {host} {:<13} {:<10} {}",
+                    event["severity"].as_str().unwrap_or("unknown"),
+                    event["category"].as_str().unwrap_or("unknown"),
+                    event["message"].as_str().unwrap_or("unknown event")
+                ));
+            }
+        }
+        return Ok(lines);
+    }
+    render_security_postures(&value)
+}
+
+fn render_security_postures(value: &serde_json::Value) -> Result<Vec<String>, ClientError> {
+    let postures = value
+        .as_array()
+        .ok_or_else(|| err_usage("invalid security posture response"))?;
+    let mut lines = vec!["Security posture:".into()];
+    for posture in postures {
+        let findings = posture["findings"].as_array().map_or(0, Vec::len);
+        let failed = posture["compliance"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|profile| profile["failed"].as_u64())
+            .sum::<u64>();
+        lines.push(format!(
+            "  {:<20} site={:<14} updates={} findings={} stig_failed={} reboot={}",
+            posture["hostname"].as_str().unwrap_or("unknown"),
+            posture["site"].as_str().unwrap_or("unknown"),
+            posture["security_updates_available"].as_u64().unwrap_or(0),
+            findings,
+            failed,
+            posture["reboot_required"].as_bool().unwrap_or(false),
+        ));
+        if let Some(scanners) = posture["scanners"].as_object() {
+            lines.push(format!(
+                "    scanners: {}",
+                scanners
+                    .iter()
+                    .map(|(name, state)| format!("{name}={}", state.as_str().unwrap_or("unknown")))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ));
+        }
+    }
     Ok(lines)
 }
 

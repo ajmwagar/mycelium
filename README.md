@@ -601,6 +601,46 @@ The saved inventory contains the environment-variable name, never the AP
 password. UniFi network-wide configuration remains controller-owned; the AP
 driver is for observation, recovery, and explicit adoption operations.
 
+## Security posture, STIG, and SIEM events
+
+Every agent periodically publishes a bounded security-posture observation
+signed by its existing node identity. Peers gossip the summary—not full scan
+artifacts—and converge the latest report for each node:
+
+```sh
+mycelium security status
+mycelium security events
+mycelium security scan
+```
+
+On Debian-family Linux hosts the lightweight scan reports cached package
+updates and reboot state. Scanner availability is explicit, so an absent CVE
+or compliance backend is never represented as a clean result. Normalized,
+bounded security events form the transport-neutral SIEM feed; a future sink
+can export those records without changing the peer protocol.
+
+OpenSCAP can run an explicit DISA STIG evaluation when compatible SCAP content
+is installed:
+
+```sh
+mycelium security scan \
+  --stig-content /usr/share/xml/scap/ssg/content/ssg-ubuntu2404-ds.xml \
+  --stig-profile xccdf_org.ssgproject.content_profile_stig
+
+# Generate a content-addressed remediation script, but never execute it:
+mycelium security scan \
+  --stig-content /usr/share/xml/scap/ssg/content/ssg-ubuntu2404-ds.xml \
+  --stig-profile xccdf_org.ssgproject.content_profile_stig \
+  --remediation-plan
+```
+
+Full XCCDF evidence and generated plans remain local under
+`$MYCELIUM_HOME/security/evidence/`; gossip carries their SHA-256 digests and
+pass/fail/error/not-applicable counts. Mycelium refuses remediation-plan
+generation when every rule is inapplicable to the host. Applying remediation
+is intentionally not implemented: it needs a separate reviewed plan/apply,
+drain, rollback, and health-validation workflow.
+
 ## Development
 
 ```sh

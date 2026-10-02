@@ -20,6 +20,7 @@ pub mod client;
 pub mod peer;
 pub mod protocol;
 pub mod rpc;
+mod security;
 
 use std::path::PathBuf;
 
