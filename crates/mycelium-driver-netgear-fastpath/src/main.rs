@@ -1,5 +1,5 @@
 use mycelium_driver_netgear_fastpath::{
-    FastpathConfig, FastpathIntent, ReconcileOptions, ReconciliationPlan, SnmpSwitchState,
+    FastpathConfig, FastpathIntent, FastpathMigrationProposal, ReconcileOptions, SnmpSwitchState,
 };
 use std::env;
 use std::fs;
@@ -95,7 +95,7 @@ fn run() -> Result<(), String> {
                         observed_path.display()
                     )
                 })?;
-            let plan = ReconciliationPlan::build(
+            let plan = FastpathMigrationProposal::build(
                 &intent,
                 &observed,
                 ReconcileOptions {
@@ -109,7 +109,7 @@ fn run() -> Result<(), String> {
                 .map_err(|error| format!("cannot write {}: {error}", destination.display()))?;
             println!("plan_steps={}", plan.steps.len());
             println!("plan_blockers={}", plan.blockers.len());
-            println!("ready_to_apply={}", plan.ready_to_apply);
+            println!("ready_to_lower={}", plan.ready_to_lower);
             println!("plan_output={}", destination.display());
         }
         (None, Some(observed_path), Some(destination)) => {

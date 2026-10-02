@@ -13,7 +13,9 @@ pub use intent::{
     Diagnostic, DiagnosticLevel, FastpathIntent, InterfaceIntent, LagIntent, NormalizeError,
     OpaqueStatement, StackIntent, VlanIntent, VoiceOui,
 };
-pub use reconcile::{Blocker, PlanOperation, PlanStep, ReconcileOptions, ReconciliationPlan};
+pub use reconcile::{
+    Blocker, FastpathMigrationProposal, PlanOperation, PlanStep, ReconcileOptions,
+};
 pub use snmp::{SnmpCoverage, SnmpInterfaceState, SnmpSwitchState, SnmpVlanState};
 
 pub use startup_config::{

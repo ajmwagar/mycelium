@@ -17,13 +17,19 @@ pub struct ReconcileOptions {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReconciliationPlan {
+/// Advisory comparison of two FASTPATH configurations.
+///
+/// This is deliberately not an executable plan. Supported operations must be
+/// lowered through observed device capabilities into `mycelium_core::ActionPlan`
+/// before the daemon can apply them.
+pub struct FastpathMigrationProposal {
     pub schema_version: u32,
     pub source_model: Option<String>,
     pub source_firmware: Option<String>,
     pub target_model: Option<String>,
     pub target_firmware: Option<String>,
-    pub ready_to_apply: bool,
+    #[serde(alias = "ready_to_apply")]
+    pub ready_to_lower: bool,
     pub steps: Vec<PlanStep>,
     pub blockers: Vec<Blocker>,
 }
@@ -82,7 +88,7 @@ pub struct Blocker {
     pub message: String,
 }
 
-impl ReconciliationPlan {
+impl FastpathMigrationProposal {
     pub fn build(
         desired: &FastpathIntent,
         observed: &FastpathIntent,
@@ -240,7 +246,7 @@ impl ReconciliationPlan {
             source_firmware: desired.firmware_version.clone(),
             target_model: observed.model_family.clone(),
             target_firmware: observed.firmware_version.clone(),
-            ready_to_apply: blockers.is_empty(),
+            ready_to_lower: blockers.is_empty(),
             steps,
             blockers,
         }
@@ -261,8 +267,8 @@ mod tests {
     #[test]
     fn identical_state_is_idempotent() {
         let state = intent(&format!("{HEADER}vlan database\nvlan 10\nexit\n"));
-        let plan = ReconciliationPlan::build(&state, &state, ReconcileOptions::default());
-        assert!(plan.ready_to_apply);
+        let plan = FastpathMigrationProposal::build(&state, &state, ReconcileOptions::default());
+        assert!(plan.ready_to_lower);
         assert!(plan.steps.is_empty());
         assert!(plan.blockers.is_empty());
     }
@@ -273,8 +279,9 @@ mod tests {
             "{HEADER}vlan database\nvlan 10\nexit\ninterface 1/g1\nvlan pvid 10\nvlan participation include 10\nexit\n"
         ));
         let observed = intent(HEADER);
-        let plan = ReconciliationPlan::build(&desired, &observed, ReconcileOptions::default());
-        assert!(plan.ready_to_apply);
+        let plan =
+            FastpathMigrationProposal::build(&desired, &observed, ReconcileOptions::default());
+        assert!(plan.ready_to_lower);
         assert!(matches!(
             plan.steps[0].operation,
             PlanOperation::CreateVlan { .. }
@@ -289,8 +296,9 @@ mod tests {
     fn target_only_state_is_blocked_without_delete_opt_in() {
         let desired = intent(HEADER);
         let observed = intent(&format!("{HEADER}vlan database\nvlan 20\nexit\n"));
-        let plan = ReconciliationPlan::build(&desired, &observed, ReconcileOptions::default());
-        assert!(!plan.ready_to_apply);
+        let plan =
+            FastpathMigrationProposal::build(&desired, &observed, ReconcileOptions::default());
+        assert!(!plan.ready_to_lower);
         assert!(plan
             .blockers
             .iter()
@@ -302,7 +310,7 @@ mod tests {
     fn explicit_delete_opt_in_places_deletes_last() {
         let desired = intent(&format!("{HEADER}vlan database\nvlan 10\nexit\n"));
         let observed = intent(&format!("{HEADER}vlan database\nvlan 20\nexit\n"));
-        let plan = ReconciliationPlan::build(
+        let plan = FastpathMigrationProposal::build(
             &desired,
             &observed,
             ReconcileOptions {
@@ -310,7 +318,7 @@ mod tests {
                 ..ReconcileOptions::default()
             },
         );
-        assert!(plan.ready_to_apply);
+        assert!(plan.ready_to_lower);
         assert!(matches!(
             plan.steps[0].operation,
             PlanOperation::CreateVlan { .. }

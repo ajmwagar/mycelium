@@ -7,6 +7,11 @@ and coordinates health, releases, and bounded access without requiring a central
 controller. It is Rust-first, scriptable, and designed to fail closed around
 mutating operations.
 
+Desired state follows one boundary: intent produces read-only proposals, and
+supported proposals lower into the single vendor-neutral `ActionPlan` executor.
+Applied plans have canonical identities and durable per-action receipts. See
+[`docs/changesets.md`](docs/changesets.md).
+
 > Mycelium is usable today, but it is still pre-1.0. Read operations are the
 > safest place to begin. Every mutation requires an explicit `--write`, and
 > supported operations offer `--dry-run` so the proposed action is visible first.
