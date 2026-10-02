@@ -2761,10 +2761,13 @@ async fn networks(args: &[String]) -> Result<Vec<String>, ClientError> {
                 .map_err(|error| err_usage(&format!("invalid action plan: {error}")))?;
             let mut client = connect().await?;
             let value = client
-                .call(&Request::ActionPlanApply {
+                .call(&Request::ActionPlanExecute {
                     plan,
-                    write: flags.write,
-                    dry_run: flags.dry_run,
+                    mode: mycelium_core::ExecutionMode::from_legacy_flags(
+                        flags.write,
+                        flags.dry_run,
+                    )
+                    .map_err(|error| err_usage(&error))?,
                 })
                 .await?;
             if flags.json {
@@ -2774,7 +2777,7 @@ async fn networks(args: &[String]) -> Result<Vec<String>, ClientError> {
                     "{}: {} action(s) {}",
                     value["scope"].as_str().unwrap_or("network"),
                     value["actions"].as_array().map_or(0, Vec::len),
-                    if value["dry_run"].as_bool().unwrap_or(false) {
+                    if value["mode"].as_str() == Some("plan") {
                         "validated in dry-run"
                     } else {
                         "applied and verified"

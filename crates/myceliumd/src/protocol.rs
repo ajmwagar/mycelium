@@ -51,6 +51,12 @@ pub enum Request {
         #[serde(default)]
         dry_run: bool,
     },
+    /// Typed replacement for ActionPlanApply. The legacy request remains
+    /// readable during the pre-1.0 protocol migration.
+    ActionPlanExecute {
+        plan: mycelium_core::ActionPlan,
+        mode: mycelium_core::ExecutionMode,
+    },
     /// Pull observations from every open device and merge the topology.
     Scan,
     Topology,

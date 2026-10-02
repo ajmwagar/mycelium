@@ -535,111 +535,20 @@ impl Daemon {
                 write,
                 dry_run,
             } => {
-                if !plan.ready_to_apply() {
-                    return Err(MyceliumError::Validation(format!(
-                        "action plan has {} blocker(s)",
-                        plan.blockers.len()
-                    )));
-                }
-                if !dry_run && !write {
-                    return Err(MyceliumError::WritesNotPermitted(
-                        "action-plan execution requires --write".into(),
-                    ));
-                }
-                // Preflight the complete plan before the first mutation.
-                for action in &plan.actions {
-                    let capabilities = self.inventory.capabilities(&action.device)?;
-                    let action_spec = capabilities
-                        .iter()
-                        .find(|capability| capability.id == action.capability)
-                        .ok_or_else(|| {
-                            MyceliumError::UnknownCapability(action.capability.clone())
-                        })?;
-                    action_spec
-                        .spec
-                        .validate(&action.params)
-                        .map_err(MyceliumError::Validation)?;
-                    let verification_spec = capabilities
-                        .iter()
-                        .find(|capability| capability.id == action.verification.capability)
-                        .ok_or_else(|| {
-                            MyceliumError::UnknownCapability(action.verification.capability.clone())
-                        })?;
-                    if verification_spec.spec.mutation {
-                        return Err(MyceliumError::Validation(format!(
-                            "verification capability `{}` must be read-only",
-                            action.verification.capability
-                        )));
-                    }
-                    verification_spec
-                        .spec
-                        .validate(&action.verification.params)
-                        .map_err(MyceliumError::Validation)?;
-                }
-                let mut results = Vec::new();
-                for action in &plan.actions {
-                    let device = self.inventory.get(&action.device)?;
-                    let context = mycelium_core::ExecContext {
-                        capability: action.capability.clone(),
-                        allow_writes: write,
-                        dry_run,
-                    };
-                    let applied = device
-                        .invoke(&context, &action.capability, action.params.clone())
-                        .await?;
-                    if !applied.ok {
-                        return Err(MyceliumError::Device {
-                            exit_code: 1,
-                            stderr: format!(
-                                "{}: {}",
-                                action.device,
-                                applied.message.unwrap_or_else(|| "action failed".into())
-                            ),
-                        });
-                    }
-                    let verification = if dry_run {
-                        None
-                    } else {
-                        let verified = device
-                            .invoke(
-                                &mycelium_core::ExecContext::readonly(
-                                    &action.verification.capability,
-                                ),
-                                &action.verification.capability,
-                                action.verification.params.clone(),
-                            )
-                            .await?;
-                        if !verified.ok
-                            || !mycelium_core::verification_matches(
-                                &verified.output,
-                                &action.verification.predicate,
-                            )
-                        {
-                            return Err(MyceliumError::Device {
-                                exit_code: 1,
-                                stderr: format!(
-                                    "{}: postcondition failed after `{}`",
-                                    action.device, action.capability
-                                ),
-                            });
+                let mode = mycelium_core::ExecutionMode::from_legacy_flags(write, dry_run)
+                    .map_err(|error| {
+                        if !write && !dry_run {
+                            MyceliumError::WritesNotPermitted(error)
+                        } else {
+                            MyceliumError::Validation(error)
                         }
-                        Some(verified.output)
-                    };
-                    results.push(serde_json::json!({
-                        "device": action.device,
-                        "capability": action.capability,
-                        "dry_run": dry_run,
-                        "output": applied.output,
-                        "verification": verification,
-                    }));
-                }
-                to_value(serde_json::json!({
-                    "scope": plan.scope,
-                    "desired_revision": plan.desired_revision,
-                    "dry_run": dry_run,
-                    "actions": results,
-                }))
-                .map_err(json_err)
+                    })?;
+                to_value(crate::execution::execute(&self.inventory, &plan, mode).await?)
+                    .map_err(json_err)
+            }
+            Request::ActionPlanExecute { plan, mode } => {
+                to_value(crate::execution::execute(&self.inventory, &plan, mode).await?)
+                    .map_err(json_err)
             }
             Request::Scan => {
                 let mut warnings = Vec::new();
@@ -2588,7 +2497,20 @@ mod tests {
             })
             .await;
         assert!(dry_run.ok, "{dry_run:?}");
-        assert_eq!(dry_run.result.unwrap()["dry_run"], true);
+        let receipt = dry_run.result.unwrap();
+        assert_eq!(receipt["mode"], "plan");
+        assert_eq!(receipt["state"], "planned");
+        assert_eq!(receipt["plan_digest"].as_str().map(str::len), Some(64));
+
+        let ambiguous = daemon
+            .dispatch(Request::ActionPlanApply {
+                plan: mycelium_core::ActionPlan::new("test:ambiguous"),
+                write: true,
+                dry_run: true,
+            })
+            .await;
+        assert!(!ambiguous.ok);
+        assert_eq!(ambiguous.kind.as_deref(), Some("validation"));
     }
 
     #[test]

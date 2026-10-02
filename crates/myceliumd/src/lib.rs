@@ -17,6 +17,7 @@
 //! `devices.json` stores variable names, not values.
 
 pub mod client;
+mod execution;
 pub mod peer;
 pub mod protocol;
 pub mod rpc;
@@ -89,6 +90,10 @@ pub fn dhcp_scopes_path() -> PathBuf {
 
 pub fn siem_dir() -> PathBuf {
     home_dir().join("security").join("siem")
+}
+
+pub fn execution_receipts_dir() -> PathBuf {
+    home_dir().join("executions")
 }
 
 pub fn peer_key_path() -> PathBuf {

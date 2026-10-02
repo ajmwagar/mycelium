@@ -50,8 +50,9 @@ pub use inspection::{
 };
 pub use inventory::{result_from_outcome, CapabilityInfo, Device, Inventory, InvokeResult};
 pub use reconcile::{
-    verification_matches, ActionPlan, ActionRisk, PlanBlocker, PlannedAction,
-    VerificationPredicate, VerificationSpec, ACTION_PLAN_SCHEMA_VERSION,
+    verification_matches, ActionPlan, ActionReceipt, ActionRisk, ExecutionMode, ExecutionReceipt,
+    ExecutionState, PlanBlocker, PlannedAction, VerificationPredicate, VerificationSpec,
+    ACTION_PLAN_SCHEMA_VERSION,
 };
 pub use spec::{CapResult, CapSpec, ParamSpec, ParamType};
 pub use topology::{
