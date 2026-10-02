@@ -627,19 +627,27 @@ mycelium security scan \
   --stig-content /usr/share/xml/scap/ssg/content/ssg-ubuntu2404-ds.xml \
   --stig-profile xccdf_org.ssgproject.content_profile_stig
 
-# Generate a content-addressed remediation script, but never execute it:
+# Generate a content-addressed remediation plan:
 mycelium security scan \
   --stig-content /usr/share/xml/scap/ssg/content/ssg-ubuntu2404-ds.xml \
   --stig-profile xccdf_org.ssgproject.content_profile_stig \
   --remediation-plan
+
+# Review, explicitly apply, and independently rescan the exact reviewed plan:
+mycelium security remediation list
+mycelium security remediation apply <plan-sha256> --write
+mycelium security remediation verify <plan-sha256>
 ```
 
 Full XCCDF evidence and generated plans remain local under
 `$MYCELIUM_HOME/security/evidence/`; gossip carries their SHA-256 digests and
 pass/fail/error/not-applicable counts. Mycelium refuses remediation-plan
-generation when every rule is inapplicable to the host. Applying remediation
-is intentionally not implemented: it needs a separate reviewed plan/apply,
-drain, rollback, and health-validation workflow.
+generation when every rule is inapplicable to the host. Apply re-hashes the
+script immediately before execution and refuses any bytes other than the
+reviewed content-addressed plan. Verification is a separate operation and only
+marks a plan verified when its post-apply scan has passing rules with no failed
+or errored rules. Fleet drain and reboot policy remain separate orchestration
+steps rather than being hidden inside a compliance script.
 
 ## Development
 

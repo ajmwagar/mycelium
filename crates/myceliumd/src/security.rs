@@ -4,6 +4,8 @@ use std::collections::BTreeSet;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use serde::{Deserialize, Serialize};
+
 use mycelium_peer_protocol::{
     sha256_hex, ComplianceSummary, PeerHello, SecurityEvent, SecurityEventBatch, SecurityPosture,
     MAX_SECURITY_EVENTS,
@@ -12,6 +14,33 @@ use mycelium_peer_protocol::{
 use mycelium_peer_protocol::{SecurityFinding, SecuritySeverity};
 
 type AnyError = Box<dyn std::error::Error + Send + Sync>;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemediationState {
+    Planned,
+    Applied,
+    Verified,
+    Failed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemediationPlan {
+    pub schema_version: u16,
+    pub digest: String,
+    pub script_digest: String,
+    pub evidence_digest: String,
+    pub content: String,
+    pub profile: String,
+    pub created_at: u64,
+    pub state: RemediationState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applied_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
 
 pub(crate) struct StigScan<'a> {
     pub content: &'a str,
@@ -230,6 +259,7 @@ fn run_stig(
             "disa_stig_remediation".into(),
             format!("planned:{}", sha256_hex(&std::fs::read(plan)?)),
         );
+        persist_remediation_plan(spec.content, spec.profile, &digest)?;
     }
     scanners.insert(
         "disa_stig".into(),
@@ -248,6 +278,137 @@ fn run_stig(
         not_applicable,
         evidence_digest: Some(digest),
     })
+}
+
+fn plans_dir() -> std::path::PathBuf {
+    crate::home_dir().join("security/plans")
+}
+
+fn persist_remediation_plan(
+    content: &str,
+    profile: &str,
+    evidence_digest: &str,
+) -> Result<RemediationPlan, AnyError> {
+    let script_path = crate::home_dir()
+        .join("security/evidence")
+        .join(format!("{evidence_digest}.remediation.sh"));
+    let script_digest = sha256_hex(&std::fs::read(&script_path)?);
+    let digest = sha256_hex(
+        format!("remediation:v1:{evidence_digest}:{script_digest}:{profile}").as_bytes(),
+    );
+    let plan = RemediationPlan {
+        schema_version: 1,
+        digest: digest.clone(),
+        script_digest,
+        evidence_digest: evidence_digest.into(),
+        content: content.into(),
+        profile: profile.into(),
+        created_at: super::peer::now(),
+        state: RemediationState::Planned,
+        applied_at: None,
+        verified_at: None,
+        error: None,
+    };
+    std::fs::create_dir_all(plans_dir())?;
+    write_plan(&plan)?;
+    Ok(plan)
+}
+
+fn plan_path(digest: &str) -> Result<std::path::PathBuf, AnyError> {
+    if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("remediation plan digest must be 64 hexadecimal characters".into());
+    }
+    Ok(plans_dir().join(format!("{digest}.json")))
+}
+
+fn write_plan(plan: &RemediationPlan) -> Result<(), AnyError> {
+    let path = plan_path(&plan.digest)?;
+    let temporary = path.with_extension("json.tmp");
+    std::fs::write(&temporary, serde_json::to_vec_pretty(plan)?)?;
+    std::fs::rename(temporary, path)?;
+    Ok(())
+}
+
+pub(crate) fn remediation_plans() -> Result<Vec<RemediationPlan>, AnyError> {
+    let mut plans = Vec::new();
+    let Ok(entries) = std::fs::read_dir(plans_dir()) else {
+        return Ok(plans);
+    };
+    for entry in entries {
+        let entry = entry?;
+        if entry.path().extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        plans.push(serde_json::from_slice(&std::fs::read(entry.path())?)?);
+    }
+    plans.sort_by_key(|plan: &RemediationPlan| std::cmp::Reverse(plan.created_at));
+    Ok(plans)
+}
+
+pub(crate) fn apply_remediation(digest: &str) -> Result<RemediationPlan, AnyError> {
+    let path = plan_path(digest)?;
+    let mut plan: RemediationPlan = serde_json::from_slice(&std::fs::read(path)?)?;
+    if plan.digest != digest {
+        return Err("remediation plan identity does not match its filename".into());
+    }
+    if plan.state != RemediationState::Planned && plan.state != RemediationState::Failed {
+        return Err(format!("remediation plan is already {:?}", plan.state).into());
+    }
+    let script_path = crate::home_dir()
+        .join("security/evidence")
+        .join(format!("{}.remediation.sh", plan.evidence_digest));
+    let script = std::fs::read(&script_path)?;
+    if sha256_hex(&script) != plan.script_digest {
+        return Err("remediation script digest does not match the reviewed plan".into());
+    }
+    match bounded_output_status(
+        "bash",
+        &[script_path.to_string_lossy().as_ref()],
+        Duration::from_secs(30 * 60),
+        &[0],
+    ) {
+        Ok(_) => {
+            plan.state = RemediationState::Applied;
+            plan.applied_at = Some(super::peer::now());
+            plan.error = None;
+        }
+        Err(error) => {
+            plan.state = RemediationState::Failed;
+            plan.error = Some(error.to_string());
+        }
+    }
+    write_plan(&plan)?;
+    Ok(plan)
+}
+
+pub(crate) fn verify_remediation(digest: &str) -> Result<RemediationPlan, AnyError> {
+    let path = plan_path(digest)?;
+    let mut plan: RemediationPlan = serde_json::from_slice(&std::fs::read(path)?)?;
+    if plan.state != RemediationState::Applied {
+        return Err("only an applied remediation plan can be verified".into());
+    }
+    let mut scanners = BTreeMap::new();
+    let summary = run_stig(
+        &mut scanners,
+        StigScan {
+            content: &plan.content,
+            profile: &plan.profile,
+            remediation_plan: false,
+        },
+    )?;
+    if summary.failed == 0 && summary.errors == 0 && summary.passed > 0 {
+        plan.state = RemediationState::Verified;
+        plan.verified_at = Some(super::peer::now());
+        plan.error = None;
+    } else {
+        plan.state = RemediationState::Failed;
+        plan.error = Some(format!(
+            "post-remediation scan has {} failed and {} error rules",
+            summary.failed, summary.errors
+        ));
+    }
+    write_plan(&plan)?;
+    Ok(plan)
 }
 
 fn compliance_counts(text: &str) -> (u32, u32, u32, u32) {
@@ -338,5 +499,11 @@ mod tests {
     fn xccdf_result_counts_keep_not_applicable_visible() {
         let xml = "<result>pass</result><result>fail</result><result>notapplicable</result><result>notchecked</result>";
         assert_eq!(compliance_counts(xml), (1, 1, 0, 2));
+    }
+
+    #[test]
+    fn remediation_plan_digest_is_path_safe() {
+        assert!(plan_path("../oops").is_err());
+        assert!(plan_path(&"a".repeat(64)).is_ok());
     }
 }

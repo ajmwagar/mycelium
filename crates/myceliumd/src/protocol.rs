@@ -124,6 +124,15 @@ pub enum Request {
         #[serde(default)]
         remediation_plan: bool,
     },
+    SecurityRemediationList,
+    SecurityRemediationApply {
+        digest: String,
+        #[serde(default)]
+        write: bool,
+    },
+    SecurityRemediationVerify {
+        digest: String,
+    },
     ReleaseList,
     ReleaseKeygen {
         path: String,

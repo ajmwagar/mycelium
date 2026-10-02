@@ -131,6 +131,9 @@ usage:
   mycelium dns zone [--suffix DOMAIN] [--json]
   mycelium security status|events [--json]
   mycelium security scan [--stig-content PATH --stig-profile ID] [--remediation-plan] [--json]
+  mycelium security remediation list [--json]
+  mycelium security remediation apply DIGEST --write [--json]
+  mycelium security remediation verify DIGEST [--json]
   mycelium enroll init [--path CA-DIR] --write
   mycelium enroll issue NAME --site SITE --address DNS-OR-IP [--san DNS-OR-IP]... --binary PATH --target TRIPLE [--peer HOST:PORT]... [--ca CA-DIR] [--path OUTPUT-DIR] --write
   mycelium enroll install --bundle DIR [--path MYCELIUM-HOME] --write
@@ -939,6 +942,21 @@ async fn security_command(args: &[String]) -> Result<Vec<String>, ClientError> {
                 remediation_plan: args.iter().any(|arg| arg == "--remediation-plan"),
             }
         }
+        "remediation" => match args.get(1).map(String::as_str).unwrap_or("list") {
+            "list" => Request::SecurityRemediationList,
+            "apply" => Request::SecurityRemediationApply {
+                digest: args.get(2).cloned().ok_or_else(|| {
+                    err_usage("security remediation apply needs a plan digest")
+                })?,
+                write: args.iter().any(|arg| arg == "--write"),
+            },
+            "verify" => Request::SecurityRemediationVerify {
+                digest: args.get(2).cloned().ok_or_else(|| {
+                    err_usage("security remediation verify needs a plan digest")
+                })?,
+            },
+            other => return Err(err_usage(&format!("unknown remediation action `{other}`"))),
+        },
         _ => {
             return Err(err_usage(
                 "security supports `status`, `scan`, and `events`",
@@ -952,6 +970,20 @@ async fn security_command(args: &[String]) -> Result<Vec<String>, ClientError> {
     }
     if action == "scan" {
         return render_security_postures(&serde_json::Value::Array(vec![value]));
+    }
+    if action == "remediation" {
+        let values = value.as_array().cloned().unwrap_or_else(|| vec![value]);
+        let mut lines = vec!["Security remediation:".into()];
+        for plan in values {
+            lines.push(format!(
+                "  {} state={} profile={} error={}",
+                plan["digest"].as_str().unwrap_or("?"),
+                plan["state"].as_str().unwrap_or("?"),
+                plan["profile"].as_str().unwrap_or("?"),
+                plan["error"].as_str().unwrap_or("none"),
+            ));
+        }
+        return Ok(lines);
     }
     if action == "events" {
         let mut lines = vec!["Security events:".into()];

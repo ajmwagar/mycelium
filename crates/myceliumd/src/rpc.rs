@@ -1010,6 +1010,29 @@ impl Daemon {
                     .map_err(|error| MyceliumError::Validation(error.to_string()))?;
                 to_value(posture).map_err(json_err)
             }
+            Request::SecurityRemediationList => {
+                to_value(crate::security::remediation_plans().map_err(|error| {
+                    MyceliumError::Validation(error.to_string())
+                })?)
+                .map_err(json_err)
+            }
+            Request::SecurityRemediationApply { digest, write } => {
+                if !write {
+                    return Err(MyceliumError::WritesNotPermitted(
+                        "security remediation requires --write".into(),
+                    ));
+                }
+                to_value(crate::security::apply_remediation(&digest).map_err(|error| {
+                    MyceliumError::Validation(error.to_string())
+                })?)
+                .map_err(json_err)
+            }
+            Request::SecurityRemediationVerify { digest } => {
+                to_value(crate::security::verify_remediation(&digest).map_err(|error| {
+                    MyceliumError::Validation(error.to_string())
+                })?)
+                .map_err(json_err)
+            }
             Request::ReleaseList => to_value(self.mesh.releases().await).map_err(json_err),
             Request::ReleaseKeygen { path, write } => {
                 if !write {
