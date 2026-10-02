@@ -27,7 +27,7 @@ pub mod value;
 
 pub use allocation::{
     AllocationBasis, AllocationReceipt, AllocationStrategy, AllocationValue, LogicalNetwork,
-    NetworkDriftReport, NetworkDriftState,
+    NetworkBinding, NetworkDriftReport, NetworkDriftState,
 };
 pub use boot::{BootPath, BootPlanError, BootReachability, BootTarget, NbdePlan};
 pub use capabilities::{DhcpManagement, DnsFiltering, Identity, Sensors, VlanManagement, Wireless};

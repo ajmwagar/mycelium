@@ -100,6 +100,8 @@ usage:
   mycelium networks drift [NAME] [--json]
   mycelium networks plan [NAME] [--json]
   mycelium networks apply --plan PATH --write [--dry-run] [--json]
+  mycelium networks bindings [NAME] [--json]
+  mycelium networks bind NAME --device ID --port PORT [--tagged] --write [--dry-run]
   mycelium peers [--json]
   mycelium releases list [--json]
   mycelium releases keygen --path PATH --write [--json]
@@ -2583,13 +2585,9 @@ async fn networks(args: &[String]) -> Result<Vec<String>, ClientError> {
         Some("plan") => {
             let name = flags.rest.first().cloned();
             let mut client = connect().await?;
-            let value = client.call(&Request::NetworkDrift { name }).await?;
-            let reports: Vec<NetworkDriftReport> = serde_json::from_value(value)
-                .map_err(|error| err_usage(&format!("bad network drift report: {error}")))?;
-            let plans = reports
-                .iter()
-                .map(NetworkDriftReport::action_plan)
-                .collect::<Vec<_>>();
+            let value = client.call(&Request::NetworkPlan { name }).await?;
+            let plans: Vec<ActionPlan> = serde_json::from_value(value)
+                .map_err(|error| err_usage(&format!("bad network action plan: {error}")))?;
             if flags.json {
                 return Ok(vec![serde_json::to_string(&plans).map_err(|error| {
                     err_usage(&format!("cannot serialize plans: {error}"))
@@ -2645,8 +2643,58 @@ async fn networks(args: &[String]) -> Result<Vec<String>, ClientError> {
                 )])
             }
         }
+        Some("bindings") => {
+            let network = flags.rest.first().cloned();
+            let mut client = connect().await?;
+            let value = client
+                .call(&Request::NetworkBindingList { network })
+                .await?;
+            if flags.json {
+                return Ok(vec![value.to_string()]);
+            }
+            let mut output = vec!["network bindings:".into()];
+            for binding in value.as_array().into_iter().flatten() {
+                output.push(format!(
+                    "  {} network={} device={} port={} tagged={}",
+                    binding["identity"].as_str().unwrap_or("?"),
+                    binding["network"].as_str().unwrap_or("?"),
+                    binding["device"].as_str().unwrap_or("?"),
+                    binding["port"].as_str().unwrap_or("?"),
+                    binding["tagged"].as_bool().unwrap_or(false),
+                ));
+            }
+            Ok(output)
+        }
+        Some("bind") => {
+            let network = flags
+                .rest
+                .first()
+                .cloned()
+                .ok_or_else(|| err_usage("networks bind needs NAME"))?;
+            let value_after = |flag: &str| {
+                args.windows(2)
+                    .find(|pair| pair[0] == flag)
+                    .map(|pair| pair[1].clone())
+            };
+            let device = value_after("--device")
+                .ok_or_else(|| err_usage("networks bind needs --device ID"))?;
+            let port = value_after("--port")
+                .ok_or_else(|| err_usage("networks bind needs --port PORT"))?;
+            let mut client = connect().await?;
+            let value = client
+                .call(&Request::NetworkBindingSet {
+                    network,
+                    device,
+                    port,
+                    tagged: args.iter().any(|arg| arg == "--tagged"),
+                    write: flags.write,
+                    dry_run: flags.dry_run,
+                })
+                .await?;
+            Ok(vec![value.to_string()])
+        }
         _ => Err(err_usage(
-            "usage: mycelium networks list|adopt|drift|plan|apply ...",
+            "usage: mycelium networks list|adopt|drift|plan|apply|bindings|bind ...",
         )),
     }
 }

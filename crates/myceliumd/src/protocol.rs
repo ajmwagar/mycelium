@@ -109,6 +109,24 @@ pub enum Request {
         #[serde(default)]
         name: Option<String>,
     },
+    NetworkPlan {
+        #[serde(default)]
+        name: Option<String>,
+    },
+    NetworkBindingList {
+        #[serde(default)]
+        network: Option<String>,
+    },
+    NetworkBindingSet {
+        network: String,
+        device: String,
+        port: String,
+        tagged: bool,
+        #[serde(default)]
+        write: bool,
+        #[serde(default)]
+        dry_run: bool,
+    },
     /// Return the locally converged view of signed peer observations.
     PeerList,
     WireGuardBindingList,

@@ -667,6 +667,15 @@ mycelium networks apply --plan cctv-plan.json --dry-run
 mycelium networks apply --plan cctv-plan.json --write
 ```
 
+Physical placement is a separate durable fact, not embedded in the logical
+network or credentials. A binding can be reviewed before it is persisted:
+
+```sh
+mycelium networks bind cctv --device netgear-titan --port 1/g8 --tagged --dry-run
+mycelium networks bind cctv --device netgear-titan --port 1/g8 --tagged --write
+mycelium networks bindings cctv
+```
+
 The daemon validates every action and read-only verification capability before
 the first mutation. It stops at the first failed action or postcondition.
 Plans with drift blockers cannot execute; unsupported DHCP, VLAN, or trunk

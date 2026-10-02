@@ -7,8 +7,8 @@ use async_trait::async_trait;
 use mycelium_core::{
     AllocationReceipt, AllocationValue, CredentialSet, DeviceId, DeviceMeta, DiscoveryRequest,
     DiscoveryScope, Driver, Inventory, LogicalNetwork, MeshControlPlane, MeshCoordinator,
-    MeshProtocol, MyceliumError, NetworkDriftReport, NetworkDriftState, Observation, Origin,
-    OverlayPeerRecord, Result, Secret, Target, Topology, Transport, Value,
+    MeshProtocol, MyceliumError, NetworkBinding, NetworkDriftReport, NetworkDriftState,
+    Observation, Origin, OverlayPeerRecord, Result, Secret, Target, Topology, Transport, Value,
 };
 use mycelium_driver_darwin::DarwinDriver;
 use mycelium_driver_edgeos::{EdgeOsDriver, SshSession};
@@ -135,6 +135,7 @@ pub struct Daemon {
     discovery_scopes: Mutex<BTreeMap<String, DiscoveryScope>>,
     allocations: Mutex<BTreeMap<String, AllocationReceipt>>,
     networks: Mutex<BTreeMap<String, LogicalNetwork>>,
+    network_bindings: Mutex<BTreeMap<String, NetworkBinding>>,
     pub mesh: Arc<crate::peer::Mesh>,
 }
 
@@ -235,6 +236,15 @@ impl Daemon {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
             Err(error) => return Err(MyceliumError::Io(error)),
         };
+        let network_bindings = match std::fs::read_to_string(crate::network_bindings_path()) {
+            Ok(text) => serde_json::from_str::<Vec<NetworkBinding>>(&text)
+                .map_err(|error| MyceliumError::Parse(format!("network-bindings.json: {error}")))?
+                .into_iter()
+                .map(|binding| (binding.identity.clone(), binding))
+                .collect(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
+            Err(error) => return Err(MyceliumError::Io(error)),
+        };
 
         let mesh = crate::peer::Mesh::boot()
             .map_err(|error| MyceliumError::Validation(format!("peer mesh: {error}")))?;
@@ -246,6 +256,7 @@ impl Daemon {
             discovery_scopes: Mutex::new(discovery_scopes),
             allocations: Mutex::new(allocations),
             networks: Mutex::new(networks),
+            network_bindings: Mutex::new(network_bindings),
             mesh,
         };
         // Reconnect saved devices; failures are recorded but keep the entry
@@ -337,6 +348,24 @@ impl Daemon {
         std::fs::write(
             &temporary,
             serde_json::to_string_pretty(&networks).map_err(json_err)?,
+        )?;
+        std::fs::rename(temporary, path)?;
+        Ok(())
+    }
+
+    async fn persist_network_bindings(&self) -> Result<()> {
+        let bindings = self
+            .network_bindings
+            .lock()
+            .await
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        let path = crate::network_bindings_path();
+        let temporary = path.with_extension(format!("json.tmp-{}", std::process::id()));
+        std::fs::write(
+            &temporary,
+            serde_json::to_string_pretty(&bindings).map_err(json_err)?,
         )?;
         std::fs::rename(temporary, path)?;
         Ok(())
@@ -1061,6 +1090,106 @@ impl Daemon {
                     .map(|network| network_drift_report(network, &allocations, &topology))
                     .collect::<Vec<_>>();
                 to_value(reports).map_err(json_err)
+            }
+            Request::NetworkPlan { name } => {
+                let networks = self.networks.lock().await;
+                let selected = networks
+                    .values()
+                    .filter(|network| name.as_ref().is_none_or(|name| &network.name == name))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if name.is_some() && selected.is_empty() {
+                    return Err(MyceliumError::Validation(format!(
+                        "unknown logical network `{}`",
+                        name.unwrap_or_default()
+                    )));
+                }
+                drop(networks);
+                let allocations = self.allocations.lock().await;
+                let topology = self.topology.lock().await;
+                let bindings = self.network_bindings.lock().await;
+                let plans = selected
+                    .into_iter()
+                    .map(|network| {
+                        let report = network_drift_report(network, &allocations, &topology);
+                        network_action_plan(report, &allocations, &bindings)
+                    })
+                    .collect::<Vec<_>>();
+                to_value(plans).map_err(json_err)
+            }
+            Request::NetworkBindingList { network } => {
+                let matching_ids = self
+                    .networks
+                    .lock()
+                    .await
+                    .values()
+                    .filter(|logical| {
+                        network.as_ref().is_none_or(|selector| {
+                            logical.identity == *selector || logical.name == *selector
+                        })
+                    })
+                    .map(|logical| logical.identity.clone())
+                    .collect::<BTreeSet<_>>();
+                let bindings = self.network_bindings.lock().await;
+                let selected = bindings
+                    .values()
+                    .filter(|binding| network.is_none() || matching_ids.contains(&binding.network))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                to_value(selected).map_err(json_err)
+            }
+            Request::NetworkBindingSet {
+                network,
+                device,
+                port,
+                tagged,
+                write,
+                dry_run,
+            } => {
+                if port.is_empty() || port.len() > 64 {
+                    return Err(MyceliumError::Validation(
+                        "binding port must be 1-64 characters".into(),
+                    ));
+                }
+                let networks = self.networks.lock().await;
+                let logical = networks
+                    .values()
+                    .find(|candidate| candidate.identity == network || candidate.name == network)
+                    .ok_or_else(|| {
+                        MyceliumError::Validation(format!("unknown logical network `{network}`"))
+                    })?;
+                let network_id = logical.identity.clone();
+                drop(networks);
+                let capabilities = self.inventory.capabilities(&device)?;
+                if !capabilities
+                    .iter()
+                    .any(|capability| capability.id == mycelium_core::ID_VLAN_ASSIGN)
+                {
+                    return Err(MyceliumError::Unsupported {
+                        device,
+                        capability: mycelium_core::ID_VLAN_ASSIGN.into(),
+                    });
+                }
+                let candidate = NetworkBinding::new(network_id, device, port, tagged);
+                if dry_run {
+                    return to_value(serde_json::json!({"dry_run": true, "binding": candidate}))
+                        .map_err(json_err);
+                }
+                if !write {
+                    return Err(MyceliumError::WritesNotPermitted(
+                        "network binding requires --write".into(),
+                    ));
+                }
+                let mut bindings = self.network_bindings.lock().await;
+                if let Some(existing) = bindings.get(&candidate.identity) {
+                    if existing == &candidate {
+                        return to_value(existing).map_err(json_err);
+                    }
+                }
+                bindings.insert(candidate.identity.clone(), candidate.clone());
+                drop(bindings);
+                self.persist_network_bindings().await?;
+                to_value(candidate).map_err(json_err)
             }
             Request::PeerList => to_value(self.mesh.views().await).map_err(json_err),
             Request::WireGuardBindingList => {
@@ -1787,6 +1916,90 @@ fn network_drift_report(
     }
 }
 
+fn network_action_plan(
+    report: NetworkDriftReport,
+    allocations: &BTreeMap<String, AllocationReceipt>,
+    bindings: &BTreeMap<String, NetworkBinding>,
+) -> mycelium_core::ActionPlan {
+    let mut plan = report.action_plan();
+    let placements = bindings
+        .values()
+        .filter(|binding| binding.network == report.network.identity)
+        .collect::<Vec<_>>();
+    if placements.is_empty() {
+        return plan;
+    }
+    plan.blockers
+        .retain(|blocker| blocker.code != "no_managed_bindings");
+    if !plan.blockers.is_empty() {
+        return plan;
+    }
+    let receipts = report
+        .network
+        .receipt_ids
+        .iter()
+        .filter_map(|identity| allocations.get(identity))
+        .collect::<Vec<_>>();
+    let vlan = receipts
+        .iter()
+        .find_map(|receipt| match receipt.allocation {
+            AllocationValue::Vlan { id } => Some(id.0),
+            _ => None,
+        });
+    let address = receipts
+        .iter()
+        .find_map(|receipt| match receipt.allocation {
+            AllocationValue::Subnet {
+                prefix,
+                gateway: Some(gateway),
+                ..
+            } => Some(format!("{gateway}/{prefix}")),
+            _ => None,
+        });
+    let Some(vlan) = vlan else {
+        plan.blockers.push(mycelium_core::PlanBlocker {
+            code: "vlan_allocation_required".into(),
+            message: "a physical VLAN binding requires a stable VLAN allocation".into(),
+            resource: Some(report.network.identity),
+        });
+        return plan;
+    };
+    let Some(address) = address else {
+        plan.blockers.push(mycelium_core::PlanBlocker {
+            code: "gateway_address_required".into(),
+            message: "vlan.assign requires a gateway CIDR from the subnet allocation".into(),
+            resource: Some(report.network.identity),
+        });
+        return plan;
+    };
+    for binding in placements {
+        let expected = Value::Map(mycelium_core::Params::from_iter([
+            ("id".into(), Value::Int(i64::from(vlan))),
+            ("name".into(), Value::Str(report.network.name.clone())),
+        ]));
+        plan.actions.push(mycelium_core::PlannedAction {
+            device: binding.device.clone(),
+            capability: mycelium_core::ID_VLAN_ASSIGN.into(),
+            params: mycelium_core::Params::from_iter([
+                ("port".into(), Value::Str(binding.port.clone())),
+                ("id".into(), Value::Int(i64::from(vlan))),
+                ("name".into(), Value::Str(report.network.name.clone())),
+                ("tagged".into(), Value::Bool(binding.tagged)),
+                ("address".into(), Value::Str(address.clone())),
+            ]),
+            risk: mycelium_core::ActionRisk::Disruptive,
+            before: None,
+            expected_after: Some(expected.clone()),
+            verification: mycelium_core::VerificationSpec {
+                capability: mycelium_core::ID_VLAN_LIST.into(),
+                params: mycelium_core::Params::new(),
+                predicate: mycelium_core::VerificationPredicate::Contains { expected },
+            },
+        });
+    }
+    plan
+}
+
 fn import_allocation_receipts(topology: &Topology, site: &str) -> Vec<AllocationReceipt> {
     let mut receipts = BTreeMap::<String, AllocationReceipt>::new();
     for segment in topology.segments.values().filter(|segment| {
@@ -2112,6 +2325,7 @@ mod tests {
             discovery_scopes: Mutex::new(BTreeMap::new()),
             allocations: Mutex::new(BTreeMap::new()),
             networks: Mutex::new(BTreeMap::new()),
+            network_bindings: Mutex::new(BTreeMap::new()),
             mesh: crate::peer::Mesh::ephemeral_for_test(),
         }
     }
@@ -2217,6 +2431,58 @@ mod tests {
         let receipts = import_allocation_receipts(&topology, "home");
         assert_eq!(receipts.len(), 2);
         assert!(receipts.iter().all(|receipt| receipt.site == "home"));
+    }
+
+    #[test]
+    fn network_binding_derives_a_verified_vlan_action() {
+        let vlan = AllocationReceipt::imported(
+            "home",
+            AllocationValue::Vlan {
+                id: mycelium_core::VlanId(30),
+            },
+            BTreeSet::new(),
+        );
+        let subnet = AllocationReceipt::imported(
+            "home",
+            AllocationValue::Subnet {
+                network: "192.168.30.0".parse().unwrap(),
+                prefix: 24,
+                gateway: Some("192.168.30.1".parse().unwrap()),
+            },
+            BTreeSet::new(),
+        );
+        let network = LogicalNetwork::adopted(
+            "home",
+            "cctv",
+            BTreeSet::from([vlan.identity.clone(), subnet.identity.clone()]),
+        );
+        let binding = NetworkBinding::new(&network.identity, "edge-router", "eth1", true);
+        let allocations = BTreeMap::from([
+            (vlan.identity.clone(), vlan),
+            (subnet.identity.clone(), subnet),
+        ]);
+        let bindings = BTreeMap::from([(binding.identity.clone(), binding)]);
+        let plan = network_action_plan(
+            NetworkDriftReport {
+                network,
+                state: NetworkDriftState::InSync,
+                missing_receipts: BTreeSet::new(),
+                missing_allocations: BTreeSet::new(),
+                gateway_mismatches: BTreeSet::new(),
+                known_members: BTreeSet::new(),
+                evidence_sources: BTreeSet::new(),
+            },
+            &allocations,
+            &bindings,
+        );
+        assert!(plan.ready_to_apply());
+        assert_eq!(plan.actions.len(), 1);
+        assert_eq!(plan.actions[0].capability, mycelium_core::ID_VLAN_ASSIGN);
+        assert_eq!(plan.actions[0].params["id"], Value::Int(30));
+        assert_eq!(
+            plan.actions[0].params["address"],
+            Value::Str("192.168.30.1/24".into())
+        );
     }
 
     #[tokio::test]

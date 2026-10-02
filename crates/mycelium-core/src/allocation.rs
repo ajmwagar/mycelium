@@ -68,6 +68,41 @@ pub struct LogicalNetwork {
     pub generation: u64,
 }
 
+/// Physical placement of logical network intent. Allocations remain owned by
+/// receipts; credentials remain owned by inventory. This only states where a
+/// network should be carried.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetworkBinding {
+    pub identity: String,
+    pub network: String,
+    pub device: String,
+    pub port: String,
+    pub tagged: bool,
+    pub generation: u64,
+}
+
+impl NetworkBinding {
+    pub fn new(
+        network: impl Into<String>,
+        device: impl Into<String>,
+        port: impl Into<String>,
+        tagged: bool,
+    ) -> Self {
+        let network = network.into();
+        let device = device.into();
+        let port = port.into();
+        Self {
+            identity: stable_identity(&format!("binding|{network}|{device}|{port}"))
+                .replacen("alloc-", "bind-", 1),
+            network,
+            device,
+            port,
+            tagged,
+            generation: 1,
+        }
+    }
+}
+
 impl LogicalNetwork {
     pub fn adopted(
         site: impl Into<String>,
@@ -132,7 +167,7 @@ impl NetworkDriftReport {
                 resource: Some(self.network.identity.clone()),
             });
         }
-        if plan.blockers.is_empty() && self.known_members.is_empty() {
+        if plan.blockers.is_empty() {
             plan.blockers.push(PlanBlocker {
                 code: "no_managed_bindings".into(),
                 message: "network has no managed device bindings from which to derive actions"
@@ -223,5 +258,14 @@ mod tests {
         let plan = report.action_plan();
         assert!(!plan.ready_to_apply());
         assert_eq!(plan.blockers[0].code, "no_managed_bindings");
+    }
+
+    #[test]
+    fn binding_identity_is_stable_and_placement_scoped() {
+        let first = NetworkBinding::new("net-a", "switch-a", "1/g1", true);
+        let same = NetworkBinding::new("net-a", "switch-a", "1/g1", false);
+        let other = NetworkBinding::new("net-a", "switch-a", "1/g2", true);
+        assert_eq!(first.identity, same.identity);
+        assert_ne!(first.identity, other.identity);
     }
 }
