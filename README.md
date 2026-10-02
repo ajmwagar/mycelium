@@ -333,6 +333,9 @@ nodes, and explicit Jarvis and Shroud roles:
 ```sh
 mycelium software plan docs/examples/software-policy.json
 mycelium software policy set docs/examples/software-policy.json --write
+mycelium software status
+mycelium software reconcile --dry-run
+mycelium software reconcile --write
 mycelium software activate unibus --channel stable --dry-run
 mycelium software activate unibus --channel stable --write
 ```
@@ -345,7 +348,19 @@ the same package and node fail the plan. Activation verifies the signature,
 size, and digest again, writes a versioned executable below
 `$MYCELIUM_HOME/software`, and atomically switches `current`; it never executes
 publisher-supplied installation commands. Service lifecycle and fleet
-reconciliation remain the next narrow driver boundary.
+reconciliation belong to Bifrost. Mycelium only verifies and caches immutable
+artifacts, maintains a versioned package directory, atomically advances the
+`current` pointer, and writes `$MYCELIUM_HOME/software-state.json` for Bifrost
+to consume. It never starts, stops, drains, or health-checks application
+services.
+
+Update policy is resolved per package. A document-level `defaults.updates`
+applies when a package has no override; an override may select `manual` or
+`automatic` with its own cache soak, deterministic rollout window, and retry
+backoff. Automatic updates require one manually selected version and accept
+strictly newer versions only. `software auto-run` performs one bounded pass;
+Bifrost or another scheduler may invoke it without transferring service
+ownership to Mycelium.
 
 ## Distributed access state
 

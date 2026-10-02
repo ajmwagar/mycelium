@@ -145,6 +145,13 @@ pub fn software_policy_path() -> PathBuf {
     home_dir().join("software-policy.json")
 }
 
+pub fn software_state_path() -> PathBuf {
+    home_dir().join("software-state.json")
+}
+pub fn software_automatic_state_path() -> PathBuf {
+    home_dir().join("software-automatic-state.json")
+}
+
 pub fn update_state_path() -> PathBuf {
     home_dir().join("update-state.json")
 }

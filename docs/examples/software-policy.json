@@ -1,5 +1,8 @@
 {
   "schema_version": 1,
+  "defaults": {
+    "updates": { "mode": "manual" }
+  },
   "rules": [
     {
       "name": "base-mesh",
@@ -19,8 +22,26 @@
       "name": "accelerated-compute",
       "selector": { "all": ["resource.gpu"] },
       "packages": [
-        { "name": "umie", "channel": "stable" },
-        { "name": "yggdrasil", "channel": "stable" }
+        {
+          "name": "umie",
+          "channel": "stable",
+          "updates": {
+            "mode": "automatic",
+            "minimum_cache_age_secs": 3600,
+            "rollout_window_secs": 7200,
+            "retry_backoff_secs": 3600
+          }
+        },
+        {
+          "name": "yggdrasil",
+          "channel": "stable",
+          "updates": {
+            "mode": "automatic",
+            "minimum_cache_age_secs": 900,
+            "rollout_window_secs": 3600,
+            "retry_backoff_secs": 1800
+          }
+        }
       ]
     },
     {

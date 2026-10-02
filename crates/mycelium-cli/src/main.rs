@@ -129,6 +129,9 @@ usage:
   mycelium software plan POLICY.json [--json]
   mycelium software policy set POLICY.json --write [--dry-run] [--json]
   mycelium software activate NAME [--channel CHANNEL] --write [--dry-run] [--json]
+  mycelium software status [--json]
+  mycelium software reconcile (--write | --dry-run) [--json]
+  mycelium software auto-run [--json]
   mycelium access list [--json]
   mycelium access keygen --path PATH --write [--json]
   mycelium access publish --statement PATH --signing-key PATH --write [--dry-run] [--json]
@@ -1132,6 +1135,12 @@ async fn software(args: &[String]) -> Result<Vec<String>, ClientError> {
             write: flags.write,
             dry_run: flags.dry_run,
         },
+        "status" => Request::SoftwareStatus,
+        "reconcile" => Request::SoftwareReconcile {
+            write: flags.write,
+            dry_run: flags.dry_run,
+        },
+        "auto-run" => Request::SoftwareAutoRun,
         "policy" if flags.rest.get(1).map(String::as_str) == Some("set") => {
             Request::SoftwarePolicySet {
                 policy: flags
@@ -1147,7 +1156,7 @@ async fn software(args: &[String]) -> Result<Vec<String>, ClientError> {
     };
     let mut client = connect().await?;
     let value = client.call(&request).await?;
-    if flags.json || action == "activate" {
+    if flags.json || action != "plan" {
         return Ok(vec![
             serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string())
         ]);

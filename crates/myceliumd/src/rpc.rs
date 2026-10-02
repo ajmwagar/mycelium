@@ -1968,6 +1968,60 @@ impl Daemon {
                     .map_err(|error| MyceliumError::Validation(error.to_string()))?;
                 to_value(activated).map_err(json_err)
             }
+            Request::SoftwareStatus => to_value(crate::software::read_statuses()).map_err(json_err),
+            Request::SoftwareReconcile { write, dry_run } => {
+                if write == dry_run {
+                    return Err(MyceliumError::Validation(
+                        "software reconcile requires exactly one of --write or --dry-run".into(),
+                    ));
+                }
+                let policy = crate::software::read_policy(&crate::software_policy_path())
+                    .map_err(|error| MyceliumError::Validation(error.to_string()))?;
+                let assignments = crate::software::plan(&policy, &self.mesh.views().await)
+                    .map_err(MyceliumError::Validation)?
+                    .into_iter()
+                    .filter(|assignment| assignment.node_id == self.mesh.node_id())
+                    .collect::<Vec<_>>();
+                let report = crate::software::reconcile(
+                    &assignments,
+                    &self.mesh.packages().await,
+                    &mycelium_peer_protocol::local_compatible_targets(),
+                    write,
+                )
+                .map_err(|error| MyceliumError::Validation(error.to_string()))?;
+                to_value(report).map_err(json_err)
+            }
+            Request::SoftwareAutoRun => {
+                let policy = crate::software::read_policy(&crate::software_policy_path())
+                    .map_err(|error| MyceliumError::Validation(error.to_string()))?;
+                let manifests = self.mesh.packages().await;
+                let targets = mycelium_peer_protocol::local_compatible_targets();
+                let assignments = crate::software::plan(&policy, &self.mesh.views().await)
+                    .map_err(MyceliumError::Validation)?
+                    .into_iter()
+                    .filter(|assignment| assignment.node_id == self.mesh.node_id())
+                    .collect::<Vec<_>>();
+                let mut state = crate::software::read_automatic_state();
+                let eligible = crate::software::automatic_assignments(
+                    assignments.clone(),
+                    &manifests,
+                    &targets,
+                    self.mesh.node_id(),
+                    unix_now(),
+                    &mut state,
+                );
+                crate::software::write_automatic_state(&state)
+                    .map_err(|error| MyceliumError::Validation(error.to_string()))?;
+                let applied = crate::software::reconcile(&eligible, &manifests, &targets, true)
+                    .map_err(|error| MyceliumError::Validation(error.to_string()))?;
+                let snapshot =
+                    crate::software::reconcile(&assignments, &manifests, &targets, false)
+                        .map_err(|error| MyceliumError::Validation(error.to_string()))?;
+                crate::software::persist_statuses(&snapshot)
+                    .map_err(|error| MyceliumError::Validation(error.to_string()))?;
+                to_value(serde_json::json!({ "applied": applied, "status": snapshot }))
+                    .map_err(json_err)
+            }
             Request::AccessList => {
                 to_value(self.mesh.access_view(unix_now()).await).map_err(json_err)
             }

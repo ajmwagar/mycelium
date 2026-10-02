@@ -19,7 +19,35 @@ type AnyError = Box<dyn std::error::Error + Send + Sync>;
 pub struct SoftwarePolicy {
     pub schema_version: u16,
     #[serde(default)]
+    pub defaults: SoftwareDefaults,
+    #[serde(default)]
     pub rules: Vec<PlacementRule>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SoftwareDefaults {
+    #[serde(default)]
+    pub updates: UpdatePolicy,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum UpdatePolicy {
+    Manual,
+    Automatic {
+        #[serde(default = "default_minimum_age")]
+        minimum_cache_age_secs: u64,
+        #[serde(default = "default_rollout_window")]
+        rollout_window_secs: u64,
+        #[serde(default = "default_retry_backoff")]
+        retry_backoff_secs: u64,
+    },
+}
+
+impl Default for UpdatePolicy {
+    fn default() -> Self {
+        Self::Manual
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -45,6 +73,8 @@ pub struct DesiredPackage {
     pub name: String,
     #[serde(default = "default_channel")]
     pub channel: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updates: Option<UpdatePolicy>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -53,6 +83,7 @@ pub struct SoftwareAssignment {
     pub hostname: String,
     pub package: String,
     pub channel: String,
+    pub updates: UpdatePolicy,
     pub rules: BTreeSet<String>,
 }
 
@@ -65,8 +96,44 @@ pub struct ActivatedPackage {
     pub executable: PathBuf,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PackageState {
+    AwaitingManifest,
+    AwaitingArtifact,
+    Ready,
+    Current,
+    Updated,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PackageStatus {
+    pub package: String,
+    pub channel: String,
+    pub installed_version: Option<String>,
+    pub desired_version: Option<String>,
+    pub state: PackageState,
+    pub updates: UpdatePolicy,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct AutomaticState {
+    #[serde(default)]
+    pub last_attempts: BTreeMap<String, u64>,
+}
+
 fn default_channel() -> String {
     "stable".into()
+}
+
+fn default_minimum_age() -> u64 {
+    900
+}
+fn default_rollout_window() -> u64 {
+    1800
+}
+fn default_retry_backoff() -> u64 {
+    3600
 }
 
 pub fn read_policy(path: &Path) -> Result<SoftwarePolicy, AnyError> {
@@ -113,6 +180,7 @@ impl SoftwarePolicy {
             for package in &rule.packages {
                 validate_label("package", &package.name)?;
                 validate_label("channel", &package.channel)?;
+                validate_update_policy(package.updates.as_ref().unwrap_or(&self.defaults.updates))?;
             }
         }
         Ok(())
@@ -141,12 +209,26 @@ pub fn plan(
                         hostname: hello.hostname.clone(),
                         package: package.name.clone(),
                         channel: package.channel.clone(),
+                        updates: package
+                            .updates
+                            .clone()
+                            .unwrap_or_else(|| policy.defaults.updates.clone()),
                         rules: BTreeSet::new(),
                     });
                 if assignment.channel != package.channel {
                     return Err(format!(
                         "conflicting channels for package `{}` on `{}`: `{}` and `{}`",
                         package.name, hello.hostname, assignment.channel, package.channel
+                    ));
+                }
+                let updates = package
+                    .updates
+                    .clone()
+                    .unwrap_or_else(|| policy.defaults.updates.clone());
+                if assignment.updates != updates {
+                    return Err(format!(
+                        "conflicting update policies for package `{}` on `{}`",
+                        package.name, hello.hostname
                     ));
                 }
                 assignment.rules.insert(rule.name.clone());
@@ -200,6 +282,190 @@ pub fn select<'a>(
                 preference(left).cmp(&preference(right))
             })
         })
+}
+
+pub fn reconcile(
+    assignments: &[SoftwareAssignment],
+    manifests: &[PackageManifest],
+    targets: &[String],
+    write: bool,
+) -> Result<Vec<PackageStatus>, AnyError> {
+    let mut statuses = Vec::new();
+    for assignment in assignments {
+        let installed_version = installed_version(&assignment.package);
+        let Some(manifest) = select(manifests, &assignment.package, &assignment.channel, targets)
+        else {
+            statuses.push(status(
+                assignment,
+                installed_version,
+                None,
+                PackageState::AwaitingManifest,
+            ));
+            continue;
+        };
+        if installed_version.as_deref() == Some(manifest.version.as_str()) {
+            statuses.push(status(
+                assignment,
+                installed_version,
+                Some(manifest.version.clone()),
+                PackageState::Current,
+            ));
+            continue;
+        }
+        if !crate::artifacts_dir()
+            .join(&manifest.artifact_digest)
+            .is_file()
+        {
+            statuses.push(status(
+                assignment,
+                installed_version,
+                Some(manifest.version.clone()),
+                PackageState::AwaitingArtifact,
+            ));
+            continue;
+        }
+        if write {
+            activate(manifest)?;
+        }
+        statuses.push(status(
+            assignment,
+            installed_version,
+            Some(manifest.version.clone()),
+            if write {
+                PackageState::Updated
+            } else {
+                PackageState::Ready
+            },
+        ));
+    }
+    if write {
+        write_statuses(&statuses)?;
+    }
+    Ok(statuses)
+}
+
+fn status(
+    assignment: &SoftwareAssignment,
+    installed_version: Option<String>,
+    desired_version: Option<String>,
+    state: PackageState,
+) -> PackageStatus {
+    PackageStatus {
+        package: assignment.package.clone(),
+        channel: assignment.channel.clone(),
+        installed_version,
+        desired_version,
+        state,
+        updates: assignment.updates.clone(),
+    }
+}
+
+fn installed_version(name: &str) -> Option<String> {
+    std::fs::read_link(crate::software_dir().join(name).join("current"))
+        .ok()
+        .and_then(|path| {
+            path.file_name()
+                .map(|value| value.to_string_lossy().into_owned())
+        })
+}
+
+fn write_statuses(statuses: &[PackageStatus]) -> Result<(), AnyError> {
+    let path = crate::software_state_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let temporary = path.with_extension("json.tmp");
+    std::fs::write(&temporary, serde_json::to_vec_pretty(statuses)?)?;
+    std::fs::rename(temporary, path)?;
+    Ok(())
+}
+
+pub fn persist_statuses(statuses: &[PackageStatus]) -> Result<(), AnyError> {
+    write_statuses(statuses)
+}
+
+pub fn read_statuses() -> Vec<PackageStatus> {
+    std::fs::read(crate::software_state_path())
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+pub fn automatic_assignments(
+    assignments: Vec<SoftwareAssignment>,
+    manifests: &[PackageManifest],
+    targets: &[String],
+    node_id: &str,
+    now: u64,
+    state: &mut AutomaticState,
+) -> Vec<SoftwareAssignment> {
+    assignments
+        .into_iter()
+        .filter(|assignment| {
+            let UpdatePolicy::Automatic {
+                minimum_cache_age_secs,
+                rollout_window_secs,
+                retry_backoff_secs,
+            } = assignment.updates
+            else {
+                return false;
+            };
+            let Some(installed) = installed_version(&assignment.package) else {
+                return false;
+            };
+            let Some(manifest) =
+                select(manifests, &assignment.package, &assignment.channel, targets)
+            else {
+                return false;
+            };
+            if compare_versions(&manifest.version, &installed) != Ordering::Greater {
+                return false;
+            }
+            let Ok(metadata) =
+                std::fs::metadata(crate::artifacts_dir().join(&manifest.artifact_digest))
+            else {
+                return false;
+            };
+            let cached_at = metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|value| value.as_secs())
+                .unwrap_or(now);
+            let digest = sha256_hex(format!("{node_id}\0{}", assignment.package).as_bytes());
+            let offset =
+                u64::from_str_radix(&digest[..16], 16).unwrap_or_default() % rollout_window_secs;
+            let eligible_at = cached_at
+                .saturating_add(minimum_cache_age_secs)
+                .saturating_add(offset);
+            let retry_at = state
+                .last_attempts
+                .get(&assignment.package)
+                .copied()
+                .unwrap_or_default()
+                .saturating_add(retry_backoff_secs);
+            if now < eligible_at || now < retry_at {
+                return false;
+            }
+            state.last_attempts.insert(assignment.package.clone(), now);
+            true
+        })
+        .collect()
+}
+
+pub fn read_automatic_state() -> AutomaticState {
+    std::fs::read(crate::software_automatic_state_path())
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+pub fn write_automatic_state(state: &AutomaticState) -> Result<(), AnyError> {
+    let path = crate::software_automatic_state_path();
+    let temporary = path.with_extension("json.tmp");
+    std::fs::write(&temporary, serde_json::to_vec_pretty(state)?)?;
+    std::fs::rename(temporary, path)?;
+    Ok(())
 }
 
 fn compare_versions(left: &str, right: &str) -> Ordering {
@@ -262,9 +528,6 @@ fn activate_from(
     #[cfg(not(unix))]
     return Err("package activation is not implemented on this platform".into());
     let current = package_dir.join("current");
-    if current.exists() || current.symlink_metadata().is_ok() {
-        std::fs::remove_file(&current)?;
-    }
     std::fs::rename(current_tmp, current)?;
     Ok(ActivatedPackage {
         name: manifest.name.clone(),
@@ -290,6 +553,20 @@ fn validate_label(kind: &str, value: &str) -> Result<(), String> {
             .any(|byte| !(byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')))
     {
         return Err(format!("{kind} contains unsafe characters"));
+    }
+    Ok(())
+}
+
+fn validate_update_policy(policy: &UpdatePolicy) -> Result<(), String> {
+    if let UpdatePolicy::Automatic {
+        minimum_cache_age_secs,
+        rollout_window_secs,
+        retry_backoff_secs,
+    } = policy
+    {
+        if *minimum_cache_age_secs < 60 || *rollout_window_secs < 300 || *retry_backoff_secs < 300 {
+            return Err("automatic updates require minimum cache age >= 60s, rollout window >= 300s, and retry backoff >= 300s".into());
+        }
     }
     Ok(())
 }
@@ -328,6 +605,7 @@ mod tests {
     fn rules_are_derived_from_facts_and_merge_without_duplicates() {
         let policy = SoftwarePolicy {
             schema_version: 1,
+            defaults: SoftwareDefaults::default(),
             rules: vec![
                 PlacementRule {
                     name: "global".into(),
@@ -335,6 +613,7 @@ mod tests {
                     packages: vec![DesiredPackage {
                         name: "unibus".into(),
                         channel: "stable".into(),
+                        updates: None,
                     }],
                 },
                 PlacementRule {
@@ -346,6 +625,7 @@ mod tests {
                     packages: vec![DesiredPackage {
                         name: "isochrone".into(),
                         channel: "stable".into(),
+                        updates: None,
                     }],
                 },
             ],
@@ -368,6 +648,7 @@ mod tests {
     fn conflicting_channels_fail_loudly() {
         let policy = SoftwarePolicy {
             schema_version: 1,
+            defaults: SoftwareDefaults::default(),
             rules: vec![
                 PlacementRule {
                     name: "a".into(),
@@ -375,6 +656,7 @@ mod tests {
                     packages: vec![DesiredPackage {
                         name: "unibus".into(),
                         channel: "stable".into(),
+                        updates: None,
                     }],
                 },
                 PlacementRule {
@@ -383,6 +665,7 @@ mod tests {
                     packages: vec![DesiredPackage {
                         name: "unibus".into(),
                         channel: "canary".into(),
+                        updates: None,
                     }],
                 },
             ],
@@ -447,5 +730,40 @@ mod tests {
             Path::new("releases/1.0.0")
         );
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn documented_policy_resolves_package_specific_updates() {
+        let policy: SoftwarePolicy =
+            serde_json::from_str(include_str!("../../../docs/examples/software-policy.json"))
+                .unwrap();
+        policy.validate().unwrap();
+        assert_eq!(policy.defaults.updates, UpdatePolicy::Manual);
+        let assignments = plan(
+            &policy,
+            &[peer("gpu", Platform::Linux, "aarch64", &["resource.gpu"])],
+        )
+        .unwrap();
+        let yggdrasil = assignments
+            .iter()
+            .find(|item| item.package == "yggdrasil")
+            .unwrap();
+        assert!(matches!(
+            yggdrasil.updates,
+            UpdatePolicy::Automatic {
+                minimum_cache_age_secs: 900,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn legacy_policy_defaults_to_manual_updates() {
+        let policy: SoftwarePolicy = serde_json::from_str(
+            r#"{"schema_version":1,"rules":[{"name":"base","packages":[{"name":"unibus"}]}]}"#,
+        )
+        .unwrap();
+        let assignments = plan(&policy, &[peer("node", Platform::Linux, "aarch64", &[])]).unwrap();
+        assert_eq!(assignments[0].updates, UpdatePolicy::Manual);
     }
 }
