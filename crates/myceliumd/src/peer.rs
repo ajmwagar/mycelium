@@ -1020,9 +1020,10 @@ impl Mesh {
                 changed = true;
             }
         }
-        if changed {
-            let values = observations.values().cloned().collect::<Vec<_>>();
-            persist_observations(&values)?;
+        let values = changed.then(|| observations.values().cloned().collect::<Vec<_>>());
+        drop(observations);
+        if let Some(values) = values {
+            tokio::task::spawn_blocking(move || persist_observations(&values)).await??;
         }
         Ok(())
     }
