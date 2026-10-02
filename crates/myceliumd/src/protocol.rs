@@ -67,6 +67,8 @@ pub enum Request {
         #[serde(default = "default_topology_watch_limit")]
         limit: usize,
     },
+    /// Provider-neutral usable resources projected from discovery facts.
+    Resources,
     DiscoveryScopeList,
     DiscoveryScopeSet {
         observer: String,

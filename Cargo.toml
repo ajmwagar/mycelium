@@ -22,6 +22,7 @@ mycelium-driver-snmp = { path = "crates/mycelium-driver-snmp" }
 mycelium-driver-unifi = { path = "crates/mycelium-driver-unifi" }
 mycelium-plugins-lua = { path = "crates/mycelium-plugins-lua" }
 mycelium-peer-protocol = { path = "crates/mycelium-peer-protocol" }
+fpl-resource-observation = { path = "crates/fpl-resource-observation" }
 myceliumd = { path = "crates/myceliumd" }
 async-trait = "0.1"
 bytes = "1"

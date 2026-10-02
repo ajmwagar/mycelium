@@ -372,7 +372,19 @@ impl Daemon {
             })
             .collect::<Vec<_>>();
         topology.observe_all(observations);
+        let resources = self.converged_resources().await;
+        let now = unix_now();
+        topology.resource_attachments = resources
+            .attachments
+            .into_iter()
+            .filter(|observation| observation.is_fresh_at(now))
+            .map(|observation| (observation.resource_id, observation.value))
+            .collect();
         Ok(topology)
+    }
+
+    async fn converged_resources(&self) -> fpl_resource_observation::ResourceCatalog {
+        crate::resources::project(self.mesh.hardware_snapshots().await)
     }
 
     async fn persist_discovery(&self) -> Result<()> {
@@ -760,6 +772,7 @@ impl Daemon {
                 feed.observe(topology).map_err(MyceliumError::Parse)?;
                 to_value(feed.read_since(since, limit)).map_err(json_err)
             }
+            Request::Resources => to_value(self.converged_resources().await).map_err(json_err),
             Request::DiscoveryScopeList => {
                 let scopes = self
                     .discovery_scopes

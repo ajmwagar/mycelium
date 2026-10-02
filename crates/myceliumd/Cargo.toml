@@ -23,6 +23,7 @@ mycelium-driver-snmp.workspace = true
 mycelium-driver-unifi.workspace = true
 mycelium-plugins-lua.workspace = true
 mycelium-peer-protocol.workspace = true
+fpl-resource-observation.workspace = true
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true

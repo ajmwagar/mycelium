@@ -21,6 +21,7 @@ mod execution;
 mod hardware;
 pub mod peer;
 pub mod protocol;
+pub mod resources;
 pub mod rpc;
 mod security;
 pub mod siem;

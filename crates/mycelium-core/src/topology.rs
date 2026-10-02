@@ -407,6 +407,11 @@ pub struct Topology {
     pub leases: Vec<LeaseRecord>,
     #[serde(default)]
     pub advertisements: BTreeMap<String, ServiceAdvertisement>,
+    /// Placement edges projected from resource observations. Typed resource
+    /// profiles remain in the resource catalog and are not duplicated here.
+    #[serde(default)]
+    pub resource_attachments:
+        BTreeMap<fpl_resource_observation::ResourceId, fpl_resource_observation::Attachment>,
     pub conflicts: Vec<Conflict>,
     pub updated_from: Vec<Origin>,
 }
@@ -488,6 +493,9 @@ impl Topology {
                     current.origins.extend(advertisement.origins);
                 }
             }
+        }
+        for (resource_id, attachment) in other.resource_attachments {
+            self.resource_attachments.insert(resource_id, attachment);
         }
         for conflict in other.conflicts {
             if !self.conflicts.contains(&conflict) {

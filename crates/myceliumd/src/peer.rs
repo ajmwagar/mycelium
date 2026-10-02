@@ -377,6 +377,18 @@ impl Mesh {
             .collect()
     }
 
+    pub async fn hardware_snapshots(&self) -> Vec<HardwareSnapshot> {
+        self.observations
+            .lock()
+            .await
+            .values()
+            .filter_map(|envelope| match &envelope.event {
+                PeerEvent::Hardware(snapshot) => Some(snapshot.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
     async fn has_transport_binding(
         &self,
         node_id: &str,

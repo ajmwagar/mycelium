@@ -22,7 +22,8 @@ Applied plans have canonical identities and durable per-action receipts. See
 | --- | --- |
 | Discovery | SNMP, mDNS/DNS-SD, SSDP/UPnP, Linux, Darwin, and Tailscale observations |
 | Topology | Multi-site/LAN inventory, physical switch-port attachment, services, routes, and link transport |
-| Hardware | NETGEAR FastPath, EdgeOS, UniFi AP/controller, Redfish/iLO, Linux, and Darwin drivers |
+| Managed targets | NETGEAR FastPath, EdgeOS, UniFi AP/controller, Redfish/iLO, Linux, and Darwin drivers |
+| Resources | Provider-neutral GPU and storage profiles with expiring host attachments |
 | Desired state | Stable logical networks, imported allocations, drift reports, VLAN and forwarding primitives |
 | Peer mesh | Signed observations, mTLS transport, health streaming, and target-aware P2P updates |
 | Access | Signed grants/revocations, OIDC verification, short-lived OpenSSH certificates, and KRL generation |
@@ -106,7 +107,7 @@ cargo build --release -p mycelium-cli
 
 # The CLI starts its local daemon on demand.
 ./target/release/mycelium drivers
-./target/release/mycelium devices
+./target/release/mycelium targets
 ./target/release/mycelium topology
 ```
 
@@ -669,7 +670,7 @@ The saved inventory contains the environment-variable name, never the AP
 password. UniFi network-wide configuration remains controller-owned; the AP
 driver is for observation, recovery, and explicit adoption operations.
 
-## Hardware and accelerator inventory
+## Topology and resources
 
 Each peer periodically publishes a signed, bounded hardware graph covering
 PCIe, USB, storage, and accelerators. Stable identities derive from the peer
@@ -677,18 +678,42 @@ identity plus the platform locator; raw device serial numbers are never
 gossiped and are represented only by SHA-256 fingerprints.
 
 ```sh
-mycelium hardware
-mycelium hardware agora-one
-mycelium hardware Averys-Mac-Studio --json
+mycelium topology
+mycelium topology watch
+mycelium resources
+mycelium resources --kind gpu
+mycelium resources --kind storage --node home-pi
+mycelium resources show gpu/RESOURCE_ID
+mycelium resources watch
 ```
+
+Topology answers where things are and how they connect. Resources answer what
+usable things exist and what they can do. The topology projection carries only
+resource attachment edges, so refreshing GPU or storage facts does not create a
+new topology generation unless placement actually changes. Resource facts use
+the provider-neutral `fpl-resource-observation` contract; Mycelium is one
+optional producer, and discovery never grants authority.
+
+`mycelium targets` lists appliances explicitly enrolled behind management
+drivers. The former `mycelium devices` spelling remains a compatibility alias;
+it does not mean discovered hardware or usable resources.
 
 Linux reads kernel facts from sysfs, including PCI IDs and drivers, negotiated
 and maximum PCIe links, NUMA and IOMMU placement, USB port ancestry and speed,
 and block-device/partition relationships. Darwin uses `system_profiler`'s JSON
 interface. Apple integrated GPUs are represented as accelerators on an
-`integrated` bus with a `metal` capability—not as discrete PCIe GPUs. This
-shared representation is observation-only; Shroud, QEMU/KVM, containers, and
-future provisioning drivers consume it rather than reimplementing discovery.
+`integrated` bus with a `metal` capability—not as discrete PCIe GPUs. Raw bus
+enumeration remains available for troubleshooting through:
+
+```sh
+mycelium debug hardware
+mycelium debug hardware agora-one --json
+```
+
+`mycelium hardware` remains a compatibility alias but is not the public
+resource contract. Raw USB and PCI nodes are not promoted into usable resources
+until a function probe identifies storage, camera, audio, or another typed
+profile.
 
 ## Security posture, STIG, and SIEM events
 

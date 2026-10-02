@@ -1,0 +1,9 @@
+[package]
+name = "fpl-resource-observation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Provider-neutral resource observation contracts for FPL systems"
+
+[dependencies]
+serde.workspace = true

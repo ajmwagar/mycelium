@@ -90,7 +90,7 @@ usage:
   mycelium skills sync [--target codex|agents|claude] [--path DIR] --write [--dry-run] [--json]
   mycelium drivers
   mycelium add <host[:port]> [--name NAME] [--driver NAME] [--user U] [--password-env VAR] [--key PATH]
-  mycelium devices [--json]
+  mycelium targets [--json]
   mycelium describe <id> [--json]
   mycelium call <id> <capability> [--param k=v ...] [--write] [--dry-run]
   mycelium plan switch <id> --desired <startup-config> [--json]
@@ -114,7 +114,8 @@ usage:
   mycelium networks dhcp list [NAME] [--json]
   mycelium networks dhcp set NAME --device ID --pool NAME --range START-END [--dns IP]... --write [--dry-run]
   mycelium peers [--json]
-  mycelium hardware [PEER] [--json]
+  mycelium resources [show ID | watch [--once]] [--kind KIND] [--node NODE] [--json]
+  mycelium debug hardware [PEER] [--json]
   mycelium releases list [--json]
   mycelium releases keygen --path PATH --write [--json]
   mycelium releases publish --binary PATH --signing-key PATH --version VERSION --channel CHANNEL [--target TRIPLE] --write [--dry-run] [--json]
@@ -466,7 +467,10 @@ async fn run(cmd: &str, args: &[String]) -> Result<Vec<String>, ClientError> {
                 .await?;
             Ok(render_added(&v))
         }
-        "devices" => {
+        "targets" | "devices" => {
+            if cmd == "devices" {
+                eprintln!("mycelium: `devices` means managed driver targets; use `targets`");
+            }
             let f = parse_flags(args);
             let mut c = connect().await?;
             let v = c.call(&Request::DeviceList).await?;
@@ -570,7 +574,14 @@ async fn run(cmd: &str, args: &[String]) -> Result<Vec<String>, ClientError> {
                 Ok(render_peers(&value))
             }
         }
-        "hardware" => hardware(args).await,
+        "resources" => resources(args).await,
+        "debug" if args.first().is_some_and(|argument| argument == "hardware") => {
+            hardware(&args[1..]).await
+        }
+        "hardware" => {
+            eprintln!("mycelium: `hardware` is diagnostic; use `debug hardware`");
+            hardware(args).await
+        }
         "releases" => releases(args).await,
         "access" => access(args).await,
         "update" => update(args).await,
@@ -2026,6 +2037,159 @@ fn render_peers(value: &serde_json::Value) -> Vec<String> {
     lines
 }
 
+async fn resources(args: &[String]) -> Result<Vec<String>, ClientError> {
+    let action = args.first().map(String::as_str).unwrap_or("list");
+    if action == "watch" {
+        return resources_watch(&args[1..]).await;
+    }
+    let show = if action == "show" {
+        Some(
+            args.get(1)
+                .ok_or_else(|| err_usage("resources show needs a resource ID"))?,
+        )
+    } else {
+        None
+    };
+    let mut kind = None;
+    let mut node = None;
+    let mut json = false;
+    let start = if action == "show" { 2 } else { 0 };
+    let mut index = start;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--kind" => {
+                index += 1;
+                kind = Some(
+                    args.get(index)
+                        .ok_or_else(|| err_usage("resources --kind needs a value"))?
+                        .clone(),
+                );
+            }
+            "--node" => {
+                index += 1;
+                node = Some(
+                    args.get(index)
+                        .ok_or_else(|| err_usage("resources --node needs a value"))?
+                        .clone(),
+                );
+            }
+            "--json" => json = true,
+            "list" if index == 0 => {}
+            argument => {
+                return Err(err_usage(&format!(
+                    "unknown resources argument `{argument}`"
+                )))
+            }
+        }
+        index += 1;
+    }
+    let mut client = connect().await?;
+    let value = client.call(&Request::Resources).await?;
+    let catalog: fpl_resource_observation::ResourceCatalog = serde_json::from_value(value)
+        .map_err(|error| err_usage(&format!("bad resource catalog: {error}")))?;
+    let catalog = filter_resources(
+        catalog,
+        show.map(String::as_str),
+        kind.as_deref(),
+        node.as_deref(),
+    );
+    if show.is_some() && catalog.observations.is_empty() {
+        return Err(err_usage("unknown resource"));
+    }
+    if json {
+        return Ok(vec![
+            serde_json::to_string(&catalog).map_err(|error| err_usage(&error.to_string()))?
+        ]);
+    }
+    Ok(render_resources(&catalog))
+}
+
+fn filter_resources(
+    mut catalog: fpl_resource_observation::ResourceCatalog,
+    resource_id: Option<&str>,
+    kind: Option<&str>,
+    node: Option<&str>,
+) -> fpl_resource_observation::ResourceCatalog {
+    let attachment_ids = catalog
+        .attachments
+        .iter()
+        .filter(|attachment| {
+            node.is_none_or(|node| {
+                attachment.value.host.id.starts_with(node) || attachment.value.host.label == node
+            })
+        })
+        .map(|attachment| attachment.resource_id.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    catalog.observations.retain(|observation| {
+        resource_id.is_none_or(|id| observation.resource_id.0 == id)
+            && kind.is_none_or(|kind| observation.value.kind().as_str() == kind)
+            && node.is_none_or(|_| attachment_ids.contains(&observation.resource_id))
+    });
+    let retained = catalog
+        .observations
+        .iter()
+        .map(|observation| observation.resource_id.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    catalog
+        .attachments
+        .retain(|attachment| retained.contains(&attachment.resource_id));
+    catalog
+}
+
+fn render_resources(catalog: &fpl_resource_observation::ResourceCatalog) -> Vec<String> {
+    let now = unix_now();
+    let attachments = catalog
+        .attachments
+        .iter()
+        .map(|attachment| (&attachment.resource_id, attachment))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut lines = vec!["resources:".into()];
+    for observation in &catalog.observations {
+        let attachment = attachments.get(&observation.resource_id);
+        let host = attachment
+            .map(|attachment| attachment.value.host.label.as_str())
+            .unwrap_or("unattached");
+        let state = if observation.is_fresh_at(now) {
+            "available"
+        } else {
+            "expired"
+        };
+        lines.push(format!(
+            "  {} kind={} node={} state={} confidence={:?}",
+            observation.resource_id.0,
+            observation.value.kind().as_str(),
+            host,
+            state,
+            observation.confidence
+        ));
+        lines.push(format!("    {}", observation.value.label));
+    }
+    lines
+}
+
+async fn resources_watch(args: &[String]) -> Result<Vec<String>, ClientError> {
+    let once = args.iter().any(|argument| argument == "--once");
+    if args.iter().any(|argument| argument != "--once") {
+        return Err(err_usage("resources watch accepts only --once"));
+    }
+    let mut client = connect().await?;
+    let mut previous = None;
+    loop {
+        let value = client.call(&Request::Resources).await?;
+        let encoded = serde_json::to_string(&value)
+            .map_err(|error| err_usage(&format!("encode resource catalog: {error}")))?;
+        if previous.as_ref() != Some(&encoded) {
+            println!("{encoded}");
+            std::io::stdout().flush().map_err(ClientError::Io)?;
+            previous = Some(encoded);
+        }
+        if once {
+            return Ok(Vec::new());
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+}
+
 async fn hardware(args: &[String]) -> Result<Vec<String>, ClientError> {
     let flags = parse_flags(args);
     let selector = flags.rest.first().map(String::as_str);
@@ -3450,6 +3614,20 @@ fn render_topology(topo: &Topology) -> Vec<String> {
             ));
         }
     }
+    if !topo.resource_attachments.is_empty() {
+        out.push(format!(
+            "resource attachments: {}",
+            topo.resource_attachments.len()
+        ));
+        for (resource_id, attachment) in &topo.resource_attachments {
+            out.push(format!(
+                "  {} → {} via {}",
+                resource_id.0,
+                attachment.host.label,
+                render_attachment_transport(&attachment.transport)
+            ));
+        }
+    }
     if !topo.leases.is_empty() {
         out.push("leases:".into());
         for l in &topo.leases {
@@ -3468,6 +3646,27 @@ fn render_topology(topo: &Topology) -> Vec<String> {
         }
     }
     out
+}
+
+fn render_attachment_transport(
+    transport: &fpl_resource_observation::AttachmentTransport,
+) -> String {
+    use fpl_resource_observation::AttachmentTransport;
+    match transport {
+        AttachmentTransport::Usb { locator, .. }
+        | AttachmentTransport::Nvme { locator }
+        | AttachmentTransport::Scsi { locator }
+        | AttachmentTransport::Virtio { locator }
+        | AttachmentTransport::Integrated { locator }
+        | AttachmentTransport::Unknown { locator, .. } => locator.clone(),
+        AttachmentTransport::Pcie { address, .. } => format!("pcie:{address}"),
+        AttachmentTransport::Network { endpoints } => {
+            format!(
+                "network:[{}]",
+                endpoints.iter().cloned().collect::<Vec<_>>().join(",")
+            )
+        }
+    }
 }
 
 fn topology_node_for_advertisement<'a>(
