@@ -657,6 +657,21 @@ Peers fetch matching bytes from any peer that has the same authorized SHA-256;
 `MYCELIUM_ARTIFACT_REQUEST_SECS` can tune the idle retry interval (five seconds
 by default) without changing chunk integrity or release authority.
 
+Network intent uses the same vendor-neutral `ActionPlan` for EdgeOS, NETGEAR,
+Linux, and future drivers. Generate JSON for review, preflight it without
+writes, then explicitly apply the exact file:
+
+```sh
+mycelium networks plan cctv --json > cctv-plan.json
+mycelium networks apply --plan cctv-plan.json --dry-run
+mycelium networks apply --plan cctv-plan.json --write
+```
+
+The daemon validates every action and read-only verification capability before
+the first mutation. It stops at the first failed action or postcondition.
+Plans with drift blockers cannot execute; unsupported DHCP, VLAN, or trunk
+ownership remains visible rather than being guessed.
+
 Full XCCDF evidence and generated plans remain local under
 `$MYCELIUM_HOME/security/evidence/`; gossip carries their SHA-256 digests and
 pass/fail/error/not-applicable counts. Mycelium refuses remediation-plan

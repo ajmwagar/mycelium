@@ -471,6 +471,117 @@ impl Daemon {
                 let res = dev.invoke(&ctx, &capability, p).await?;
                 Ok(cap_result_json(&id, &capability, &res))
             }
+            Request::ActionPlanApply {
+                plan,
+                write,
+                dry_run,
+            } => {
+                if !plan.ready_to_apply() {
+                    return Err(MyceliumError::Validation(format!(
+                        "action plan has {} blocker(s)",
+                        plan.blockers.len()
+                    )));
+                }
+                if !dry_run && !write {
+                    return Err(MyceliumError::WritesNotPermitted(
+                        "action-plan execution requires --write".into(),
+                    ));
+                }
+                // Preflight the complete plan before the first mutation.
+                for action in &plan.actions {
+                    let capabilities = self.inventory.capabilities(&action.device)?;
+                    let action_spec = capabilities
+                        .iter()
+                        .find(|capability| capability.id == action.capability)
+                        .ok_or_else(|| {
+                            MyceliumError::UnknownCapability(action.capability.clone())
+                        })?;
+                    action_spec
+                        .spec
+                        .validate(&action.params)
+                        .map_err(MyceliumError::Validation)?;
+                    let verification_spec = capabilities
+                        .iter()
+                        .find(|capability| capability.id == action.verification.capability)
+                        .ok_or_else(|| {
+                            MyceliumError::UnknownCapability(action.verification.capability.clone())
+                        })?;
+                    if verification_spec.spec.mutation {
+                        return Err(MyceliumError::Validation(format!(
+                            "verification capability `{}` must be read-only",
+                            action.verification.capability
+                        )));
+                    }
+                    verification_spec
+                        .spec
+                        .validate(&action.verification.params)
+                        .map_err(MyceliumError::Validation)?;
+                }
+                let mut results = Vec::new();
+                for action in &plan.actions {
+                    let device = self.inventory.get(&action.device)?;
+                    let context = mycelium_core::ExecContext {
+                        capability: action.capability.clone(),
+                        allow_writes: write,
+                        dry_run,
+                    };
+                    let applied = device
+                        .invoke(&context, &action.capability, action.params.clone())
+                        .await?;
+                    if !applied.ok {
+                        return Err(MyceliumError::Device {
+                            exit_code: 1,
+                            stderr: format!(
+                                "{}: {}",
+                                action.device,
+                                applied.message.unwrap_or_else(|| "action failed".into())
+                            ),
+                        });
+                    }
+                    let verification = if dry_run {
+                        None
+                    } else {
+                        let verified = device
+                            .invoke(
+                                &mycelium_core::ExecContext::readonly(
+                                    &action.verification.capability,
+                                ),
+                                &action.verification.capability,
+                                action.verification.params.clone(),
+                            )
+                            .await?;
+                        if !verified.ok
+                            || !mycelium_core::verification_matches(
+                                &verified.output,
+                                &action.verification.predicate,
+                            )
+                        {
+                            return Err(MyceliumError::Device {
+                                exit_code: 1,
+                                stderr: format!(
+                                    "{}: postcondition failed after `{}`",
+                                    action.device, action.capability
+                                ),
+                            });
+                        }
+                        Some(verified.output)
+                    };
+                    results.push(serde_json::json!({
+                        "device": action.device,
+                        "capability": action.capability,
+                        "dry_run": dry_run,
+                        "output": applied.output,
+                        "verification": verification,
+                    }));
+                }
+                to_value(serde_json::json!({
+                    "scope": plan.scope,
+                    "desired_revision": plan.desired_revision,
+                    "dry_run": dry_run,
+                    "actions": results,
+                }))
+                .map_err(json_err)
+            }
             Request::Scan => {
                 let mut warnings = Vec::new();
                 let mut observations = Vec::new();
@@ -1010,29 +1121,28 @@ impl Daemon {
                     .map_err(|error| MyceliumError::Validation(error.to_string()))?;
                 to_value(posture).map_err(json_err)
             }
-            Request::SecurityRemediationList => {
-                to_value(crate::security::remediation_plans().map_err(|error| {
-                    MyceliumError::Validation(error.to_string())
-                })?)
-                .map_err(json_err)
-            }
+            Request::SecurityRemediationList => to_value(
+                crate::security::remediation_plans()
+                    .map_err(|error| MyceliumError::Validation(error.to_string()))?,
+            )
+            .map_err(json_err),
             Request::SecurityRemediationApply { digest, write } => {
                 if !write {
                     return Err(MyceliumError::WritesNotPermitted(
                         "security remediation requires --write".into(),
                     ));
                 }
-                to_value(crate::security::apply_remediation(&digest).map_err(|error| {
-                    MyceliumError::Validation(error.to_string())
-                })?)
+                to_value(
+                    crate::security::apply_remediation(&digest)
+                        .map_err(|error| MyceliumError::Validation(error.to_string()))?,
+                )
                 .map_err(json_err)
             }
-            Request::SecurityRemediationVerify { digest } => {
-                to_value(crate::security::verify_remediation(&digest).map_err(|error| {
-                    MyceliumError::Validation(error.to_string())
-                })?)
-                .map_err(json_err)
-            }
+            Request::SecurityRemediationVerify { digest } => to_value(
+                crate::security::verify_remediation(&digest)
+                    .map_err(|error| MyceliumError::Validation(error.to_string()))?,
+            )
+            .map_err(json_err),
             Request::ReleaseList => to_value(self.mesh.releases().await).map_err(json_err),
             Request::ReleaseKeygen { path, write } => {
                 if !write {
@@ -1934,10 +2044,16 @@ mod tests {
             &self.meta
         }
         fn capabilities(&self) -> StdMap<String, CapSpec> {
-            StdMap::from_iter([(
-                "fake.ping".to_string(),
-                CapSpec::readonly("ping").returns("pong"),
-            )])
+            StdMap::from_iter([
+                (
+                    "fake.ping".to_string(),
+                    CapSpec::readonly("ping").returns("pong"),
+                ),
+                (
+                    "fake.apply".to_string(),
+                    CapSpec::mutation("apply fake state"),
+                ),
+            ])
         }
         async fn exec(&self, _ctx: &ExecContext, cap: &str, _params: Params) -> Result<CapResult> {
             Ok(CapResult::ok(Value::Str(format!("pong:{cap}"))))
@@ -1998,6 +2114,55 @@ mod tests {
             networks: Mutex::new(BTreeMap::new()),
             mesh: crate::peer::Mesh::ephemeral_for_test(),
         }
+    }
+
+    #[tokio::test]
+    async fn action_plan_preflights_and_honors_dry_run_gate() {
+        let daemon = daemon_with_fake();
+        daemon.inventory.add(Arc::new(FakeDev {
+            meta: DeviceMeta {
+                id: DeviceId::new("fake-1"),
+                kind: DeviceKind::Other,
+                driver: "fake".into(),
+                vendor: None,
+                model: None,
+                firmware: None,
+                address: "fakehost.local".into(),
+            },
+        }));
+        let mut plan = mycelium_core::ActionPlan::new("test:fake");
+        plan.actions.push(mycelium_core::PlannedAction {
+            device: "fake-1".into(),
+            capability: "fake.apply".into(),
+            params: Params::new(),
+            risk: mycelium_core::ActionRisk::Low,
+            before: None,
+            expected_after: None,
+            verification: mycelium_core::VerificationSpec {
+                capability: "fake.ping".into(),
+                params: Params::new(),
+                predicate: mycelium_core::VerificationPredicate::Succeeds,
+            },
+        });
+        let refused = daemon
+            .dispatch(Request::ActionPlanApply {
+                plan: plan.clone(),
+                write: false,
+                dry_run: false,
+            })
+            .await;
+        assert!(!refused.ok);
+        assert_eq!(refused.kind.as_deref(), Some("writes_not_permitted"));
+
+        let dry_run = daemon
+            .dispatch(Request::ActionPlanApply {
+                plan,
+                write: false,
+                dry_run: true,
+            })
+            .await;
+        assert!(dry_run.ok, "{dry_run:?}");
+        assert_eq!(dry_run.result.unwrap()["dry_run"], true);
     }
 
     #[test]

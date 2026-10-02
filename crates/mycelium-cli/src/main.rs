@@ -99,6 +99,7 @@ usage:
   mycelium networks adopt NAME --site SITE --subnet CIDR [--vlan ID] --write [--dry-run]
   mycelium networks drift [NAME] [--json]
   mycelium networks plan [NAME] [--json]
+  mycelium networks apply --plan PATH --write [--dry-run] [--json]
   mycelium peers [--json]
   mycelium releases list [--json]
   mycelium releases keygen --path PATH --write [--json]
@@ -2613,8 +2614,39 @@ async fn networks(args: &[String]) -> Result<Vec<String>, ClientError> {
             }
             Ok(output)
         }
+        Some("apply") => {
+            let path = args
+                .windows(2)
+                .find(|pair| pair[0] == "--plan")
+                .map(|pair| pair[1].clone())
+                .ok_or_else(|| err_usage("networks apply needs --plan PATH"))?;
+            let plan: ActionPlan = serde_json::from_slice(&std::fs::read(&path)?)
+                .map_err(|error| err_usage(&format!("invalid action plan: {error}")))?;
+            let mut client = connect().await?;
+            let value = client
+                .call(&Request::ActionPlanApply {
+                    plan,
+                    write: flags.write,
+                    dry_run: flags.dry_run,
+                })
+                .await?;
+            if flags.json {
+                Ok(vec![value.to_string()])
+            } else {
+                Ok(vec![format!(
+                    "{}: {} action(s) {}",
+                    value["scope"].as_str().unwrap_or("network"),
+                    value["actions"].as_array().map_or(0, Vec::len),
+                    if value["dry_run"].as_bool().unwrap_or(false) {
+                        "validated in dry-run"
+                    } else {
+                        "applied and verified"
+                    }
+                )])
+            }
+        }
         _ => Err(err_usage(
-            "usage: mycelium networks list|adopt|drift|plan ...",
+            "usage: mycelium networks list|adopt|drift|plan|apply ...",
         )),
     }
 }

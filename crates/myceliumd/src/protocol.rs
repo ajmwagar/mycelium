@@ -44,6 +44,13 @@ pub enum Request {
         #[serde(default)]
         dry_run: bool,
     },
+    ActionPlanApply {
+        plan: mycelium_core::ActionPlan,
+        #[serde(default)]
+        write: bool,
+        #[serde(default)]
+        dry_run: bool,
+    },
     /// Pull observations from every open device and merge the topology.
     Scan,
     Topology,

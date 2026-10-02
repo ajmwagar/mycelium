@@ -91,6 +91,30 @@ impl ActionPlan {
     }
 }
 
+pub fn verification_matches(actual: &Value, predicate: &VerificationPredicate) -> bool {
+    match predicate {
+        VerificationPredicate::Succeeds => true,
+        VerificationPredicate::Equals { expected } => actual == expected,
+        VerificationPredicate::Contains { expected } => value_contains(actual, expected),
+    }
+}
+
+fn value_contains(actual: &Value, expected: &Value) -> bool {
+    if actual == expected {
+        return true;
+    }
+    match (actual, expected) {
+        (Value::List(values), _) => values.iter().any(|value| value_contains(value, expected)),
+        (Value::Map(actual), Value::Map(expected)) => expected.iter().all(|(key, value)| {
+            actual
+                .get(key)
+                .is_some_and(|actual| value_contains(actual, value))
+        }),
+        (Value::Map(values), _) => values.values().any(|value| value_contains(value, expected)),
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -129,5 +153,17 @@ mod tests {
         let json = serde_json::to_string(&plan).unwrap();
         let restored: ActionPlan = serde_json::from_str(&json).unwrap();
         assert_eq!(restored, plan);
+    }
+
+    #[test]
+    fn verification_contains_supports_nested_structured_values() {
+        let actual = Value::List(vec![Value::Map(Params::from_iter([
+            ("id".into(), Value::Int(30)),
+            ("name".into(), Value::Str("cctv".into())),
+        ]))]);
+        let predicate = VerificationPredicate::Contains {
+            expected: Value::Map(Params::from_iter([("id".into(), Value::Int(30))])),
+        };
+        assert!(verification_matches(&actual, &predicate));
     }
 }
