@@ -333,8 +333,6 @@ nodes, and explicit Jarvis and Shroud roles:
 ```sh
 mycelium software plan docs/examples/software-policy.json
 mycelium software policy set docs/examples/software-policy.json --write
-mycelium software reconcile --dry-run
-mycelium software reconcile --write
 mycelium software activate unibus --channel stable --dry-run
 mycelium software activate unibus --channel stable --write
 ```
@@ -347,23 +345,7 @@ the same package and node fail the plan. Activation verifies the signature,
 size, and digest again, writes a versioned executable below
 `$MYCELIUM_HOME/software`, and atomically switches `current`; it never executes
 publisher-supplied installation commands. Service lifecycle and fleet
-reconciliation use the same policy. Packages default to `{"mode":"staged"}`.
-An operator may instead declare
-`{"mode":"user_service","args":["agent"]}`; Mycelium writes a systemd user
-unit or launchd agent, passes arguments directly without a shell, restarts the
-service, checks it twice, and restores the previous `current` target if the
-candidate does not remain healthy.
-
-`software reconcile --dry-run` reports current, missing-manifest,
-missing-artifact, service-repair, and activation work without changing the host. `--write`
-applies it. Automatic reconciliation is disabled by default. Setting
-`automatic.enabled` in the installed policy creates an external five-minute
-launchd/systemd timer. Unattended activation requires a manually bootstrapped
-installed version, accepts upgrades only, waits for the artifact's local cache
-soak period, deterministically spreads nodes across the rollout window, and
-backs off failed attempts. Artifact gossip continues while activation is
-disabled. The same loop repairs an assigned user service that stops while its
-selected package version remains current.
+reconciliation remain the next narrow driver boundary.
 
 ## Distributed access state
 
