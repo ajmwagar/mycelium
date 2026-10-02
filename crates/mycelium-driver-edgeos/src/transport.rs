@@ -150,10 +150,7 @@ impl SshSession {
                     attempts += 1;
                     match guard.run(command).await {
                         Ok(out) => return Ok(out),
-                        Err(e)
-                            if attempts == 1
-                                && is_dead_session(&e) =>
-                        {
+                        Err(e) if attempts == 1 && is_dead_session(&e) => {
                             eprintln!("edgeos: session to {} was dead, reconnecting", guard.host);
                             match reconnect(&mut guard).await {
                                 Ok(()) => continue,
@@ -191,7 +188,14 @@ async fn reconnect(native: &mut Native) -> Result<()> {
         .username()
         .ok_or_else(|| auth_err("edgeos driver requires a username"))?
         .to_owned();
-    let handle = connect_native(&native.host, native.port, &user, &native.creds, password.clone()).await?;
+    let handle = connect_native(
+        &native.host,
+        native.port,
+        &user,
+        &native.creds,
+        password.clone(),
+    )
+    .await?;
     native.handle = handle;
     Ok(())
 }
@@ -210,8 +214,11 @@ async fn connect_native(
     });
 
     let timeout = Duration::from_secs(8);
-    let mut handle = match tokio::time::timeout(timeout, client::connect(config, (host, port), Verifier))
-        .await
+    let mut handle = match tokio::time::timeout(
+        timeout,
+        client::connect(config, (host, port), Verifier),
+    )
+    .await
     {
         Err(_) => return Err(transport_str("tcp/kex timed out")),
         Ok(Err(e)) => return Err(transport_err(e)),
@@ -243,7 +250,9 @@ async fn connect_native(
 
     // 2. password
     if let Some(pw) = password.as_deref() {
-        let res = handle.authenticate_password(user.to_owned(), pw.to_owned()).await;
+        let res = handle
+            .authenticate_password(user.to_owned(), pw.to_owned())
+            .await;
         match res {
             Ok(a) if a.success() => {
                 if let Some(p) = password.as_mut() {
@@ -259,7 +268,11 @@ async fn connect_native(
     Err(auth_err(format!(
         "no offered auth method succeeded for `{user}@{host}` (tried: {}; \
          provide key_path or password via env secrets)",
-        if tried.is_empty() { "nothing usable".into() } else { tried.join(", ") }
+        if tried.is_empty() {
+            "nothing usable".into()
+        } else {
+            tried.join(", ")
+        }
     )))
 }
 
@@ -273,12 +286,13 @@ impl Native {
             .channel_open_session()
             .await
             .map_err(transport_err)?;
-        channel
-            .exec(true, command)
-            .await
-            .map_err(transport_err)?;
+        channel.exec(true, command).await.map_err(transport_err)?;
 
-        let mut out = ExecOutcome { exit_code: -1, stdout: String::new(), stderr: String::new() };
+        let mut out = ExecOutcome {
+            exit_code: -1,
+            stdout: String::new(),
+            stderr: String::new(),
+        };
         let mut exited = None;
 
         loop {
@@ -297,9 +311,8 @@ impl Native {
             }
         }
 
-        out.exit_code = exited
-            .ok_or_else(|| transport_str("channel closed without exit status"))?
-            as i32;
+        out.exit_code =
+            exited.ok_or_else(|| transport_str("channel closed without exit status"))? as i32;
         Ok(out)
     }
 }
@@ -315,17 +328,15 @@ impl OpenSsh {
         argv.push(command.to_owned());
 
         let (prog, argv_final) = match &self.password {
-            Some(_) if which("sshpass").is_some() => {
-                let mut a = vec!["-e".to_owned()];
-                a.extend(argv);
-                ("sshpass", a)
-            }
             Some(_) => {
-                return Err(auth_err(
-                    "jump mode with a password needs `sshpass` on PATH (or rely on ssh-agent keys)",
-                ))
+                let sshpass = which("sshpass").ok_or_else(|| {
+                    auth_err(
+                        "jump mode with a password needs `sshpass` on PATH (or rely on ssh-agent keys)",
+                    )
+                })?;
+                (sshpass, sshpass_argv(argv))
             }
-            None => ("ssh", argv),
+            None => (std::path::PathBuf::from("ssh"), argv),
         };
 
         let mut cmd = Command::new(&prog);
@@ -336,13 +347,19 @@ impl OpenSsh {
             .args(&argv_final)
             .output()
             .await
-            .map_err(|e| transport_str(&format!("spawn {prog}: {e}")))?;
+            .map_err(|e| transport_str(&format!("spawn {}: {e}", prog.display())))?;
         Ok(ExecOutcome {
             exit_code: out.status.code().unwrap_or(-1),
             stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
         })
     }
+}
+
+fn sshpass_argv(ssh_argv: Vec<String>) -> Vec<String> {
+    let mut wrapped = vec!["-e".to_owned(), "ssh".to_owned()];
+    wrapped.extend(ssh_argv);
+    wrapped
 }
 
 fn which(bin: &str) -> Option<std::path::PathBuf> {
@@ -361,10 +378,9 @@ pub fn wrap_cli(command: &str) -> String {
     format!("vbash -lic \"{escaped}\"")
 }
 
-
 #[cfg(test)]
 mod tests {
-    use super::wrap_cli;
+    use super::{sshpass_argv, wrap_cli};
 
     #[test]
     fn escapes_dollar_and_quotes() {
@@ -374,6 +390,17 @@ mod tests {
             "vbash -lic \"set interfaces ethernet eth0 vif 35 address \\\"10.0.35.1/24\\\"\""
         );
         assert_eq!(wrap_cli("echo $HOME"), "vbash -lic \"echo \\$HOME\"");
+    }
+
+    #[test]
+    fn sshpass_wraps_the_ssh_program_before_ssh_arguments() {
+        let wrapped = sshpass_argv(vec![
+            "-J".into(),
+            "pris".into(),
+            "admin@192.168.1.1".into(),
+            "show version".into(),
+        ]);
+        assert_eq!(&wrapped[..4], ["-e", "ssh", "-J", "pris"]);
     }
 }
 
