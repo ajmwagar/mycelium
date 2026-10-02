@@ -309,6 +309,44 @@ release.key --write` validates, hashes, and signs every artifact before
 publishing any target. Peers may cache and relay every artifact, while update
 selection remains target-specific.
 
+### Capability-placed software
+
+The same content-addressed peer transport can distribute first-party tools
+without pretending each one is a Mycelium daemon release. A package manifest
+signs the package name, version, channel, target triple, size, and SHA-256:
+
+```sh
+mycelium packages publish \
+  --name unibus --binary ./dist/unibus-linux-arm64 \
+  --signing-key /secure/mycelium-release.key \
+  --version 0.4.0 --channel stable \
+  --target aarch64-unknown-linux-musl --write
+```
+
+Peers relay the signed manifest. A node fetches verified bytes only when its
+installed software policy assigns that package and channel. Placement remains
+a separate desired-state policy, so possession of an artifact never grants it
+permission to run. [`docs/examples/software-policy.json`](docs/examples/software-policy.json)
+shows a base Unibus assignment, Raspberry Pi media nodes, GPU/Metal compute
+nodes, and explicit Jarvis and Shroud roles:
+
+```sh
+mycelium software plan docs/examples/software-policy.json
+mycelium software policy set docs/examples/software-policy.json --write
+mycelium software activate unibus --channel stable --dry-run
+mycelium software activate unibus --channel stable --write
+```
+
+Selectors consume derived facts such as `platform.linux`, `arch.aarch64`,
+`site.wagar-house`, `resource.gpu`, `metal`, and `node.raspberry-pi`.
+Operational roles that cannot be inferred safely are explicit node facts, for
+example `MYCELIUM_NODE_FACTS=role.jarvis,role.shroud`. Conflicting channels for
+the same package and node fail the plan. Activation verifies the signature,
+size, and digest again, writes a versioned executable below
+`$MYCELIUM_HOME/software`, and atomically switches `current`; it never executes
+publisher-supplied installation commands. Service lifecycle and fleet
+reconciliation remain the next narrow driver boundary.
+
 ## Distributed access state
 
 Access authorities are independent from peer and release identities. Peers

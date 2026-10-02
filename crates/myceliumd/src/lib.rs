@@ -27,6 +27,7 @@ pub mod rpc;
 mod security;
 mod service_env;
 pub mod siem;
+pub mod software;
 pub mod ssh_renewal;
 mod state_change;
 pub mod topology_feed;
@@ -134,6 +135,14 @@ pub fn peer_observations_path() -> PathBuf {
 
 pub fn artifacts_dir() -> PathBuf {
     home_dir().join("artifacts")
+}
+
+pub fn software_dir() -> PathBuf {
+    home_dir().join("software")
+}
+
+pub fn software_policy_path() -> PathBuf {
+    home_dir().join("software-policy.json")
 }
 
 pub fn update_state_path() -> PathBuf {

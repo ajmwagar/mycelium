@@ -12,10 +12,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use ed25519_dalek::SigningKey;
 use mycelium_peer_protocol::{
     decode_hex, encode_hex, local_build_target, local_compatible_targets, sha256_hex, AccessRecord,
-    AccessStatement, FilesystemHealth, HardwareSnapshot, HostHealth, PeerEvent, PeerHello,
-    PeerMessage, Platform, ProcessHealth, ReleaseManifest, SecurityEventBatch, SecurityPosture,
-    SignedEnvelope, TopologySnapshot, TransportCredentialBinding, TransportKind, WireGuardBinding,
-    MAX_SECURITY_EVENTS, MAX_SECURITY_FINDINGS, PROTOCOL_VERSION,
+    AccessStatement, FilesystemHealth, HardwareSnapshot, HostHealth, PackageManifest, PeerEvent,
+    PeerHello, PeerMessage, Platform, ProcessHealth, ReleaseManifest, SecurityEventBatch,
+    SecurityPosture, SignedEnvelope, TopologySnapshot, TransportCredentialBinding, TransportKind,
+    WireGuardBinding, MAX_SECURITY_EVENTS, MAX_SECURITY_FINDINGS, PROTOCOL_VERSION,
 };
 use rand_core::OsRng;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
@@ -68,6 +68,7 @@ pub struct SeededArtifact {
     pub artifact_size: u64,
     pub already_present: bool,
     pub releases: Vec<ReleaseManifest>,
+    pub packages: Vec<PackageManifest>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -157,6 +158,15 @@ impl Mesh {
         let node_id = encode_hex(key.verifying_key().as_bytes());
         let hostname = output("hostname", &["-s"])?.trim().to_owned();
         let site = std::env::var("MYCELIUM_SITE").unwrap_or_else(|_| hostname.clone());
+        let capabilities = vec![
+            "system.health".into(),
+            "security.posture".into(),
+            "transport.identity-binding".into(),
+        ]
+        .into_iter()
+        .chain(raspberry_pi_capability())
+        .chain(configured_node_facts())
+        .collect();
         let hello = PeerHello {
             node_id,
             protocol_version: PROTOCOL_VERSION,
@@ -165,11 +175,7 @@ impl Mesh {
             platform: platform(),
             architecture: std::env::consts::ARCH.into(),
             daemon_version: crate::VERSION.into(),
-            capabilities: vec![
-                "system.health".into(),
-                "security.posture".into(),
-                "transport.identity-binding".into(),
-            ],
+            capabilities,
         };
         let allowed_origins = std::env::var("MYCELIUM_PEER_ALLOW").ok().map(|value| {
             value
@@ -194,6 +200,10 @@ impl Mesh {
                         PeerEvent::Release(release) => {
                             trusted_release_keys.contains(&release.signer)
                                 && release.verify().is_ok()
+                        }
+                        PeerEvent::Package(package) => {
+                            trusted_release_keys.contains(&package.signer)
+                                && package.verify().is_ok()
                         }
                         PeerEvent::Access(record) => {
                             trusted_access_keys.contains(&record.signer) && record.verify().is_ok()
@@ -345,6 +355,7 @@ impl Mesh {
                 PeerEvent::Health(health) => view.health = Some(health.clone()),
                 PeerEvent::Topology(_) => {}
                 PeerEvent::Release(_) => {}
+                PeerEvent::Package(_) => {}
                 PeerEvent::Access(_) => {}
                 PeerEvent::Transport(binding) => view.transports.push(binding.clone()),
                 PeerEvent::WireGuard(binding) => view.transports.push(binding.credential.clone()),
@@ -364,6 +375,18 @@ impl Mesh {
             .values()
             .filter_map(|envelope| match &envelope.event {
                 PeerEvent::Release(release) => Some(release.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub async fn packages(&self) -> Vec<PackageManifest> {
+        self.observations
+            .lock()
+            .await
+            .values()
+            .filter_map(|envelope| match &envelope.event {
+                PeerEvent::Package(package) => Some(package.clone()),
                 _ => None,
             })
             .collect()
@@ -592,6 +615,47 @@ impl Mesh {
         self.publish(PeerEvent::Release(release)).await
     }
 
+    pub async fn publish_package_artifact(
+        &self,
+        binary: &Path,
+        signing_key: &Path,
+        name: String,
+        version: String,
+        channel: String,
+        target: Option<String>,
+    ) -> Result<PackageManifest, AnyError> {
+        for (label, value) in [
+            ("name", &name),
+            ("version", &version),
+            ("channel", &channel),
+        ] {
+            validate_release_label(label, value)?;
+        }
+        let target = target.unwrap_or_else(local_build_target);
+        validate_release_label("target", &target)?;
+        let bytes = std::fs::read(binary)?;
+        let key_bytes = std::fs::read(signing_key)?;
+        let key = SigningKey::from_bytes(
+            key_bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| "release signing key must be exactly 32 bytes")?,
+        );
+        let package = PackageManifest::sign(&key, name, version, channel, target, &bytes)?;
+        if !self.trusted_release_keys.contains(&package.signer) {
+            return Err("package signer is not in MYCELIUM_RELEASE_KEYS".into());
+        }
+        std::fs::create_dir_all(crate::artifacts_dir())?;
+        let final_path = artifact_path(&package.artifact_digest)?;
+        if !final_path.is_file() {
+            let temp = final_path.with_extension(format!("tmp-{}", std::process::id()));
+            std::fs::write(&temp, &bytes)?;
+            std::fs::rename(temp, &final_path)?;
+        }
+        self.publish(PeerEvent::Package(package.clone())).await?;
+        Ok(package)
+    }
+
     pub async fn publish_artifact(
         &self,
         binary: &Path,
@@ -706,20 +770,38 @@ impl Mesh {
             .into_iter()
             .filter(|release| release.artifact_digest == digest)
             .collect::<Vec<_>>();
-        if releases.is_empty() {
-            return Err("artifact has no trusted release manifest".into());
+        let packages = self
+            .packages()
+            .await
+            .into_iter()
+            .filter(|package| package.artifact_digest == digest)
+            .collect::<Vec<_>>();
+        if releases.is_empty() && packages.is_empty() {
+            return Err("artifact has no trusted release or package manifest".into());
         }
         for release in &releases {
             release
                 .verify()
                 .map_err(|error| format!("release signature: {error}"))?;
         }
-        let expected_size = releases[0].artifact_size;
+        for package in &packages {
+            package
+                .verify()
+                .map_err(|error| format!("package signature: {error}"))?;
+        }
+        let expected_size = releases
+            .first()
+            .map(|item| item.artifact_size)
+            .or_else(|| packages.first().map(|item| item.artifact_size))
+            .expect("manifest checked above");
         if releases
             .iter()
             .any(|release| release.artifact_size != expected_size)
+            || packages
+                .iter()
+                .any(|package| package.artifact_size != expected_size)
         {
-            return Err("trusted release manifests disagree on artifact size".into());
+            return Err("trusted manifests disagree on artifact size".into());
         }
         let already_present =
             seed_artifact_file(binary, &artifact_path(digest)?, digest, expected_size)?;
@@ -728,6 +810,7 @@ impl Mesh {
             artifact_size: expected_size,
             already_present,
             releases,
+            packages,
         })
     }
 
@@ -766,6 +849,9 @@ impl Mesh {
             let event_authorized = match &envelope.event {
                 PeerEvent::Release(release) => {
                     self.trusted_release_keys.contains(&release.signer) && release.verify().is_ok()
+                }
+                PeerEvent::Package(package) => {
+                    self.trusted_release_keys.contains(&package.signer) && package.verify().is_ok()
                 }
                 PeerEvent::Access(record) => {
                     self.trusted_access_keys.contains(&record.signer) && record.verify().is_ok()
@@ -949,6 +1035,7 @@ impl Mesh {
                                 &data,
                                 complete,
                                 &self.releases().await,
+                                &self.packages().await,
                             )?;
                             if !complete {
                                 if let Some(request) = self.next_artifact_request().await? {
@@ -1023,6 +1110,44 @@ impl Mesh {
     }
 
     async fn next_artifact_request(&self) -> Result<Option<PeerMessage>, AnyError> {
+        let targets = local_compatible_targets();
+        let desired_packages = match crate::software::read_policy(&crate::software_policy_path()) {
+            Ok(policy) => crate::software::plan(&policy, &self.views().await)?
+                .into_iter()
+                .filter(|assignment| assignment.node_id == self.hello.node_id)
+                .map(|assignment| (assignment.package, assignment.channel))
+                .collect::<BTreeSet<_>>(),
+            Err(error)
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                BTreeSet::new()
+            }
+            Err(error) => return Err(format!("software policy: {error}").into()),
+        };
+        let packages = self.packages().await;
+        for (name, channel) in desired_packages {
+            let Some(package) = crate::software::select(&packages, &name, &channel, &targets)
+            else {
+                continue;
+            };
+            if artifact_path(&package.artifact_digest)?.is_file() {
+                continue;
+            }
+            let partial = partial_artifact_path(&package.artifact_digest)?;
+            let offset = std::fs::metadata(partial)
+                .map(|metadata| metadata.len())
+                .unwrap_or(0);
+            if offset > package.artifact_size {
+                return Err("partial package artifact exceeds signed size".into());
+            }
+            return Ok(Some(PeerMessage::ArtifactRequest {
+                digest: package.artifact_digest.clone(),
+                offset,
+                length: 65_536,
+            }));
+        }
         let release = self.preferred_release().await;
         let Some(release) = release else {
             return Ok(None);
@@ -1182,6 +1307,10 @@ fn event_key(envelope: &SignedEnvelope) -> String {
             "{}:release:{}:{}",
             envelope.origin, release.channel, release.target
         ),
+        PeerEvent::Package(package) => format!(
+            "{}:package:{}:{}:{}",
+            envelope.origin, package.name, package.channel, package.target
+        ),
         PeerEvent::Access(record) => match &record.statement {
             AccessStatement::Grant { grant_id, .. } => {
                 format!("access:{}:grant:{grant_id}", record.signer)
@@ -1207,6 +1336,7 @@ fn event_origin_matches(envelope: &SignedEnvelope) -> bool {
         PeerEvent::Health(_)
         | PeerEvent::Topology(_)
         | PeerEvent::Release(_)
+        | PeerEvent::Package(_)
         | PeerEvent::Access(_) => true,
         PeerEvent::Transport(binding) => binding.validate_for(&envelope.origin).is_ok(),
         PeerEvent::WireGuard(binding) => binding.validate_for(&envelope.origin).is_ok(),
@@ -1225,6 +1355,35 @@ fn csv_set(name: &str) -> BTreeSet<String> {
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
         .collect()
+}
+
+fn raspberry_pi_capability() -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        return std::fs::read_to_string("/proc/device-tree/model")
+            .ok()
+            .filter(|model| model.to_ascii_lowercase().contains("raspberry pi"))
+            .map(|_| "node.raspberry-pi".into());
+    }
+    #[cfg(not(target_os = "linux"))]
+    None
+}
+
+fn configured_node_facts() -> impl Iterator<Item = String> {
+    std::env::var("MYCELIUM_NODE_FACTS")
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|fact| {
+            !fact.is_empty()
+                && fact.len() <= 128
+                && fact
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+        })
+        .map(str::to_owned)
+        .collect::<Vec<_>>()
+        .into_iter()
 }
 
 fn validate_digest(digest: &str) -> Result<(), AnyError> {
@@ -1416,13 +1575,21 @@ fn accept_artifact_chunk(
     encoded: &str,
     complete: bool,
     releases: &[ReleaseManifest],
+    packages: &[PackageManifest],
 ) -> Result<(), AnyError> {
-    let release = releases
+    let signed_bounds = releases
         .iter()
         .find(|release| release.artifact_digest == digest)
-        .ok_or("artifact has no trusted release manifest")?;
+        .map(|release| release.artifact_size)
+        .or_else(|| {
+            packages
+                .iter()
+                .find(|package| package.artifact_digest == digest)
+                .map(|package| package.artifact_size)
+        })
+        .ok_or("artifact has no trusted release or package manifest")?;
     let data = decode_hex(encoded).map_err(|error| format!("artifact chunk: {error}"))?;
-    if data.len() > 65_536 || offset + data.len() as u64 > release.artifact_size {
+    if data.len() > 65_536 || offset + data.len() as u64 > signed_bounds {
         return Err("artifact chunk exceeds signed bounds".into());
     }
     std::fs::create_dir_all(crate::artifacts_dir())?;
@@ -1441,7 +1608,7 @@ fn accept_artifact_chunk(
     file.sync_data()?;
     if complete {
         let bytes = std::fs::read(&partial)?;
-        if bytes.len() as u64 != release.artifact_size || sha256_hex(&bytes) != digest {
+        if bytes.len() as u64 != signed_bounds || sha256_hex(&bytes) != digest {
             return Err("completed artifact does not match signed size and digest".into());
         }
         std::fs::rename(partial, artifact_path(digest)?)?;

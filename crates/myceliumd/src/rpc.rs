@@ -1882,6 +1882,92 @@ impl Daemon {
                     .map_err(|error| MyceliumError::Validation(error.to_string()))?;
                 to_value(seeded).map_err(json_err)
             }
+            Request::PackageList => to_value(self.mesh.packages().await).map_err(json_err),
+            Request::PackagePublish {
+                name,
+                binary,
+                signing_key,
+                version,
+                channel,
+                target,
+                write,
+                dry_run,
+            } => {
+                if dry_run {
+                    return to_value(serde_json::json!({"dry_run": true, "name": name, "binary": binary, "version": version, "channel": channel, "target": target})).map_err(json_err);
+                }
+                if !write {
+                    return Err(MyceliumError::WritesNotPermitted(
+                        "package publication requires --write".into(),
+                    ));
+                }
+                let package = self
+                    .mesh
+                    .publish_package_artifact(
+                        std::path::Path::new(&binary),
+                        std::path::Path::new(&signing_key),
+                        name,
+                        version,
+                        channel,
+                        target,
+                    )
+                    .await
+                    .map_err(|error| MyceliumError::Validation(error.to_string()))?;
+                to_value(package).map_err(json_err)
+            }
+            Request::SoftwarePlan { policy } => {
+                let policy = crate::software::read_policy(std::path::Path::new(&policy))
+                    .map_err(|error| MyceliumError::Validation(error.to_string()))?;
+                let plan = crate::software::plan(&policy, &self.mesh.views().await)
+                    .map_err(MyceliumError::Validation)?;
+                to_value(plan).map_err(json_err)
+            }
+            Request::SoftwarePolicySet {
+                policy,
+                write,
+                dry_run,
+            } => {
+                let parsed = crate::software::read_policy(std::path::Path::new(&policy))
+                    .map_err(|error| MyceliumError::Validation(error.to_string()))?;
+                if dry_run {
+                    return to_value(parsed).map_err(json_err);
+                }
+                if !write {
+                    return Err(MyceliumError::WritesNotPermitted(
+                        "software policy changes require --write".into(),
+                    ));
+                }
+                let saved = crate::software::write_policy(std::path::Path::new(&policy))
+                    .map_err(|error| MyceliumError::Validation(error.to_string()))?;
+                to_value(saved).map_err(json_err)
+            }
+            Request::SoftwareActivate {
+                name,
+                channel,
+                write,
+                dry_run,
+            } => {
+                let packages = self.mesh.packages().await;
+                let targets = mycelium_peer_protocol::local_compatible_targets();
+                let package = crate::software::select(&packages, &name, &channel, &targets)
+                    .ok_or_else(|| {
+                        MyceliumError::Validation(format!(
+                            "no compatible signed package `{name}` on channel `{channel}`"
+                        ))
+                    })?;
+                if dry_run {
+                    return to_value(serde_json::json!({"dry_run": true, "package": package}))
+                        .map_err(json_err);
+                }
+                if !write {
+                    return Err(MyceliumError::WritesNotPermitted(
+                        "software activation requires --write".into(),
+                    ));
+                }
+                let activated = crate::software::activate(package)
+                    .map_err(|error| MyceliumError::Validation(error.to_string()))?;
+                to_value(activated).map_err(json_err)
+            }
             Request::AccessList => {
                 to_value(self.mesh.access_view(unix_now()).await).map_err(json_err)
             }

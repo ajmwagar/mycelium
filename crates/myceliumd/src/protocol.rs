@@ -256,6 +256,38 @@ pub enum Request {
         #[serde(default)]
         dry_run: bool,
     },
+    PackageList,
+    PackagePublish {
+        name: String,
+        binary: String,
+        signing_key: String,
+        version: String,
+        channel: String,
+        #[serde(default)]
+        target: Option<String>,
+        #[serde(default)]
+        write: bool,
+        #[serde(default)]
+        dry_run: bool,
+    },
+    SoftwarePlan {
+        policy: String,
+    },
+    SoftwarePolicySet {
+        policy: String,
+        #[serde(default)]
+        write: bool,
+        #[serde(default)]
+        dry_run: bool,
+    },
+    SoftwareActivate {
+        name: String,
+        channel: String,
+        #[serde(default)]
+        write: bool,
+        #[serde(default)]
+        dry_run: bool,
+    },
     AccessList,
     AccessKeygen {
         path: String,

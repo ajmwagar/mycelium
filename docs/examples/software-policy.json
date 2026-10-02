@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "name": "base-mesh",
+      "selector": {},
+      "packages": [
+        { "name": "unibus", "channel": "stable" }
+      ]
+    },
+    {
+      "name": "raspberry-pi-media",
+      "selector": { "all": ["node.raspberry-pi"] },
+      "packages": [
+        { "name": "isochrone", "channel": "stable" }
+      ]
+    },
+    {
+      "name": "accelerated-compute",
+      "selector": { "all": ["resource.gpu"] },
+      "packages": [
+        { "name": "umie", "channel": "stable" },
+        { "name": "yggdrasil", "channel": "stable" }
+      ]
+    },
+    {
+      "name": "assistant-nodes",
+      "selector": { "all": ["role.jarvis"] },
+      "packages": [
+        { "name": "jarvis", "channel": "stable" },
+        { "name": "dock", "channel": "stable" }
+      ]
+    },
+    {
+      "name": "shroud-workers",
+      "selector": { "all": ["role.shroud"] },
+      "packages": [
+        { "name": "shroud", "channel": "stable" }
+      ]
+    }
+  ]
+}

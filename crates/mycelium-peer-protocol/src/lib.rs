@@ -98,6 +98,7 @@ pub enum PeerEvent {
     Health(HostHealth),
     Topology(TopologySnapshot),
     Release(ReleaseManifest),
+    Package(PackageManifest),
     Access(AccessRecord),
     Transport(TransportCredentialBinding),
     WireGuard(WireGuardBinding),
@@ -116,6 +117,7 @@ enum KnownPeerEvent {
     Health(HostHealth),
     Topology(TopologySnapshot),
     Release(ReleaseManifest),
+    Package(PackageManifest),
     Access(AccessRecord),
     Transport(TransportCredentialBinding),
     WireGuard(WireGuardBinding),
@@ -137,6 +139,7 @@ impl<'de> Deserialize<'de> for PeerEvent {
                     | "health"
                     | "topology"
                     | "release"
+                    | "package"
                     | "access"
                     | "transport"
                     | "wire_guard"
@@ -155,6 +158,7 @@ impl<'de> Deserialize<'de> for PeerEvent {
             KnownPeerEvent::Health(value) => Self::Health(value),
             KnownPeerEvent::Topology(value) => Self::Topology(value),
             KnownPeerEvent::Release(value) => Self::Release(value),
+            KnownPeerEvent::Package(value) => Self::Package(value),
             KnownPeerEvent::Access(value) => Self::Access(value),
             KnownPeerEvent::Transport(value) => Self::Transport(value),
             KnownPeerEvent::WireGuard(value) => Self::WireGuard(value),
@@ -615,6 +619,93 @@ impl ReleaseManifest {
     }
 }
 
+/// A signed, content-addressed executable distributed independently of the
+/// Mycelium daemon. Placement policy is intentionally not part of this
+/// manifest: publishers authorize bytes; each node's desired state decides
+/// whether those bytes should run there.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PackageManifest {
+    pub name: String,
+    pub version: String,
+    pub channel: String,
+    pub target: String,
+    pub protocol_version: u16,
+    pub artifact_digest: String,
+    pub artifact_size: u64,
+    pub signer: String,
+    pub signature: String,
+}
+
+#[derive(Serialize)]
+struct UnsignedPackage<'a> {
+    name: &'a str,
+    version: &'a str,
+    channel: &'a str,
+    target: &'a str,
+    protocol_version: u16,
+    artifact_digest: &'a str,
+    artifact_size: u64,
+    signer: &'a str,
+}
+
+impl PackageManifest {
+    pub fn sign(
+        key: &SigningKey,
+        name: String,
+        version: String,
+        channel: String,
+        target: String,
+        artifact: &[u8],
+    ) -> Result<Self, serde_json::Error> {
+        let signer = encode_hex(key.verifying_key().as_bytes());
+        let artifact_digest = sha256_hex(artifact);
+        let artifact_size = artifact.len() as u64;
+        let bytes = serde_json::to_vec(&UnsignedPackage {
+            name: &name,
+            version: &version,
+            channel: &channel,
+            target: &target,
+            protocol_version: PROTOCOL_VERSION,
+            artifact_digest: &artifact_digest,
+            artifact_size,
+            signer: &signer,
+        })?;
+        Ok(Self {
+            name,
+            version,
+            channel,
+            target,
+            protocol_version: PROTOCOL_VERSION,
+            artifact_digest,
+            artifact_size,
+            signer,
+            signature: encode_hex(&key.sign(&bytes).to_bytes()),
+        })
+    }
+
+    pub fn verify(&self) -> Result<(), String> {
+        if self.protocol_version != PROTOCOL_VERSION {
+            return Err(format!("unsupported protocol {}", self.protocol_version));
+        }
+        let key = VerifyingKey::from_bytes(&decode_array::<32>(&self.signer)?)
+            .map_err(|error| error.to_string())?;
+        let signature = Signature::from_bytes(&decode_array::<64>(&self.signature)?);
+        let bytes = serde_json::to_vec(&UnsignedPackage {
+            name: &self.name,
+            version: &self.version,
+            channel: &self.channel,
+            target: &self.target,
+            protocol_version: self.protocol_version,
+            artifact_digest: &self.artifact_digest,
+            artifact_size: self.artifact_size,
+            signer: &self.signer,
+        })
+        .map_err(|error| error.to_string())?;
+        key.verify(&bytes, &signature)
+            .map_err(|error| error.to_string())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SignedEnvelope {
     pub origin: String,
@@ -1003,6 +1094,23 @@ mod tests {
             posture.security_updates_available = 1;
         }
         assert!(envelope.verify().is_err());
+    }
+
+    #[test]
+    fn package_signature_covers_identity_and_artifact() {
+        let key = SigningKey::from_bytes(&[29; 32]);
+        let mut package = PackageManifest::sign(
+            &key,
+            "unibus".into(),
+            "1.2.3".into(),
+            "stable".into(),
+            "aarch64-unknown-linux-musl".into(),
+            b"binary",
+        )
+        .unwrap();
+        package.verify().unwrap();
+        package.name = "other".into();
+        assert!(package.verify().is_err());
     }
 
     #[test]

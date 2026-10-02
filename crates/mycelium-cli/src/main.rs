@@ -124,6 +124,11 @@ usage:
   mycelium releases publish --binary PATH --signing-key PATH --version VERSION --channel CHANNEL [--target TRIPLE] --write [--dry-run] [--json]
   mycelium releases publish-set --manifest PATH --signing-key PATH --write [--dry-run] [--json]
   mycelium releases seed --binary PATH --digest SHA256 --write [--dry-run] [--json]
+  mycelium packages list [--json]
+  mycelium packages publish --name NAME --binary PATH --signing-key PATH --version VERSION --channel CHANNEL [--target TRIPLE] --write [--dry-run] [--json]
+  mycelium software plan POLICY.json [--json]
+  mycelium software policy set POLICY.json --write [--dry-run] [--json]
+  mycelium software activate NAME [--channel CHANNEL] --write [--dry-run] [--json]
   mycelium access list [--json]
   mycelium access keygen --path PATH --write [--json]
   mycelium access publish --statement PATH --signing-key PATH --write [--dry-run] [--json]
@@ -590,6 +595,8 @@ async fn run(cmd: &str, args: &[String]) -> Result<Vec<String>, ClientError> {
             hardware(args).await
         }
         "releases" => releases(args).await,
+        "packages" => packages(args).await,
+        "software" => software(args).await,
         "access" => access(args).await,
         "update" => update(args).await,
         "wireguard" => wireguard_command(args).await,
@@ -1056,6 +1063,113 @@ async fn releases(args: &[String]) -> Result<Vec<String>, ClientError> {
             serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string())
         ])
     }
+}
+
+async fn packages(args: &[String]) -> Result<Vec<String>, ClientError> {
+    let flags = parse_flags(args);
+    let action = flags.rest.first().map(String::as_str).unwrap_or("list");
+    let request = match action {
+        "list" => Request::PackageList,
+        "publish" => Request::PackagePublish {
+            name: flags
+                .name
+                .ok_or(err_usage("packages publish needs --name"))?,
+            binary: flags
+                .binary
+                .ok_or(err_usage("packages publish needs --binary"))?,
+            signing_key: flags
+                .signing_key
+                .ok_or(err_usage("packages publish needs --signing-key"))?,
+            version: flags
+                .version
+                .ok_or(err_usage("packages publish needs --version"))?,
+            channel: flags
+                .channel
+                .ok_or(err_usage("packages publish needs --channel"))?,
+            target: flags.targets.first().cloned(),
+            write: flags.write,
+            dry_run: flags.dry_run,
+        },
+        other => return Err(err_usage(&format!("unknown packages action `{other}`"))),
+    };
+    let mut client = connect().await?;
+    let value = client.call(&request).await?;
+    if flags.json || action != "list" {
+        return Ok(vec![value.to_string()]);
+    }
+    let mut lines = vec!["packages:".into()];
+    for package in value.as_array().into_iter().flatten() {
+        lines.push(format!(
+            "  {} {} channel={} target={} digest={}",
+            package["name"].as_str().unwrap_or("?"),
+            package["version"].as_str().unwrap_or("?"),
+            package["channel"].as_str().unwrap_or("?"),
+            package["target"].as_str().unwrap_or("?"),
+            package["artifact_digest"].as_str().unwrap_or("?")
+        ));
+    }
+    Ok(lines)
+}
+
+async fn software(args: &[String]) -> Result<Vec<String>, ClientError> {
+    let flags = parse_flags(args);
+    let action = flags.rest.first().map(String::as_str).unwrap_or("plan");
+    let request = match action {
+        "plan" => Request::SoftwarePlan {
+            policy: flags
+                .rest
+                .get(1)
+                .cloned()
+                .ok_or(err_usage("software plan needs POLICY.json"))?,
+        },
+        "activate" => Request::SoftwareActivate {
+            name: flags
+                .rest
+                .get(1)
+                .cloned()
+                .ok_or(err_usage("software activate needs NAME"))?,
+            channel: flags.channel.unwrap_or_else(|| "stable".into()),
+            write: flags.write,
+            dry_run: flags.dry_run,
+        },
+        "policy" if flags.rest.get(1).map(String::as_str) == Some("set") => {
+            Request::SoftwarePolicySet {
+                policy: flags
+                    .rest
+                    .get(2)
+                    .cloned()
+                    .ok_or(err_usage("software policy set needs POLICY.json"))?,
+                write: flags.write,
+                dry_run: flags.dry_run,
+            }
+        }
+        other => return Err(err_usage(&format!("unknown software action `{other}`"))),
+    };
+    let mut client = connect().await?;
+    let value = client.call(&request).await?;
+    if flags.json || action == "activate" {
+        return Ok(vec![
+            serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string())
+        ]);
+    }
+    let mut lines = vec!["software plan:".into()];
+    for item in value.as_array().into_iter().flatten() {
+        lines.push(format!(
+            "  {}: {} channel={} rules={}",
+            item["hostname"].as_str().unwrap_or("?"),
+            item["package"].as_str().unwrap_or("?"),
+            item["channel"].as_str().unwrap_or("?"),
+            item["rules"]
+                .as_array()
+                .map(|rules| rules
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .collect::<Vec<_>>()
+                    .join(","))
+                .unwrap_or_default()
+        ));
+    }
+    Ok(lines)
 }
 
 async fn egress_command(args: &[String]) -> Result<Vec<String>, ClientError> {
