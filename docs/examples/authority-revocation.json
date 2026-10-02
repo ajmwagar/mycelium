@@ -1,0 +1,7 @@
+{
+  "kind": "revoke",
+  "revocation_id": "revoke-fabd-stable-packages-2026",
+  "delegation_id": "fabd-stable-packages-2026",
+  "revoked_at": 1790899200,
+  "reason": "delegated signing key rotated"
+}

@@ -16,6 +16,7 @@
 //! Secrets never persist: `CredentialSet` round-trips `Secret::Env`, so
 //! `devices.json` stores variable names, not values.
 
+pub mod authority;
 pub mod client;
 pub mod credential_map;
 mod execution;

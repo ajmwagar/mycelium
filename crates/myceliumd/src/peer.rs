@@ -12,10 +12,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use ed25519_dalek::SigningKey;
 use mycelium_peer_protocol::{
     decode_hex, encode_hex, local_build_target, local_compatible_targets, sha256_hex, AccessRecord,
-    AccessStatement, FilesystemHealth, HardwareSnapshot, HostHealth, PackageManifest, PeerEvent,
-    PeerHello, PeerMessage, Platform, ProcessHealth, ReleaseManifest, SecurityEventBatch,
-    SecurityPosture, SignedEnvelope, TopologySnapshot, TransportCredentialBinding, TransportKind,
-    WireGuardBinding, MAX_SECURITY_EVENTS, MAX_SECURITY_FINDINGS, PROTOCOL_VERSION,
+    AccessStatement, AuthorityRecord, AuthorityStatement, FilesystemHealth, HardwareSnapshot,
+    HostHealth, PackageManifest, PeerEvent, PeerHello, PeerMessage, Platform, ProcessHealth,
+    ReleaseManifest, SecurityEventBatch, SecurityPosture, SignedEnvelope, TopologySnapshot,
+    TransportCredentialBinding, TransportKind, WireGuardBinding, MAX_SECURITY_EVENTS,
+    MAX_SECURITY_FINDINGS, PROTOCOL_VERSION,
 };
 use rand_core::OsRng;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
@@ -90,6 +91,7 @@ pub struct Mesh {
     sequence: AtomicU64,
     observations: Mutex<BTreeMap<String, SignedEnvelope>>,
     allowed_origins: Option<BTreeSet<String>>,
+    authority_roots: BTreeSet<String>,
     trusted_release_keys: BTreeSet<String>,
     trusted_access_keys: BTreeSet<String>,
     require_transport_binding: bool,
@@ -127,6 +129,7 @@ impl Mesh {
             sequence: AtomicU64::new(0),
             observations: Mutex::new(BTreeMap::new()),
             allowed_origins: None,
+            authority_roots: BTreeSet::new(),
             trusted_release_keys: BTreeSet::new(),
             trusted_access_keys: BTreeSet::new(),
             require_transport_binding: false,
@@ -189,40 +192,20 @@ impl Mesh {
                 .map(str::to_owned)
                 .collect::<BTreeSet<_>>()
         });
+        let authority_roots = csv_set("MYCELIUM_AUTHORITY_KEYS");
         let trusted_release_keys = csv_set("MYCELIUM_RELEASE_KEYS");
         let trusted_access_keys = csv_set("MYCELIUM_ACCESS_KEYS");
         let require_transport_binding = std::env::var("MYCELIUM_REQUIRE_TRANSPORT_BINDING")
             .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "yes"));
         let observations = match std::fs::read_to_string(crate::peer_observations_path()) {
-            Ok(text) => serde_json::from_str::<Vec<SignedEnvelope>>(&text)?
-                .into_iter()
-                .filter(|envelope| {
-                    if matches!(envelope.event, PeerEvent::Unknown) {
-                        return false;
-                    }
-                    let release_allowed = match &envelope.event {
-                        PeerEvent::Release(release) => {
-                            trusted_release_keys.contains(&release.signer)
-                                && release.verify().is_ok()
-                        }
-                        PeerEvent::Package(package) => {
-                            trusted_release_keys.contains(&package.signer)
-                                && package.verify().is_ok()
-                        }
-                        PeerEvent::Access(record) => {
-                            trusted_access_keys.contains(&record.signer) && record.verify().is_ok()
-                        }
-                        _ => true,
-                    };
-                    release_allowed
-                        && envelope.verify().is_ok()
-                        && (envelope.origin == hello.node_id
-                            || allowed_origins
-                                .as_ref()
-                                .is_none_or(|allowed| allowed.contains(&envelope.origin)))
-                })
-                .map(|envelope| (event_key(&envelope), envelope))
-                .collect(),
+            Ok(text) => validated_observations(
+                serde_json::from_str::<Vec<SignedEnvelope>>(&text)?,
+                &hello.node_id,
+                allowed_origins.as_ref(),
+                &authority_roots,
+                &trusted_access_keys,
+                &trusted_release_keys,
+            ),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
             Err(error) => return Err(error.into()),
         };
@@ -238,6 +221,7 @@ impl Mesh {
             sequence: AtomicU64::new(sequence),
             observations: Mutex::new(observations),
             allowed_origins,
+            authority_roots,
             trusted_release_keys,
             trusted_access_keys,
             require_transport_binding,
@@ -360,6 +344,7 @@ impl Mesh {
                 PeerEvent::Topology(_) => {}
                 PeerEvent::Release(_) => {}
                 PeerEvent::Package(_) => {}
+                PeerEvent::Authority(_) => {}
                 PeerEvent::Access(_) => {}
                 PeerEvent::Transport(binding) => view.transports.push(binding.clone()),
                 PeerEvent::WireGuard(binding) => view.transports.push(binding.credential.clone()),
@@ -373,24 +358,42 @@ impl Mesh {
     }
 
     pub async fn releases(&self) -> Vec<ReleaseManifest> {
-        self.observations
-            .lock()
-            .await
+        let observations = self.observations.lock().await;
+        let records = authority_records_from(&observations);
+        let resolver = crate::authority::AuthorityResolver::new(
+            &self.authority_roots,
+            &self.trusted_access_keys,
+            &self.trusted_release_keys,
+            records.iter(),
+            now(),
+        );
+        observations
             .values()
             .filter_map(|envelope| match &envelope.event {
-                PeerEvent::Release(release) => Some(release.clone()),
+                PeerEvent::Release(release) if resolver.release(&release.signer).authorized => {
+                    Some(release.clone())
+                }
                 _ => None,
             })
             .collect()
     }
 
     pub async fn packages(&self) -> Vec<PackageManifest> {
-        self.observations
-            .lock()
-            .await
+        let observations = self.observations.lock().await;
+        let records = authority_records_from(&observations);
+        let resolver = crate::authority::AuthorityResolver::new(
+            &self.authority_roots,
+            &self.trusted_access_keys,
+            &self.trusted_release_keys,
+            records.iter(),
+            now(),
+        );
+        observations
             .values()
             .filter_map(|envelope| match &envelope.event {
-                PeerEvent::Package(package) => Some(package.clone()),
+                PeerEvent::Package(package) if resolver.package(package).authorized => {
+                    Some(package.clone())
+                }
                 _ => None,
             })
             .collect()
@@ -546,7 +549,20 @@ impl Mesh {
     }
 
     pub async fn access_view(&self, at: u64) -> AccessStateView {
-        let records = self.access_records().await;
+        let authority_records = self.authority_records().await;
+        let resolver = crate::authority::AuthorityResolver::new(
+            &self.authority_roots,
+            &self.trusted_access_keys,
+            &self.trusted_release_keys,
+            authority_records.iter(),
+            at,
+        );
+        let records = self
+            .access_records()
+            .await
+            .into_iter()
+            .filter(|record| resolver.access(&record.signer).authorized)
+            .collect::<Vec<_>>();
         let revocations = records
             .iter()
             .filter(|record| matches!(record.statement, AccessStatement::Revoke { .. }))
@@ -602,16 +618,18 @@ impl Mesh {
                 .map_err(|_| "access signing key must be exactly 32 bytes")?,
         );
         let record = AccessRecord::sign(&key, statement)?;
-        if !self.trusted_access_keys.contains(&record.signer) {
-            return Err("access signer is not in MYCELIUM_ACCESS_KEYS".into());
+        let decision = self.authorize_access(&record.signer).await;
+        if !decision.authorized {
+            return Err(format!("access signer is unauthorized: {}", decision.reason).into());
         }
         self.publish(PeerEvent::Access(record.clone())).await?;
         Ok(record)
     }
 
     pub async fn publish_release(&self, release: ReleaseManifest) -> Result<(), AnyError> {
-        if !self.trusted_release_keys.contains(&release.signer) {
-            return Err("release signer is not in MYCELIUM_RELEASE_KEYS".into());
+        let decision = self.authorize_release(&release.signer).await;
+        if !decision.authorized {
+            return Err(format!("release signer is unauthorized: {}", decision.reason).into());
         }
         release
             .verify()
@@ -646,8 +664,9 @@ impl Mesh {
                 .map_err(|_| "release signing key must be exactly 32 bytes")?,
         );
         let package = PackageManifest::sign(&key, name, version, channel, target, &bytes)?;
-        if !self.trusted_release_keys.contains(&package.signer) {
-            return Err("package signer is not in MYCELIUM_RELEASE_KEYS".into());
+        let decision = self.authorize_package(&package).await;
+        if !decision.authorized {
+            return Err(format!("package signer is unauthorized: {}", decision.reason).into());
         }
         std::fs::create_dir_all(crate::artifacts_dir())?;
         let final_path = artifact_path(&package.artifact_digest)?;
@@ -658,6 +677,98 @@ impl Mesh {
         }
         self.publish(PeerEvent::Package(package.clone())).await?;
         Ok(package)
+    }
+
+    pub async fn authority_records(&self) -> Vec<AuthorityRecord> {
+        self.observations
+            .lock()
+            .await
+            .values()
+            .filter_map(|envelope| match &envelope.event {
+                PeerEvent::Authority(record) => Some(record.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub async fn publish_authority(
+        &self,
+        statement_path: &Path,
+        signing_key: &Path,
+    ) -> Result<AuthorityRecord, AnyError> {
+        let statement: AuthorityStatement =
+            serde_json::from_slice(&std::fs::read(statement_path)?)?;
+        validate_authority_statement(&statement)?;
+        let key_bytes = std::fs::read(signing_key)?;
+        let key = SigningKey::from_bytes(
+            key_bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| "authority signing key must be exactly 32 bytes")?,
+        );
+        let record = AuthorityRecord::sign(&key, statement)?;
+        if !self.authority_roots.contains(&record.signer) {
+            return Err("authority signer is not in MYCELIUM_AUTHORITY_KEYS".into());
+        }
+        self.publish(PeerEvent::Authority(record.clone())).await?;
+        Ok(record)
+    }
+
+    pub async fn authorize_access(&self, signer: &str) -> crate::authority::AuthorityDecision {
+        let records = self.authority_records().await;
+        crate::authority::AuthorityResolver::new(
+            &self.authority_roots,
+            &self.trusted_access_keys,
+            &self.trusted_release_keys,
+            records.iter(),
+            now(),
+        )
+        .access(signer)
+    }
+
+    pub async fn authorize_release(&self, signer: &str) -> crate::authority::AuthorityDecision {
+        let records = self.authority_records().await;
+        crate::authority::AuthorityResolver::new(
+            &self.authority_roots,
+            &self.trusted_access_keys,
+            &self.trusted_release_keys,
+            records.iter(),
+            now(),
+        )
+        .release(signer)
+    }
+
+    pub async fn authorize_package(
+        &self,
+        package: &PackageManifest,
+    ) -> crate::authority::AuthorityDecision {
+        let records = self.authority_records().await;
+        crate::authority::AuthorityResolver::new(
+            &self.authority_roots,
+            &self.trusted_access_keys,
+            &self.trusted_release_keys,
+            records.iter(),
+            now(),
+        )
+        .package(package)
+    }
+
+    pub async fn authorize_package_fields(
+        &self,
+        signer: &str,
+        name: &str,
+        channel: &str,
+        target: &str,
+    ) -> crate::authority::AuthorityDecision {
+        let records = self.authority_records().await;
+        crate::authority::AuthorityResolver::new(
+            &self.authority_roots,
+            &self.trusted_access_keys,
+            &self.trusted_release_keys,
+            records.iter(),
+            now(),
+        )
+        .package_fields(signer, name, channel, target)
     }
 
     pub async fn publish_artifact(
@@ -841,6 +952,8 @@ impl Mesh {
     async fn merge(&self, incoming: Vec<SignedEnvelope>) -> Result<(), AnyError> {
         let mut changed = false;
         let mut observations = self.observations.lock().await;
+        let mut incoming = incoming;
+        incoming.sort_by_key(|envelope| !matches!(envelope.event, PeerEvent::Authority(_)));
         for envelope in incoming {
             if matches!(envelope.event, PeerEvent::Unknown) {
                 continue;
@@ -850,28 +963,15 @@ impl Mesh {
                     .allowed_origins
                     .as_ref()
                     .is_none_or(|allowed| allowed.contains(&envelope.origin));
-            let event_authorized = match &envelope.event {
-                PeerEvent::Release(release) => {
-                    self.trusted_release_keys.contains(&release.signer) && release.verify().is_ok()
-                }
-                PeerEvent::Package(package) => {
-                    self.trusted_release_keys.contains(&package.signer) && package.verify().is_ok()
-                }
-                PeerEvent::Access(record) => {
-                    self.trusted_access_keys.contains(&record.signer) && record.verify().is_ok()
-                }
-                PeerEvent::Transport(binding) => binding.validate_for(&envelope.origin).is_ok(),
-                PeerEvent::WireGuard(binding) => binding.validate_for(&envelope.origin).is_ok(),
-                PeerEvent::Hardware(snapshot) => snapshot.validate_for(&envelope.origin).is_ok(),
-                PeerEvent::SecurityPosture(posture) => {
-                    posture.node_id == envelope.origin
-                        && posture.findings.len() <= MAX_SECURITY_FINDINGS
-                }
-                PeerEvent::SecurityEvents(events) => {
-                    events.node_id == envelope.origin && events.events.len() <= MAX_SECURITY_EVENTS
-                }
-                _ => true,
-            };
+            let records = authority_records_from(&observations);
+            let resolver = crate::authority::AuthorityResolver::new(
+                &self.authority_roots,
+                &self.trusted_access_keys,
+                &self.trusted_release_keys,
+                records.iter(),
+                now(),
+            );
+            let event_authorized = event_is_authorized(&envelope, &self.authority_roots, &resolver);
             if !authorized
                 || !event_authorized
                 || envelope.verify().is_err()
@@ -1302,6 +1402,83 @@ async fn send<W: tokio::io::AsyncWrite + Unpin>(
     Ok(())
 }
 
+fn validated_observations(
+    envelopes: Vec<SignedEnvelope>,
+    local_node_id: &str,
+    allowed_origins: Option<&BTreeSet<String>>,
+    authority_roots: &BTreeSet<String>,
+    legacy_access: &BTreeSet<String>,
+    legacy_release: &BTreeSet<String>,
+) -> BTreeMap<String, SignedEnvelope> {
+    let mut candidates = envelopes
+        .into_iter()
+        .filter(|envelope| {
+            !matches!(envelope.event, PeerEvent::Unknown)
+                && envelope.verify().is_ok()
+                && event_origin_matches(envelope)
+                && (envelope.origin == local_node_id
+                    || allowed_origins.is_none_or(|allowed| allowed.contains(&envelope.origin)))
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by_key(|envelope| !matches!(envelope.event, PeerEvent::Authority(_)));
+    let mut accepted = BTreeMap::new();
+    for envelope in candidates {
+        let records = authority_records_from(&accepted);
+        let resolver = crate::authority::AuthorityResolver::new(
+            authority_roots,
+            legacy_access,
+            legacy_release,
+            records.iter(),
+            now(),
+        );
+        if event_is_authorized(&envelope, authority_roots, &resolver) {
+            accepted.insert(event_key(&envelope), envelope);
+        }
+    }
+    accepted
+}
+
+fn authority_records_from(observations: &BTreeMap<String, SignedEnvelope>) -> Vec<AuthorityRecord> {
+    observations
+        .values()
+        .filter_map(|envelope| match &envelope.event {
+            PeerEvent::Authority(record) => Some(record.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn event_is_authorized(
+    envelope: &SignedEnvelope,
+    authority_roots: &BTreeSet<String>,
+    resolver: &crate::authority::AuthorityResolver<'_>,
+) -> bool {
+    match &envelope.event {
+        PeerEvent::Release(release) => {
+            release.verify().is_ok() && resolver.release(&release.signer).authorized
+        }
+        PeerEvent::Package(package) => {
+            package.verify().is_ok() && resolver.package(package).authorized
+        }
+        PeerEvent::Authority(record) => {
+            authority_roots.contains(&record.signer) && record.verify().is_ok()
+        }
+        PeerEvent::Access(record) => {
+            record.verify().is_ok() && resolver.access(&record.signer).authorized
+        }
+        PeerEvent::Transport(binding) => binding.validate_for(&envelope.origin).is_ok(),
+        PeerEvent::WireGuard(binding) => binding.validate_for(&envelope.origin).is_ok(),
+        PeerEvent::Hardware(snapshot) => snapshot.validate_for(&envelope.origin).is_ok(),
+        PeerEvent::SecurityPosture(posture) => {
+            posture.node_id == envelope.origin && posture.findings.len() <= MAX_SECURITY_FINDINGS
+        }
+        PeerEvent::SecurityEvents(events) => {
+            events.node_id == envelope.origin && events.events.len() <= MAX_SECURITY_EVENTS
+        }
+        _ => true,
+    }
+}
+
 fn event_key(envelope: &SignedEnvelope) -> String {
     match &envelope.event {
         PeerEvent::Hello(_) => format!("{}:hello", envelope.origin),
@@ -1315,6 +1492,14 @@ fn event_key(envelope: &SignedEnvelope) -> String {
             "{}:package:{}:{}:{}",
             envelope.origin, package.name, package.channel, package.target
         ),
+        PeerEvent::Authority(record) => match &record.statement {
+            AuthorityStatement::Delegate { delegation_id, .. } => {
+                format!("authority:{}:delegate:{delegation_id}", record.signer)
+            }
+            AuthorityStatement::Revoke { revocation_id, .. } => {
+                format!("authority:{}:revoke:{revocation_id}", record.signer)
+            }
+        },
         PeerEvent::Access(record) => match &record.statement {
             AccessStatement::Grant { grant_id, .. } => {
                 format!("access:{}:grant:{grant_id}", record.signer)
@@ -1341,6 +1526,7 @@ fn event_origin_matches(envelope: &SignedEnvelope) -> bool {
         | PeerEvent::Topology(_)
         | PeerEvent::Release(_)
         | PeerEvent::Package(_)
+        | PeerEvent::Authority(_)
         | PeerEvent::Access(_) => true,
         PeerEvent::Transport(binding) => binding.validate_for(&envelope.origin).is_ok(),
         PeerEvent::WireGuard(binding) => binding.validate_for(&envelope.origin).is_ok(),
@@ -1494,6 +1680,40 @@ fn validate_access_statement(statement: &AccessStatement) -> Result<(), AnyError
             }
             if reason.is_empty() || reason.len() > 512 || reason.contains(['\n', '\r']) {
                 return Err("revocation reason must be 1-512 characters on one line".into());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_authority_statement(statement: &AuthorityStatement) -> Result<(), AnyError> {
+    match statement {
+        AuthorityStatement::Delegate {
+            delegation_id,
+            subject,
+            capabilities,
+            not_before,
+            not_after,
+        } => {
+            validate_release_label("delegation_id", delegation_id)?;
+            decode_hex(subject).map_err(|error| format!("invalid authority subject: {error}"))?;
+            if capabilities.is_empty() {
+                return Err("delegation must contain at least one capability".into());
+            }
+            if not_after <= not_before {
+                return Err("delegation not_after must be later than not_before".into());
+            }
+        }
+        AuthorityStatement::Revoke {
+            revocation_id,
+            delegation_id,
+            reason,
+            ..
+        } => {
+            validate_release_label("revocation_id", revocation_id)?;
+            validate_release_label("delegation_id", delegation_id)?;
+            if reason.is_empty() || reason.len() > 512 {
+                return Err("revocation reason must contain 1-512 characters".into());
             }
         }
     }

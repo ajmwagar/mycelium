@@ -1,0 +1,10 @@
+{
+  "kind": "delegate",
+  "delegation_id": "home-access-authority-2026",
+  "subject": "REPLACE_WITH_64_CHARACTER_ED25519_PUBLIC_KEY_HEX",
+  "capabilities": [
+    { "action": "access_publish" }
+  ],
+  "not_before": 1790899200,
+  "not_after": 1822435200
+}

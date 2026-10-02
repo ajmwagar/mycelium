@@ -2064,6 +2064,71 @@ impl Daemon {
                     .map_err(|error| MyceliumError::Validation(error.to_string()))?;
                 to_value(record).map_err(json_err)
             }
+            Request::AuthorityList => {
+                to_value(self.mesh.authority_records().await).map_err(json_err)
+            }
+            Request::AuthorityPublish {
+                statement,
+                signing_key,
+                write,
+                dry_run,
+            } => {
+                if dry_run {
+                    return to_value(serde_json::json!({
+                        "dry_run": true,
+                        "statement": statement,
+                        "signing_key": signing_key,
+                    }))
+                    .map_err(json_err);
+                }
+                if !write {
+                    return Err(MyceliumError::WritesNotPermitted(
+                        "authority publication requires --write".into(),
+                    ));
+                }
+                let record = self
+                    .mesh
+                    .publish_authority(
+                        std::path::Path::new(&statement),
+                        std::path::Path::new(&signing_key),
+                    )
+                    .await
+                    .map_err(|error| MyceliumError::Validation(error.to_string()))?;
+                to_value(record).map_err(json_err)
+            }
+            Request::AuthorityExplain {
+                action,
+                signer,
+                package,
+                channel,
+                target,
+            } => {
+                let decision = match action.as_str() {
+                    "access.publish" => self.mesh.authorize_access(&signer).await,
+                    "release.publish" => self.mesh.authorize_release(&signer).await,
+                    "package.promote" => {
+                        let package = package.ok_or_else(|| {
+                            MyceliumError::Validation(
+                                "package.promote explanation requires --name".into(),
+                            )
+                        })?;
+                        self.mesh
+                            .authorize_package_fields(
+                                &signer,
+                                &package,
+                                channel.as_deref().unwrap_or("stable"),
+                                target.as_deref().unwrap_or(""),
+                            )
+                            .await
+                    }
+                    _ => {
+                        return Err(MyceliumError::Validation(format!(
+                            "unknown authority action `{action}`"
+                        )))
+                    }
+                };
+                to_value(decision).map_err(json_err)
+            }
             Request::TopologyAnnotate {
                 selector,
                 name,

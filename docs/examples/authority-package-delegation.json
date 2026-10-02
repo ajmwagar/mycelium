@@ -1,0 +1,15 @@
+{
+  "kind": "delegate",
+  "delegation_id": "fabd-stable-packages-2026",
+  "subject": "REPLACE_WITH_64_CHARACTER_ED25519_PUBLIC_KEY_HEX",
+  "capabilities": [
+    {
+      "action": "package_promote",
+      "packages": ["unibus", "isochrone", "umie", "yggdrasil"],
+      "channels": ["stable"],
+      "targets": []
+    }
+  ],
+  "not_before": 1790899200,
+  "not_after": 1822435200
+}

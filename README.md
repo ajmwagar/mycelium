@@ -381,6 +381,11 @@ mycelium access publish --statement revocation.json \
 mycelium access list
 ```
 
+For new deployments, use the shared delegated authority model instead of
+separate feature roots. `MYCELIUM_AUTHORITY_KEYS` identifies offline root public
+keys which can delegate access publication, Mycelium release publication, or
+constrained package promotion. See [Shared authority](docs/authority.md).
+
 OIDC-backed grants bind issuer, subject, and audience to Unix principals and
 optionally permit a valid JWT holder to certify a presented SSH key. The
 JWT must be valid during exchange. The resulting SSH certificate is an

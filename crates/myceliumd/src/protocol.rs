@@ -310,6 +310,25 @@ pub enum Request {
         #[serde(default)]
         dry_run: bool,
     },
+    AuthorityList,
+    AuthorityPublish {
+        statement: String,
+        signing_key: String,
+        #[serde(default)]
+        write: bool,
+        #[serde(default)]
+        dry_run: bool,
+    },
+    AuthorityExplain {
+        action: String,
+        signer: String,
+        #[serde(default)]
+        package: Option<String>,
+        #[serde(default)]
+        channel: Option<String>,
+        #[serde(default)]
+        target: Option<String>,
+    },
     /// Set durable human knowledge on exactly one discovered node.
     TopologyAnnotate {
         selector: String,

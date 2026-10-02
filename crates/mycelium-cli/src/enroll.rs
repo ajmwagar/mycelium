@@ -175,12 +175,13 @@ pub fn issue(ca: &Path, request: Issue<'_>) -> Result<Vec<String>, ClientError> 
     executable(&request.output.join("mycelium"))?;
     let release_keys = std::env::var("MYCELIUM_RELEASE_KEYS").unwrap_or_default();
     let access_keys = std::env::var("MYCELIUM_ACCESS_KEYS").unwrap_or_default();
+    let authority_keys = std::env::var("MYCELIUM_AUTHORITY_KEYS").unwrap_or_default();
     let peer_list = request.peers.join(",");
     std::fs::write(
         request.output.join("node.env"),
         format!(
-            "MYCELIUM_SITE={}\nMYCELIUM_PEER_LISTEN=0.0.0.0:7443\nMYCELIUM_PEERS={}\nMYCELIUM_PEER_CA=pki/ca.pem\nMYCELIUM_PEER_CERT=pki/node.pem\nMYCELIUM_PEER_KEY=pki/node-key.pem\nMYCELIUM_RELEASE_KEYS={}\nMYCELIUM_ACCESS_KEYS={}\nMYCELIUM_UPDATE_CHANNEL=canary\n",
-            request.site, peer_list, release_keys, access_keys
+            "MYCELIUM_SITE={}\nMYCELIUM_PEER_LISTEN=0.0.0.0:7443\nMYCELIUM_PEERS={}\nMYCELIUM_PEER_CA=pki/ca.pem\nMYCELIUM_PEER_CERT=pki/node.pem\nMYCELIUM_PEER_KEY=pki/node-key.pem\nMYCELIUM_AUTHORITY_KEYS={}\nMYCELIUM_RELEASE_KEYS={}\nMYCELIUM_ACCESS_KEYS={}\nMYCELIUM_UPDATE_CHANNEL=canary\n",
+            request.site, peer_list, authority_keys, release_keys, access_keys
         ),
     )
     .map_err(ClientError::Io)?;
@@ -201,7 +202,13 @@ pub fn issue(ca: &Path, request: Issue<'_>) -> Result<Vec<String>, ClientError> 
         .map_err(ClientError::Io)?;
     std::fs::write(
         request.output.join("dev.fpl.mycelium.plist"),
-        launchd_plist(request.site, &peer_list, &release_keys, &access_keys),
+        launchd_plist(
+            request.site,
+            &peer_list,
+            &authority_keys,
+            &release_keys,
+            &access_keys,
+        ),
     )
     .map_err(ClientError::Io)?;
     let _ = std::fs::remove_file(csr);
@@ -262,10 +269,18 @@ pub fn install(bundle: &Path, home: &Path) -> Result<Vec<String>, ClientError> {
 
     let release_keys = std::env::var("MYCELIUM_RELEASE_KEYS").unwrap_or_default();
     let access_keys = std::env::var("MYCELIUM_ACCESS_KEYS").unwrap_or_default();
+    let authority_keys = std::env::var("MYCELIUM_AUTHORITY_KEYS").unwrap_or_default();
     let peers = peers.join(",");
     std::fs::write(
         home.join("node.env"),
-        resolved_env(home, site, &peers, &release_keys, &access_keys)?,
+        resolved_env(
+            home,
+            site,
+            &peers,
+            &authority_keys,
+            &release_keys,
+            &access_keys,
+        )?,
     )
     .map_err(ClientError::Io)?;
     let service = if cfg!(target_os = "macos") {
@@ -273,7 +288,14 @@ pub fn install(bundle: &Path, home: &Path) -> Result<Vec<String>, ClientError> {
         std::fs::create_dir_all(path.parent().unwrap()).map_err(ClientError::Io)?;
         std::fs::write(
             &path,
-            resolved_launchd(home, site, &peers, &release_keys, &access_keys)?,
+            resolved_launchd(
+                home,
+                site,
+                &peers,
+                &authority_keys,
+                &release_keys,
+                &access_keys,
+            )?,
         )
         .map_err(ClientError::Io)?;
         path
@@ -321,14 +343,29 @@ pub(crate) fn install_peer_material(
         .map_err(|error| format!("install mesh CA: {error}"))?;
     let release_keys = std::env::var("MYCELIUM_RELEASE_KEYS").unwrap_or_default();
     let access_keys = std::env::var("MYCELIUM_ACCESS_KEYS").unwrap_or_default();
+    let authority_keys = std::env::var("MYCELIUM_AUTHORITY_KEYS").unwrap_or_default();
     let peers = peers.join(",");
     std::fs::write(
         home.join("node.env"),
-        resolved_env(home, site, &peers, &release_keys, &access_keys)
-            .map_err(|error| error.to_string())?,
+        resolved_env(
+            home,
+            site,
+            &peers,
+            &authority_keys,
+            &release_keys,
+            &access_keys,
+        )
+        .map_err(|error| error.to_string())?,
     )
     .map_err(|error| format!("write node environment: {error}"))?;
-    let service = write_peer_service(home, site, &peers, &release_keys, &access_keys)?;
+    let service = write_peer_service(
+        home,
+        site,
+        &peers,
+        &authority_keys,
+        &release_keys,
+        &access_keys,
+    )?;
     start_peer_service(&service, home)?;
     Ok(vec![
         format!("installed peer identity under {}", home.display()),
@@ -378,11 +415,12 @@ pub(crate) fn repair_peer_service(
     let peers = setting("MYCELIUM_PEERS")?;
     let release_keys = setting("MYCELIUM_RELEASE_KEYS").unwrap_or("");
     let access_keys = setting("MYCELIUM_ACCESS_KEYS").unwrap_or("");
+    let authority_keys = setting("MYCELIUM_AUTHORITY_KEYS").unwrap_or("");
     validate_label("site", site).map_err(|error| error.to_string())?;
     for peer in peers.split(',').filter(|peer| !peer.is_empty()) {
         validate_peer(peer).map_err(|error| error.to_string())?;
     }
-    let service = write_peer_service(home, site, peers, release_keys, access_keys)?;
+    let service = write_peer_service(home, site, peers, authority_keys, release_keys, access_keys)?;
     start_peer_service(&service, home)?;
     Ok(vec![format!(
         "repaired and verified peer service from {}",
@@ -415,6 +453,7 @@ fn write_peer_service(
     home: &Path,
     site: &str,
     peers: &str,
+    authority_keys: &str,
     release_keys: &str,
     access_keys: &str,
 ) -> Result<PathBuf, String> {
@@ -426,7 +465,7 @@ fn write_peer_service(
             .map_err(|error| format!("create launch agent directory: {error}"))?;
         std::fs::write(
             &path,
-            resolved_launchd(home, site, peers, release_keys, access_keys)
+            resolved_launchd(home, site, peers, authority_keys, release_keys, access_keys)
                 .map_err(|error| error.to_string())?,
         )
         .map_err(|error| format!("write launch agent: {error}"))?;
@@ -520,11 +559,12 @@ fn resolved_env(
     home: &Path,
     site: &str,
     peers: &str,
+    authority_keys: &str,
     release_keys: &str,
     access_keys: &str,
 ) -> Result<String, ClientError> {
     let home = display(home)?;
-    Ok(format!("MYCELIUM_HOME={home}\nMYCELIUM_SITE={site}\nMYCELIUM_PEER_LISTEN=0.0.0.0:7443\nMYCELIUM_PEERS={peers}\nMYCELIUM_PEER_CA={home}/pki/ca.pem\nMYCELIUM_PEER_CERT={home}/pki/node.pem\nMYCELIUM_PEER_KEY={home}/pki/node-key.pem\nMYCELIUM_RELEASE_KEYS={release_keys}\nMYCELIUM_ACCESS_KEYS={access_keys}\nMYCELIUM_UPDATE_CHANNEL=canary\n"))
+    Ok(format!("MYCELIUM_HOME={home}\nMYCELIUM_SITE={site}\nMYCELIUM_PEER_LISTEN=0.0.0.0:7443\nMYCELIUM_PEERS={peers}\nMYCELIUM_PEER_CA={home}/pki/ca.pem\nMYCELIUM_PEER_CERT={home}/pki/node.pem\nMYCELIUM_PEER_KEY={home}/pki/node-key.pem\nMYCELIUM_AUTHORITY_KEYS={authority_keys}\nMYCELIUM_RELEASE_KEYS={release_keys}\nMYCELIUM_ACCESS_KEYS={access_keys}\nMYCELIUM_UPDATE_CHANNEL=canary\n"))
 }
 
 fn resolved_systemd(home: &Path) -> Result<String, ClientError> {
@@ -536,11 +576,12 @@ fn resolved_launchd(
     home: &Path,
     site: &str,
     peers: &str,
+    authority_keys: &str,
     release_keys: &str,
     access_keys: &str,
 ) -> Result<String, ClientError> {
     let home = xml(&display(home)?);
-    Ok(format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n<key>Label</key><string>dev.fpl.mycelium</string>\n<key>ProgramArguments</key><array><string>{home}/bin/mycelium</string><string>_serve</string></array>\n<key>EnvironmentVariables</key><dict>\n<key>MYCELIUM_HOME</key><string>{home}</string>\n<key>MYCELIUM_SITE</key><string>{}</string>\n<key>MYCELIUM_PEER_LISTEN</key><string>0.0.0.0:7443</string>\n<key>MYCELIUM_PEERS</key><string>{}</string>\n<key>MYCELIUM_PEER_CA</key><string>{home}/pki/ca.pem</string>\n<key>MYCELIUM_PEER_CERT</key><string>{home}/pki/node.pem</string>\n<key>MYCELIUM_PEER_KEY</key><string>{home}/pki/node-key.pem</string>\n<key>MYCELIUM_RELEASE_KEYS</key><string>{}</string>\n<key>MYCELIUM_ACCESS_KEYS</key><string>{}</string>\n<key>MYCELIUM_UPDATE_CHANNEL</key><string>canary</string>\n</dict><key>RunAtLoad</key><true/><key>KeepAlive</key><true/>\n<key>StandardOutPath</key><string>{home}/daemon.log</string>\n<key>StandardErrorPath</key><string>{home}/daemon.log</string>\n</dict></plist>\n", xml(site), xml(peers), xml(release_keys), xml(access_keys)))
+    Ok(format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n<key>Label</key><string>dev.fpl.mycelium</string>\n<key>ProgramArguments</key><array><string>{home}/bin/mycelium</string><string>_serve</string></array>\n<key>EnvironmentVariables</key><dict>\n<key>MYCELIUM_HOME</key><string>{home}</string>\n<key>MYCELIUM_SITE</key><string>{}</string>\n<key>MYCELIUM_PEER_LISTEN</key><string>0.0.0.0:7443</string>\n<key>MYCELIUM_PEERS</key><string>{}</string>\n<key>MYCELIUM_PEER_CA</key><string>{home}/pki/ca.pem</string>\n<key>MYCELIUM_PEER_CERT</key><string>{home}/pki/node.pem</string>\n<key>MYCELIUM_PEER_KEY</key><string>{home}/pki/node-key.pem</string>\n<key>MYCELIUM_AUTHORITY_KEYS</key><string>{}</string>\n<key>MYCELIUM_RELEASE_KEYS</key><string>{}</string>\n<key>MYCELIUM_ACCESS_KEYS</key><string>{}</string>\n<key>MYCELIUM_UPDATE_CHANNEL</key><string>canary</string>\n</dict><key>RunAtLoad</key><true/><key>KeepAlive</key><true/>\n<key>StandardOutPath</key><string>{home}/daemon.log</string>\n<key>StandardErrorPath</key><string>{home}/daemon.log</string>\n</dict></plist>\n", xml(site), xml(peers), xml(authority_keys), xml(release_keys), xml(access_keys)))
 }
 
 fn validate_peer(peer: &str) -> Result<(), ClientError> {
@@ -584,9 +625,15 @@ fn systemd_unit() -> &'static str {
     "[Unit]\nDescription=Mycelium peer\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nExecStart=%h/.mycelium/bin/mycelium _serve\nEnvironment=MYCELIUM_HOME=%h/.mycelium\nEnvironmentFile=%h/.mycelium/node.env\nRestart=always\nRestartSec=5\nNoNewPrivileges=true\nPrivateTmp=true\n\n[Install]\nWantedBy=default.target\n"
 }
 
-fn launchd_plist(site: &str, peers: &str, release_keys: &str, access_keys: &str) -> String {
+fn launchd_plist(
+    site: &str,
+    peers: &str,
+    authority_keys: &str,
+    release_keys: &str,
+    access_keys: &str,
+) -> String {
     format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n<key>Label</key><string>dev.fpl.mycelium</string>\n<key>ProgramArguments</key><array><string>MYCELIUM_HOME/bin/mycelium</string><string>_serve</string></array>\n<key>EnvironmentVariables</key><dict>\n<key>MYCELIUM_HOME</key><string>MYCELIUM_HOME</string>\n<key>MYCELIUM_SITE</key><string>{site}</string>\n<key>MYCELIUM_PEER_LISTEN</key><string>0.0.0.0:7443</string>\n<key>MYCELIUM_PEERS</key><string>{peers}</string>\n<key>MYCELIUM_PEER_CA</key><string>MYCELIUM_HOME/pki/ca.pem</string>\n<key>MYCELIUM_PEER_CERT</key><string>MYCELIUM_HOME/pki/node.pem</string>\n<key>MYCELIUM_PEER_KEY</key><string>MYCELIUM_HOME/pki/node-key.pem</string>\n<key>MYCELIUM_RELEASE_KEYS</key><string>{release_keys}</string>\n<key>MYCELIUM_ACCESS_KEYS</key><string>{access_keys}</string>\n<key>MYCELIUM_UPDATE_CHANNEL</key><string>canary</string>\n</dict><key>RunAtLoad</key><true/><key>KeepAlive</key><true/>\n<key>StandardOutPath</key><string>MYCELIUM_HOME/daemon.log</string>\n<key>StandardErrorPath</key><string>MYCELIUM_HOME/daemon.log</string>\n</dict></plist>\n"
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n<key>Label</key><string>dev.fpl.mycelium</string>\n<key>ProgramArguments</key><array><string>MYCELIUM_HOME/bin/mycelium</string><string>_serve</string></array>\n<key>EnvironmentVariables</key><dict>\n<key>MYCELIUM_HOME</key><string>MYCELIUM_HOME</string>\n<key>MYCELIUM_SITE</key><string>{site}</string>\n<key>MYCELIUM_PEER_LISTEN</key><string>0.0.0.0:7443</string>\n<key>MYCELIUM_PEERS</key><string>{peers}</string>\n<key>MYCELIUM_PEER_CA</key><string>MYCELIUM_HOME/pki/ca.pem</string>\n<key>MYCELIUM_PEER_CERT</key><string>MYCELIUM_HOME/pki/node.pem</string>\n<key>MYCELIUM_PEER_KEY</key><string>MYCELIUM_HOME/pki/node-key.pem</string>\n<key>MYCELIUM_AUTHORITY_KEYS</key><string>{authority_keys}</string>\n<key>MYCELIUM_RELEASE_KEYS</key><string>{release_keys}</string>\n<key>MYCELIUM_ACCESS_KEYS</key><string>{access_keys}</string>\n<key>MYCELIUM_UPDATE_CHANNEL</key><string>canary</string>\n</dict><key>RunAtLoad</key><true/><key>KeepAlive</key><true/>\n<key>StandardOutPath</key><string>MYCELIUM_HOME/daemon.log</string>\n<key>StandardErrorPath</key><string>MYCELIUM_HOME/daemon.log</string>\n</dict></plist>\n"
     )
 }
 

@@ -99,6 +99,7 @@ pub enum PeerEvent {
     Topology(TopologySnapshot),
     Release(ReleaseManifest),
     Package(PackageManifest),
+    Authority(AuthorityRecord),
     Access(AccessRecord),
     Transport(TransportCredentialBinding),
     WireGuard(WireGuardBinding),
@@ -118,6 +119,7 @@ enum KnownPeerEvent {
     Topology(TopologySnapshot),
     Release(ReleaseManifest),
     Package(PackageManifest),
+    Authority(AuthorityRecord),
     Access(AccessRecord),
     Transport(TransportCredentialBinding),
     WireGuard(WireGuardBinding),
@@ -140,6 +142,7 @@ impl<'de> Deserialize<'de> for PeerEvent {
                     | "topology"
                     | "release"
                     | "package"
+                    | "authority"
                     | "access"
                     | "transport"
                     | "wire_guard"
@@ -159,6 +162,7 @@ impl<'de> Deserialize<'de> for PeerEvent {
             KnownPeerEvent::Topology(value) => Self::Topology(value),
             KnownPeerEvent::Release(value) => Self::Release(value),
             KnownPeerEvent::Package(value) => Self::Package(value),
+            KnownPeerEvent::Authority(value) => Self::Authority(value),
             KnownPeerEvent::Access(value) => Self::Access(value),
             KnownPeerEvent::Transport(value) => Self::Transport(value),
             KnownPeerEvent::WireGuard(value) => Self::WireGuard(value),
@@ -706,6 +710,112 @@ impl PackageManifest {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum AuthorityCapability {
+    AccessPublish,
+    ReleasePublish,
+    PackagePromote {
+        #[serde(default)]
+        packages: BTreeSet<String>,
+        #[serde(default)]
+        channels: BTreeSet<String>,
+        #[serde(default)]
+        targets: BTreeSet<String>,
+    },
+}
+
+impl AuthorityCapability {
+    pub fn permits_package(&self, package: &PackageManifest) -> bool {
+        self.permits_package_fields(&package.name, &package.channel, &package.target)
+    }
+
+    pub fn permits_package_fields(&self, name: &str, channel: &str, target: &str) -> bool {
+        match self {
+            Self::PackagePromote {
+                packages,
+                channels,
+                targets,
+            } => {
+                (packages.is_empty() || packages.contains(name))
+                    && (channels.is_empty() || channels.contains(channel))
+                    && (targets.is_empty() || targets.contains(target))
+            }
+            _ => false,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AuthorityStatement {
+    Delegate {
+        delegation_id: String,
+        subject: String,
+        capabilities: Vec<AuthorityCapability>,
+        not_before: u64,
+        not_after: u64,
+    },
+    Revoke {
+        revocation_id: String,
+        delegation_id: String,
+        revoked_at: u64,
+        reason: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthorityRecord {
+    pub protocol_version: u16,
+    pub statement: AuthorityStatement,
+    pub signer: String,
+    pub signature: String,
+}
+
+#[derive(Serialize)]
+struct UnsignedAuthority<'a> {
+    protocol_version: u16,
+    statement: &'a AuthorityStatement,
+    signer: &'a str,
+}
+
+impl AuthorityRecord {
+    pub fn sign(
+        key: &SigningKey,
+        statement: AuthorityStatement,
+    ) -> Result<Self, serde_json::Error> {
+        let signer = encode_hex(key.verifying_key().as_bytes());
+        let bytes = serde_json::to_vec(&UnsignedAuthority {
+            protocol_version: PROTOCOL_VERSION,
+            statement: &statement,
+            signer: &signer,
+        })?;
+        Ok(Self {
+            protocol_version: PROTOCOL_VERSION,
+            statement,
+            signer,
+            signature: encode_hex(&key.sign(&bytes).to_bytes()),
+        })
+    }
+
+    pub fn verify(&self) -> Result<(), String> {
+        if self.protocol_version != PROTOCOL_VERSION {
+            return Err(format!("unsupported protocol {}", self.protocol_version));
+        }
+        let key = VerifyingKey::from_bytes(&decode_array::<32>(&self.signer)?)
+            .map_err(|error| error.to_string())?;
+        let signature = Signature::from_bytes(&decode_array::<64>(&self.signature)?);
+        let bytes = serde_json::to_vec(&UnsignedAuthority {
+            protocol_version: self.protocol_version,
+            statement: &self.statement,
+            signer: &self.signer,
+        })
+        .map_err(|error| error.to_string())?;
+        key.verify(&bytes, &signature)
+            .map_err(|error| error.to_string())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SignedEnvelope {
     pub origin: String,
@@ -1176,6 +1286,50 @@ mod tests {
         };
         assert!(matching.revokes(&grant));
         assert!(!wrong_serial.revokes(&grant));
+    }
+
+    #[test]
+    fn authority_signature_covers_capability_constraints() {
+        let key = SigningKey::from_bytes(&[17; 32]);
+        let mut record = AuthorityRecord::sign(
+            &key,
+            AuthorityStatement::Delegate {
+                delegation_id: "fabd".into(),
+                subject: "11".repeat(32),
+                capabilities: vec![AuthorityCapability::PackagePromote {
+                    packages: BTreeSet::from(["unibus".into()]),
+                    channels: BTreeSet::from(["stable".into()]),
+                    targets: BTreeSet::new(),
+                }],
+                not_before: 10,
+                not_after: 20,
+            },
+        )
+        .unwrap();
+        record.verify().unwrap();
+        if let AuthorityStatement::Delegate { capabilities, .. } = &mut record.statement {
+            capabilities.push(AuthorityCapability::AccessPublish);
+        }
+        assert!(record.verify().is_err());
+    }
+
+    #[test]
+    fn documented_authority_statements_match_the_protocol() {
+        let access: AuthorityStatement = serde_json::from_str(include_str!(
+            "../../../docs/examples/authority-access-delegation.json"
+        ))
+        .unwrap();
+        let package: AuthorityStatement = serde_json::from_str(include_str!(
+            "../../../docs/examples/authority-package-delegation.json"
+        ))
+        .unwrap();
+        let revocation: AuthorityStatement = serde_json::from_str(include_str!(
+            "../../../docs/examples/authority-revocation.json"
+        ))
+        .unwrap();
+        assert!(matches!(access, AuthorityStatement::Delegate { .. }));
+        assert!(matches!(package, AuthorityStatement::Delegate { .. }));
+        assert!(matches!(revocation, AuthorityStatement::Revoke { .. }));
     }
 
     #[test]

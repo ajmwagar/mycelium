@@ -135,6 +135,11 @@ usage:
   mycelium access list [--json]
   mycelium access keygen --path PATH --write [--json]
   mycelium access publish --statement PATH --signing-key PATH --write [--dry-run] [--json]
+  mycelium authority list [--json]
+  mycelium authority delegate --statement PATH --signing-key PATH --write [--dry-run] [--json]
+  mycelium authority revoke --statement PATH --signing-key PATH --write [--dry-run] [--json]
+  mycelium authority explain access.publish|release.publish SIGNER [--json]
+  mycelium authority explain package.promote SIGNER --name PACKAGE [--channel CHANNEL] [--target TRIPLE] [--json]
   mycelium access ssh ca-init --path PRIVATE-KEY --write [--json]
   mycelium access ssh issue --grant ID --public-key PATH --ca PRIVATE-KEY --path CERT --ttl 8h --write [--json]
   mycelium access ssh krl --ca-public PATH --path KRL --write [--json]
@@ -601,6 +606,7 @@ async fn run(cmd: &str, args: &[String]) -> Result<Vec<String>, ClientError> {
         "packages" => packages(args).await,
         "software" => software(args).await,
         "access" => access(args).await,
+        "authority" => authority(args).await,
         "update" => update(args).await,
         "wireguard" => wireguard_command(args).await,
         "egress" => egress_command(args).await,
@@ -913,6 +919,51 @@ async fn access(args: &[String]) -> Result<Vec<String>, ClientError> {
         ));
     }
     Ok(lines)
+}
+
+async fn authority(args: &[String]) -> Result<Vec<String>, ClientError> {
+    let flags = parse_flags(args);
+    let action = flags.rest.first().map(String::as_str).unwrap_or("list");
+    let request = match action {
+        "list" => Request::AuthorityList,
+        "delegate" | "revoke" | "publish" => Request::AuthorityPublish {
+            statement: flags
+                .statement
+                .ok_or(err_usage("authority publication needs --statement"))?,
+            signing_key: flags
+                .signing_key
+                .ok_or(err_usage("authority publication needs --signing-key"))?,
+            write: flags.write,
+            dry_run: flags.dry_run,
+        },
+        "explain" => {
+            let operation = flags
+                .rest
+                .get(1)
+                .ok_or(err_usage("authority explain needs an action"))?;
+            let signer = flags
+                .rest
+                .get(2)
+                .ok_or(err_usage("authority explain needs a signer"))?;
+            Request::AuthorityExplain {
+                action: operation.clone(),
+                signer: signer.clone(),
+                package: flags.name,
+                channel: flags.channel,
+                target: flags.targets.first().cloned(),
+            }
+        }
+        other => return Err(err_usage(&format!("unknown authority action `{other}`"))),
+    };
+    let mut client = connect().await?;
+    let value = client.call(&request).await?;
+    if flags.json {
+        Ok(vec![value.to_string()])
+    } else {
+        Ok(vec![
+            serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string())
+        ])
+    }
 }
 
 fn access_error(message: String) -> ClientError {
