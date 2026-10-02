@@ -803,6 +803,16 @@ ARP, DHCP, mDNS, switch, and controller observations:
 SSH planning prefers a correlated RFC1918 address, then another reachable
 address, and only falls back to the hostname when no address evidence exists.
 
+WireGuard site-link plans treat routed LAN prefixes as explicit exports. They
+reject overlapping prefixes, preserve source addresses by default, and report
+whether the planned path is direct, requires NAT traversal, or needs a relay.
+One stable public endpoint is sufficient for a direct WireGuard relationship;
+gateways behind NAT can initiate toward it without exposing their own listener.
+Source NAT is an explicit compatibility choice (`--left-translation` or
+`--right-translation source-nat`), never inferred from discovery. Prefix-based
+1:1 translation remains a future intent because it requires an explicit mapped
+prefix rather than a boolean switch.
+
 Each peer periodically publishes a signed, bounded hardware graph covering
 PCIe, USB, storage, and accelerators. Stable identities derive from the peer
 identity plus the platform locator; raw device serial numbers are never

@@ -160,7 +160,7 @@ usage:
   mycelium update policy disable --write
   mycelium fleet status [--site SITE] [--platform linux|darwin] [--json]
   mycelium fleet exec [--site SITE] [--platform linux|darwin] [--user USER] -- COMMAND...
-  mycelium wireguard plan LEFT RIGHT [--left-subnet CIDR...] [--right-subnet CIDR...]
+  mycelium wireguard plan LEFT RIGHT [--left-subnet CIDR...] [--right-subnet CIDR...] [--left-translation none|source-nat] [--right-translation none|source-nat]
     [--left-endpoint HOST:PORT] [--right-endpoint HOST:PORT]
     [--left-key PUBLIC-KEY] [--right-key PUBLIC-KEY] [--interface NAME] [--json]
   mycelium wireguard init --subnet CIDR... [--endpoint HOST:PORT]
@@ -1696,6 +1696,15 @@ async fn wireguard_command(args: &[String]) -> Result<Vec<String>, ClientError> 
             .collect()
     };
     let value = |flag: &str| values(flag).into_iter().last();
+    let translation = |flag: &str| -> Result<wireguard::PrefixTranslation, ClientError> {
+        match value(flag).as_deref().unwrap_or("none") {
+            "none" => Ok(wireguard::PrefixTranslation::None),
+            "source-nat" => Ok(wireguard::PrefixTranslation::SourceNat),
+            other => Err(err_usage(&format!(
+                "{flag} must be `none` or `source-nat`, got `{other}`"
+            ))),
+        }
+    };
     let prefixes = |flag: &str| -> Result<Vec<wireguard::Prefix>, ClientError> {
         values(flag)
             .iter()
@@ -1770,6 +1779,7 @@ async fn wireguard_command(args: &[String]) -> Result<Vec<String>, ClientError> 
             endpoint: value("--left-endpoint")
                 .or_else(|| observed_string(left_observed, "endpoint")),
             advertised_prefixes: left_prefixes,
+            translation: translation("--left-translation")?,
         },
         wireguard::GatewayBinding {
             identity: right_identity,
@@ -1778,6 +1788,7 @@ async fn wireguard_command(args: &[String]) -> Result<Vec<String>, ClientError> 
             endpoint: value("--right-endpoint")
                 .or_else(|| observed_string(right_observed, "endpoint")),
             advertised_prefixes: right_prefixes,
+            translation: translation("--right-translation")?,
         },
     )
     .map_err(|error| err_usage(&error))?;
@@ -1798,6 +1809,20 @@ async fn wireguard_command(args: &[String]) -> Result<Vec<String>, ClientError> 
         "  status: {}",
         if plan.ready { "ready" } else { "blocked" }
     ));
+    lines.push(format!("  path: {:?}", plan.path).to_lowercase());
+    for export in &plan.prefix_exports {
+        lines.push(
+            format!(
+                "  export: {} {}/{} via {} translation={:?}",
+                export.site,
+                export.prefix.address,
+                export.prefix.length,
+                export.gateway,
+                export.translation
+            )
+            .to_lowercase(),
+        );
+    }
     for blocker in &plan.blockers {
         lines.push(format!("  blocker: {blocker}"));
     }

@@ -26,6 +26,30 @@ pub(crate) struct GatewayBinding {
     pub public_key: Option<String>,
     pub endpoint: Option<String>,
     pub advertised_prefixes: Vec<Prefix>,
+    pub translation: PrefixTranslation,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SitePathKind {
+    Direct,
+    NatTraversal,
+    RelayRequired,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum PrefixTranslation {
+    None,
+    SourceNat,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub(crate) struct PrefixExport {
+    pub site: String,
+    pub gateway: String,
+    pub prefix: Prefix,
+    pub translation: PrefixTranslation,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -50,6 +74,8 @@ pub(crate) struct LinkPlan {
     pub right: GatewayPlan,
     pub ready: bool,
     pub blockers: Vec<String>,
+    pub path: SitePathKind,
+    pub prefix_exports: Vec<PrefixExport>,
     /// The exact overlay observations reconciliation will insert into the
     /// shared topology once both endpoints are active.
     pub topology_bindings: Vec<Observation>,
@@ -91,13 +117,36 @@ pub(crate) fn plan_link(
                 binding.identity.hostname
             ));
         }
-        if binding.endpoint.is_none() {
-            blockers.push(format!(
-                "{} has no observed public endpoint",
-                binding.identity.hostname
-            ));
-        }
     }
+    let endpoint_count = [&left, &right]
+        .into_iter()
+        .filter(|binding| binding.endpoint.is_some())
+        .count();
+    let path = match endpoint_count {
+        2 => SitePathKind::Direct,
+        1 => SitePathKind::NatTraversal,
+        _ => SitePathKind::RelayRequired,
+    };
+    if endpoint_count == 0 {
+        blockers
+            .push("neither gateway has a stable endpoint; rendezvous or relay is required".into());
+    }
+    let prefix_exports = left
+        .advertised_prefixes
+        .iter()
+        .map(|prefix| PrefixExport {
+            site: left.identity.site.clone(),
+            gateway: left.identity.node_id.clone(),
+            prefix: prefix.clone(),
+            translation: left.translation.clone(),
+        })
+        .chain(right.advertised_prefixes.iter().map(|prefix| PrefixExport {
+            site: right.identity.site.clone(),
+            gateway: right.identity.node_id.clone(),
+            prefix: prefix.clone(),
+            translation: right.translation.clone(),
+        }))
+        .collect();
     let topology_bindings = vec![
         topology_binding(&interface, &left),
         topology_binding(&interface, &right),
@@ -128,6 +177,8 @@ pub(crate) fn plan_link(
         right: right_plan,
         ready: blockers.is_empty(),
         blockers,
+        path,
+        prefix_exports,
         topology_bindings,
     })
 }
@@ -280,6 +331,7 @@ mod tests {
             public_key: None,
             endpoint: None,
             advertised_prefixes: vec![parse_prefix(prefix).unwrap()],
+            translation: PrefixTranslation::None,
         }
     }
 
@@ -307,7 +359,8 @@ mod tests {
         )
         .unwrap();
         assert!(!plan.ready);
-        assert_eq!(plan.blockers.len(), 4);
+        assert_eq!(plan.blockers.len(), 3);
+        assert_eq!(plan.path, SitePathKind::RelayRequired);
         assert_eq!(
             plan.left.peer.allowed_ips[0].address.to_string(),
             "192.168.20.0"
@@ -322,7 +375,22 @@ mod tests {
         let mut right = binding("right", "lab", "192.168.20.0/24");
         right.public_key = Some("right-key".into());
         right.endpoint = Some("203.0.113.20:51820".into());
-        assert!(plan_link("mycelium0".into(), left, right).unwrap().ready);
+        let plan = plan_link("mycelium0".into(), left, right).unwrap();
+        assert!(plan.ready);
+        assert_eq!(plan.path, SitePathKind::Direct);
+        assert_eq!(plan.prefix_exports.len(), 2);
+    }
+
+    #[test]
+    fn one_stable_endpoint_is_sufficient_for_nat_traversal() {
+        let mut left = binding("left", "home", "192.168.10.0/24");
+        left.public_key = Some("left-key".into());
+        left.endpoint = Some("198.51.100.10:51820".into());
+        let mut right = binding("right", "lab", "192.168.20.0/24");
+        right.public_key = Some("right-key".into());
+        let plan = plan_link("mycelium0".into(), left, right).unwrap();
+        assert!(plan.ready);
+        assert_eq!(plan.path, SitePathKind::NatTraversal);
     }
 
     #[test]
