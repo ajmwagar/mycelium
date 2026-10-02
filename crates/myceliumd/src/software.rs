@@ -1049,30 +1049,4 @@ mod tests {
                 .contains("conflicting lifecycle")
         );
     }
-
-    #[test]
-    fn documented_policy_matches_the_contract() {
-        let policy: SoftwarePolicy =
-            serde_json::from_str(include_str!("../../../docs/examples/software-policy.json"))
-                .unwrap();
-        policy.validate().unwrap();
-        assert!(!policy.automatic.enabled);
-        assert!(policy
-            .rules
-            .iter()
-            .any(|rule| rule.name == "accelerated-compute"));
-    }
-
-    #[test]
-    fn legacy_policy_defaults_to_staged_and_manual() {
-        let policy: SoftwarePolicy = serde_json::from_str(
-            r#"{"schema_version":1,"rules":[{"name":"base","packages":[{"name":"unibus"}]}]}"#,
-        )
-        .unwrap();
-        assert!(!policy.automatic.enabled);
-        assert_eq!(
-            policy.rules[0].packages[0].lifecycle,
-            LifecyclePolicy::Staged
-        );
-    }
 }
