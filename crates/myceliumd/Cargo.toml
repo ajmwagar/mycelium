@@ -28,6 +28,7 @@ serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 reqwest.workspace = true
+rumqttc = "0.25"
 tokio-rustls.workspace = true
 rustls.workspace = true
 rustls-pemfile.workspace = true

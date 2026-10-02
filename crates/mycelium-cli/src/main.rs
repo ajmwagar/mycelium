@@ -147,6 +147,7 @@ usage:
   mycelium security sinks list [--json]
   mycelium security sinks add jsonl NAME ABSOLUTE_PATH --write [--dry-run]
   mycelium security sinks add loki NAME URL [--token-env ENV] [--tenant ID] --write [--dry-run]
+  mycelium security sinks add mqtt NAME HOST [--port PORT] [--topic TOPIC] [--client-id ID] [--tls] [--username-env ENV --password-env ENV] --write [--dry-run]
   mycelium security export status [--json]
   mycelium security export run [--sink NAME] --write [--dry-run] [--json]
   mycelium security remediation list [--json]
@@ -1108,6 +1109,22 @@ async fn security_command(args: &[String]) -> Result<Vec<String>, ClientError> {
                         url: target,
                         token_env: value("--token-env"),
                         tenant: value("--tenant"),
+                    },
+                    "mqtt" => SinkConfig::Mqtt {
+                        name,
+                        host: target,
+                        port: value("--port")
+                            .map(|port| port.parse::<u16>())
+                            .transpose()
+                            .map_err(|_| err_usage("--port must be an integer from 1 to 65535"))?
+                            .unwrap_or(1883),
+                        topic: value("--topic")
+                            .unwrap_or_else(|| "mycelium/security/events/v1".into()),
+                        client_id: value("--client-id")
+                            .unwrap_or_else(|| format!("mycelium-{}", std::process::id())),
+                        tls: args.iter().any(|arg| arg == "--tls"),
+                        username_env: value("--username-env"),
+                        password_env: value("--password-env"),
                     },
                     other => return Err(err_usage(&format!("unknown SIEM sink kind `{other}`"))),
                 };

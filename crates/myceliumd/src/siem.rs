@@ -30,12 +30,32 @@ pub enum SinkConfig {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tenant: Option<String>,
     },
+    /// Publish structured events to the nearest MQTT broker. Unibus remains
+    /// responsible for carrying those publications between brokers.
+    Mqtt {
+        name: String,
+        host: String,
+        #[serde(default = "default_mqtt_port")]
+        port: u16,
+        topic: String,
+        client_id: String,
+        #[serde(default)]
+        tls: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        username_env: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        password_env: Option<String>,
+    },
+}
+
+fn default_mqtt_port() -> u16 {
+    1883
 }
 
 impl SinkConfig {
     pub fn name(&self) -> &str {
         match self {
-            Self::Jsonl { name, .. } | Self::Loki { name, .. } => name,
+            Self::Jsonl { name, .. } | Self::Loki { name, .. } | Self::Mqtt { name, .. } => name,
         }
     }
 }
@@ -154,6 +174,34 @@ fn validate(config: &SinkConfig) -> Result<(), AnyError> {
             }
             Ok(())
         }
+        SinkConfig::Mqtt {
+            host,
+            port,
+            topic,
+            client_id,
+            username_env,
+            password_env,
+            ..
+        } => {
+            if host.trim().is_empty() {
+                return Err("MQTT host cannot be empty".into());
+            }
+            if *port == 0 {
+                return Err("MQTT port cannot be zero".into());
+            }
+            if topic.is_empty() || topic.contains(['#', '+', '\0']) {
+                return Err("MQTT topic must be a concrete topic without wildcards".into());
+            }
+            if client_id.trim().is_empty() {
+                return Err("MQTT client ID cannot be empty".into());
+            }
+            if username_env.is_some() != password_env.is_some() {
+                return Err(
+                    "MQTT username and password env names must be configured together".into(),
+                );
+            }
+            Ok(())
+        }
         _ => Ok(()),
     }
 }
@@ -189,6 +237,7 @@ pub fn status() -> Result<Vec<SinkStatus>, AnyError> {
                 kind: match config {
                     SinkConfig::Jsonl { .. } => "jsonl",
                     SinkConfig::Loki { .. } => "loki",
+                    SinkConfig::Mqtt { .. } => "mqtt",
                 }
                 .into(),
                 pending: value.pending.len(),
@@ -355,6 +404,57 @@ async fn deliver(config: &SinkConfig, records: &[ExportRecord]) -> Result<(), An
             }
             Ok(())
         }
+        SinkConfig::Mqtt {
+            host,
+            port,
+            topic,
+            client_id,
+            tls,
+            username_env,
+            password_env,
+            ..
+        } => {
+            use rumqttc::{AsyncClient, Event, Incoming, MqttOptions, QoS, Transport};
+            let mut options = MqttOptions::new(client_id, host, *port);
+            options.set_keep_alive(std::time::Duration::from_secs(30));
+            if *tls {
+                options.set_transport(Transport::tls_with_default_config());
+            }
+            if let (Some(username), Some(password)) = (username_env, password_env) {
+                options.set_credentials(
+                    std::env::var(username)
+                        .map_err(|_| format!("MQTT username env `{username}` is unset"))?,
+                    std::env::var(password)
+                        .map_err(|_| format!("MQTT password env `{password}` is unset"))?,
+                );
+            }
+            // The disk spool caps this batch at MAX_PENDING. Keep enough
+            // request slots to enqueue it before deliberately driving the
+            // event loop and waiting for every QoS 1 acknowledgement.
+            let (client, mut eventloop) = AsyncClient::new(options, records.len().max(10));
+            for record in records {
+                client
+                    .publish(topic, QoS::AtLeastOnce, false, serde_json::to_vec(record)?)
+                    .await?;
+            }
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+            let mut acknowledged = 0usize;
+            while acknowledged < records.len() {
+                match tokio::time::timeout_at(deadline, eventloop.poll()).await {
+                    Ok(Ok(Event::Incoming(Incoming::PubAck(_)))) => acknowledged += 1,
+                    Ok(Ok(_)) => {}
+                    Ok(Err(error)) => return Err(error.into()),
+                    Err(_) => {
+                        return Err(format!(
+                            "MQTT acknowledgement timeout: {acknowledged}/{} events",
+                            records.len()
+                        )
+                        .into())
+                    }
+                }
+            }
+            Ok(())
+        }
     }
 }
 
@@ -425,6 +525,25 @@ mod tests {
             path: "events.jsonl".into()
         })
         .is_err());
+    }
+
+    #[test]
+    fn mqtt_requires_a_concrete_topic_and_complete_credentials() {
+        let config = |topic: &str, username_env: Option<&str>, password_env: Option<&str>| {
+            SinkConfig::Mqtt {
+                name: "bus".into(),
+                host: "127.0.0.1".into(),
+                port: 1883,
+                topic: topic.into(),
+                client_id: "mycelium-test".into(),
+                tls: false,
+                username_env: username_env.map(str::to_owned),
+                password_env: password_env.map(str::to_owned),
+            }
+        };
+        assert!(validate(&config("mycelium/security/events/v1", None, None)).is_ok());
+        assert!(validate(&config("mycelium/security/+", None, None)).is_err());
+        assert!(validate(&config("mycelium/security", Some("USER"), None)).is_err());
     }
 
     #[tokio::test]

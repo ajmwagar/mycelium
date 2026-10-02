@@ -661,6 +661,12 @@ mycelium security sinks add loki central \
   https://loki.example.net/loki/api/v1/push \
   --token-env FPL_LOKI_TOKEN --tenant fpl --write
 
+# Publish QoS 1 events to the nearest broker. Existing unibus-mqtt adapters
+# redistribute the topic; Mycelium does not depend on Unibus internals.
+mycelium security sinks add mqtt unibus-local 127.0.0.1 \
+  --topic mycelium/security/events/v1 \
+  --client-id mycelium-neo --write
+
 mycelium security sinks list
 mycelium security export run --dry-run
 mycelium security export run --sink central --write
@@ -670,6 +676,13 @@ mycelium security export status
 Configured sinks run automatically after the daemon's bounded 15-minute
 security collection. `export run` is the deterministic manual runbook and
 retry path.
+
+The MQTT sink waits for a QoS 1 acknowledgement for every event before
+advancing its durable spool. Broker credentials are referenced by environment
+variable name using `--username-env` and `--password-env`; use `--tls` for a
+server-authenticated TLS connection. The default topic is
+`mycelium/security/events/v1`, which can be included in an `unibus-mqtt`
+subscription filter without any Mycelium-specific code in Unibus.
 
 Loki labels are deliberately low-cardinality: `site`, `hostname`, `category`,
 `severity`, and `outcome`. Node and event IDs plus arbitrary event fields remain
