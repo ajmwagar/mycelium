@@ -30,6 +30,7 @@ pub mod siem;
 pub mod ssh_renewal;
 mod state_change;
 pub mod topology_feed;
+pub mod update_policy;
 
 use std::path::PathBuf;
 
@@ -43,6 +44,12 @@ pub struct UpdateState {
     pub activation_state: String,
     pub activated_at: Option<u64>,
     pub last_error: Option<String>,
+    #[serde(default)]
+    pub staged_digest: Option<String>,
+    #[serde(default)]
+    pub staged_since: Option<u64>,
+    #[serde(default)]
+    pub last_attempt_at: Option<u64>,
 }
 
 /// Resolve the state dir. Inferred, not configured, unless overridden.
@@ -131,6 +138,30 @@ pub fn artifacts_dir() -> PathBuf {
 
 pub fn update_state_path() -> PathBuf {
     home_dir().join("update-state.json")
+}
+
+pub fn update_policy_path() -> PathBuf {
+    home_dir().join("update-policy.json")
+}
+
+pub fn read_update_policy() -> update_policy::UpdatePolicy {
+    std::fs::read(update_policy_path())
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+pub fn write_update_policy(policy: &update_policy::UpdatePolicy) -> std::io::Result<()> {
+    let path = update_policy_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let temporary = path.with_extension("json.tmp");
+    std::fs::write(
+        &temporary,
+        serde_json::to_vec_pretty(policy).map_err(std::io::Error::other)?,
+    )?;
+    std::fs::rename(temporary, path)
 }
 
 pub fn wireguard_dir() -> PathBuf {

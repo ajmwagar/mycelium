@@ -627,6 +627,29 @@ and requires the local peer RPC to become healthy within ten seconds. Failure
 automatically restores and starts the previous executable. Distribution peers
 never possess or imply release authority.
 
+Automatic activation is a separate, local authorization. Enabling it installs
+an external launchd agent or systemd user timer; the updater therefore survives
+the daemon restart it coordinates and reuses the same verified activation and
+rollback path as the manual command:
+
+```sh
+mycelium update policy enable \
+  --channel canary \
+  --minimum-age 15m \
+  --rollout-window 30m \
+  --retry-backoff 1h \
+  --write
+mycelium update policy status
+```
+
+The minimum age lets a bad publication be revoked before activation. A stable
+per-node offset spreads restarts across the rollout window, failures enter
+backoff, and a candidate must pass the existing self-check and daemon health
+check or the previous executable is restored. A node needs one successful
+manual signed activation before unattended updates begin, and automatic policy
+refuses same-version replacements and downgrades. `update policy disable
+--write` stops activation without disabling signed artifact distribution.
+
 ## SSH observation points
 
 Ordinary Linux hosts can contribute their interfaces, connected routes, and

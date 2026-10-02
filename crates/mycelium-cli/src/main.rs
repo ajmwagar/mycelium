@@ -142,6 +142,9 @@ usage:
     [--provider NAME] [--providers PATH]
   mycelium update status [--channel CHANNEL] [--fleet] [--json]
   mycelium update apply [--channel CHANNEL] [--path INSTALLED-BINARY] --write
+  mycelium update policy status [--json]
+  mycelium update policy enable [--channel CHANNEL] [--minimum-age 15m] [--rollout-window 30m] [--retry-backoff 1h] --write
+  mycelium update policy disable --write
   mycelium fleet status [--site SITE] [--platform linux|darwin] [--json]
   mycelium fleet exec [--site SITE] [--platform linux|darwin] [--user USER] -- COMMAND...
   mycelium wireguard plan LEFT RIGHT [--left-subnet CIDR...] [--right-subnet CIDR...]
@@ -1632,6 +1635,12 @@ async fn wireguard_command(args: &[String]) -> Result<Vec<String>, ClientError> 
 }
 
 async fn update(args: &[String]) -> Result<Vec<String>, ClientError> {
+    if args.first().map(String::as_str) == Some("policy") {
+        return update_policy_command(&args[1..]);
+    }
+    if args.first().map(String::as_str) == Some("auto-run") {
+        return update_auto_run().await;
+    }
     let flags = parse_flags(args);
     let action = flags.rest.first().map(String::as_str).unwrap_or("status");
     let channel = flags.channel.unwrap_or_else(|| "canary".into());
@@ -1744,6 +1753,9 @@ async fn update(args: &[String]) -> Result<Vec<String>, ClientError> {
         .into(),
         activated_at: activation.is_ok().then(unix_now),
         last_error: activation.as_ref().err().map(ToString::to_string),
+        staged_digest: Some(release.artifact_digest.clone()),
+        staged_since: Some(unix_now()),
+        last_attempt_at: Some(unix_now()),
     };
     if let Err(error) = myceliumd::write_update_state(&state) {
         state.last_error = Some(format!("could not persist update state: {error}"));
@@ -1756,6 +1768,324 @@ async fn update(args: &[String]) -> Result<Vec<String>, ClientError> {
         release.target,
         artifact.display()
     )])
+}
+
+fn update_policy_command(args: &[String]) -> Result<Vec<String>, ClientError> {
+    let action = args.first().map(String::as_str).unwrap_or("status");
+    if action == "status" {
+        let policy = myceliumd::read_update_policy();
+        if args.iter().any(|argument| argument == "--json") {
+            return Ok(vec![
+                serde_json::to_string(&policy).map_err(|error| err_usage(&error.to_string()))?
+            ]);
+        }
+        return Ok(vec![format!(
+            "automatic updates: {} channel={} minimum_age={}s rollout_window={}s retry_backoff={}s",
+            if policy.enabled {
+                "enabled"
+            } else {
+                "disabled"
+            },
+            policy.channel,
+            policy.minimum_age_secs,
+            policy.rollout_window_secs,
+            policy.retry_backoff_secs
+        )]);
+    }
+    if !args.iter().any(|argument| argument == "--write") {
+        return Err(ClientError::Rpc {
+            message: "update policy changes require --write".into(),
+            kind: "writes_not_permitted".into(),
+        });
+    }
+    let mut policy = myceliumd::read_update_policy();
+    match action {
+        "enable" => {
+            policy.enabled = true;
+            if let Some(channel) = update_arg(args, "--channel") {
+                policy.channel = channel.to_owned();
+            }
+            if let Some(value) = update_arg(args, "--minimum-age") {
+                policy.minimum_age_secs = parse_update_duration(value)?;
+            }
+            if let Some(value) = update_arg(args, "--retry-backoff") {
+                policy.retry_backoff_secs = parse_update_duration(value)?;
+            }
+            if let Some(value) = update_arg(args, "--rollout-window") {
+                policy.rollout_window_secs = parse_update_duration(value)?;
+            }
+        }
+        "disable" => policy.enabled = false,
+        other => {
+            return Err(err_usage(&format!(
+                "unknown update policy action `{other}`"
+            )))
+        }
+    }
+    policy.validate().map_err(|error| err_usage(&error))?;
+    myceliumd::write_update_policy(&policy).map_err(ClientError::Io)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            myceliumd::update_policy_path(),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .map_err(ClientError::Io)?;
+    }
+    if policy.enabled {
+        install_update_scheduler()?;
+    }
+    Ok(vec![format!(
+        "automatic updates {} for channel {}",
+        if policy.enabled {
+            "enabled"
+        } else {
+            "disabled"
+        },
+        policy.channel
+    )])
+}
+
+async fn update_auto_run() -> Result<Vec<String>, ClientError> {
+    let policy = myceliumd::read_update_policy();
+    policy.validate().map_err(|error| err_usage(&error))?;
+    if !policy.enabled {
+        return Ok(vec!["automatic updates disabled".into()]);
+    }
+    let mut client = connect().await?;
+    let releases = client.call(&Request::ReleaseList).await?;
+    let targets = mycelium_peer_protocol::local_compatible_targets();
+    let release = releases
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|value| {
+            serde_json::from_value::<mycelium_peer_protocol::ReleaseManifest>(value.clone()).ok()
+        })
+        .filter(|release| release.channel == policy.channel && targets.contains(&release.target))
+        .max_by_key(|release| {
+            let preference = targets
+                .iter()
+                .position(|target| target == &release.target)
+                .map(|index| targets.len() - index)
+                .unwrap_or_default();
+            (release.version.clone(), preference)
+        });
+    let Some(release) = release else {
+        return Ok(vec![format!(
+            "no compatible signed release on channel {}",
+            policy.channel
+        )]);
+    };
+    release
+        .verify()
+        .map_err(|error| err_usage(&format!("release signature: {error}")))?;
+    let artifact = myceliumd::artifacts_dir().join(&release.artifact_digest);
+    if !artifact.is_file() {
+        return Ok(vec![format!(
+            "release {} is still downloading",
+            release.version
+        )]);
+    }
+    let installed_digest = std::env::current_exe()
+        .ok()
+        .and_then(|path| std::fs::read(path).ok())
+        .map(|bytes| mycelium_peer_protocol::sha256_hex(&bytes));
+    if installed_digest.as_deref() == Some(&release.artifact_digest) {
+        return Ok(vec![format!(
+            "release {} is already active",
+            release.version
+        )]);
+    }
+
+    let now = unix_now();
+    let mut state = myceliumd::read_update_state();
+    if let Err(reason) =
+        automatic_upgrade_allowed(state.release_version.as_deref(), &release.version)
+    {
+        return Ok(vec![reason]);
+    }
+    if state.staged_digest.as_deref() != Some(&release.artifact_digest) {
+        state.staged_digest = Some(release.artifact_digest.clone());
+        state.staged_since = Some(now);
+        state.activation_state = "staged".into();
+        state.last_error = None;
+        myceliumd::write_update_state(&state).map_err(ClientError::Io)?;
+        return Ok(vec![format!(
+            "staged {}; minimum age starts now",
+            release.version
+        )]);
+    }
+    let eligible_at = state
+        .staged_since
+        .unwrap_or(now)
+        .saturating_add(policy.minimum_age_secs)
+        .saturating_add(node_rollout_offset(policy.rollout_window_secs));
+    if now < eligible_at {
+        return Ok(vec![format!(
+            "release {} waits {}s for minimum age",
+            release.version,
+            eligible_at - now
+        )]);
+    }
+    if state.last_error.is_some()
+        && state
+            .last_attempt_at
+            .is_some_and(|attempt| now < attempt.saturating_add(policy.retry_backoff_secs))
+    {
+        return Ok(vec![format!(
+            "release {} is in retry backoff",
+            release.version
+        )]);
+    }
+    state.activation_state = "activating".into();
+    state.last_attempt_at = Some(now);
+    myceliumd::write_update_state(&state).map_err(ClientError::Io)?;
+    drop(client);
+    let apply = vec![
+        "apply".to_owned(),
+        "--channel".to_owned(),
+        policy.channel,
+        "--write".to_owned(),
+    ];
+    Box::pin(update(&apply)).await
+}
+
+fn update_arg<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
+    args.iter()
+        .position(|argument| argument == name)
+        .and_then(|index| args.get(index + 1))
+        .map(String::as_str)
+}
+
+fn parse_update_duration(value: &str) -> Result<u64, ClientError> {
+    let split = value
+        .find(|character: char| !character.is_ascii_digit())
+        .ok_or_else(|| err_usage("duration needs an explicit s, m, h, or d suffix"))?;
+    let amount = value[..split]
+        .parse::<u64>()
+        .map_err(|_| err_usage("invalid duration"))?;
+    let multiplier = match &value[split..] {
+        "s" => 1,
+        "m" => 60,
+        "h" => 3600,
+        "d" => 86_400,
+        _ => return Err(err_usage("duration needs an explicit s, m, h, or d suffix")),
+    };
+    amount
+        .checked_mul(multiplier)
+        .ok_or_else(|| err_usage("duration is too large"))
+}
+
+fn node_rollout_offset(window_secs: u64) -> u64 {
+    if window_secs == 0 {
+        return 0;
+    }
+    let identity = std::fs::read(myceliumd::home_dir().join("pki/node.pem"))
+        .unwrap_or_else(|_| myceliumd::home_dir().to_string_lossy().as_bytes().to_vec());
+    let digest = mycelium_peer_protocol::sha256_hex(&identity);
+    u64::from_str_radix(&digest[..16], 16).unwrap_or_default() % window_secs
+}
+
+fn automatic_upgrade_allowed(active: Option<&str>, candidate: &str) -> Result<(), String> {
+    let Some(active) = active else {
+        return Err(format!(
+            "release {candidate} requires one manual signed bootstrap activation"
+        ));
+    };
+    let active_version = semver::Version::parse(active)
+        .map_err(|error| format!("active release version `{active}` is invalid: {error}"))?;
+    let candidate_version = semver::Version::parse(candidate)
+        .map_err(|error| format!("candidate release version `{candidate}` is invalid: {error}"))?;
+    if candidate_version <= active_version {
+        return Err(format!(
+            "refusing automatic non-upgrade: active={active} candidate={candidate}"
+        ));
+    }
+    Ok(())
+}
+
+fn install_update_scheduler() -> Result<(), ClientError> {
+    let executable = std::env::current_exe().map_err(ClientError::Io)?;
+    if cfg!(target_os = "macos") {
+        let home = std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .ok_or_else(|| err_usage("HOME is not set"))?;
+        let path = home.join("Library/LaunchAgents/dev.fpl.mycelium-updater.plist");
+        let log = myceliumd::home_dir().join("update.log");
+        let plist = format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n<key>Label</key><string>dev.fpl.mycelium-updater</string>\n<key>ProgramArguments</key><array><string>{}</string><string>update</string><string>auto-run</string></array>\n<key>EnvironmentVariables</key><dict><key>MYCELIUM_NO_AUTOSTART</key><string>1</string></dict>\n<key>StartInterval</key><integer>300</integer><key>RunAtLoad</key><true/>\n<key>StandardOutPath</key><string>{}</string><key>StandardErrorPath</key><string>{}</string>\n</dict></plist>\n",
+            xml_update(&executable.to_string_lossy()),
+            xml_update(&log.to_string_lossy()),
+            xml_update(&log.to_string_lossy())
+        );
+        std::fs::write(&path, plist).map_err(ClientError::Io)?;
+        let domain = format!("gui/{}", uid()?);
+        let _ = std::process::Command::new("launchctl")
+            .args(["bootout", &format!("{domain}/dev.fpl.mycelium-updater")])
+            .status();
+        let status = std::process::Command::new("launchctl")
+            .args(["bootstrap", &domain, &path.to_string_lossy()])
+            .status()
+            .map_err(ClientError::Io)?;
+        if !status.success() {
+            return Err(err_usage("could not install automatic update LaunchAgent"));
+        }
+        return Ok(());
+    }
+    if cfg!(target_os = "linux") {
+        let home = std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .ok_or_else(|| err_usage("HOME is not set"))?;
+        let dir = home.join(".config/systemd/user");
+        if executable.to_string_lossy().contains(char::is_whitespace) {
+            return Err(err_usage(
+                "automatic updater binary path may not contain whitespace",
+            ));
+        }
+        std::fs::create_dir_all(&dir).map_err(ClientError::Io)?;
+        std::fs::write(
+            dir.join("mycelium-update.service"),
+            format!(
+                "[Unit]\nDescription=Mycelium safe automatic update\nAfter=mycelium.service\n\n[Service]\nType=oneshot\nEnvironment=MYCELIUM_NO_AUTOSTART=1\nExecStart={} update auto-run\n",
+                executable.to_string_lossy()
+            ),
+        )
+        .map_err(ClientError::Io)?;
+        std::fs::write(
+            dir.join("mycelium-update.timer"),
+            "[Unit]\nDescription=Check for Mycelium updates\n\n[Timer]\nOnBootSec=2m\nOnUnitActiveSec=5m\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n",
+        )
+        .map_err(ClientError::Io)?;
+        let status = std::process::Command::new("systemctl")
+            .args(["--user", "daemon-reload"])
+            .status()
+            .map_err(ClientError::Io)?;
+        if !status.success() {
+            return Err(err_usage("systemd user daemon-reload failed"));
+        }
+        let status = std::process::Command::new("systemctl")
+            .args(["--user", "enable", "--now", "mycelium-update.timer"])
+            .status()
+            .map_err(ClientError::Io)?;
+        if !status.success() {
+            return Err(err_usage("could not enable Mycelium update timer"));
+        }
+        return Ok(());
+    }
+    Err(err_usage(
+        "automatic updates are unsupported on this platform",
+    ))
+}
+
+fn xml_update(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
 }
 
 fn render_fleet_update_status(
@@ -4063,6 +4393,29 @@ fn render_tunnel_plan(plan: &serde_json::Value) -> Vec<String> {
 #[cfg(test)]
 mod ssh_command_tests {
     use super::*;
+
+    #[test]
+    fn automatic_update_durations_are_explicit_and_bounded() {
+        assert_eq!(parse_update_duration("15m").unwrap(), 900);
+        assert_eq!(parse_update_duration("1h").unwrap(), 3600);
+        assert!(parse_update_duration("15").is_err());
+        assert!(parse_update_duration("1week").is_err());
+    }
+
+    #[test]
+    fn rollout_offset_is_stable_and_inside_window() {
+        let first = node_rollout_offset(1800);
+        assert_eq!(first, node_rollout_offset(1800));
+        assert!(first < 1800);
+    }
+
+    #[test]
+    fn automatic_updates_require_bootstrap_and_strictly_newer_version() {
+        assert!(automatic_upgrade_allowed(None, "0.2.0").is_err());
+        assert!(automatic_upgrade_allowed(Some("0.2.0"), "0.2.0").is_err());
+        assert!(automatic_upgrade_allowed(Some("0.2.0"), "0.1.9").is_err());
+        assert!(automatic_upgrade_allowed(Some("0.2.0"), "0.2.1").is_ok());
+    }
 
     #[test]
     fn ssh_options_keep_remote_command_after_separator() {
