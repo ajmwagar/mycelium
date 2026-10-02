@@ -1764,6 +1764,7 @@ async fn wireguard_command(args: &[String]) -> Result<Vec<String>, ClientError> 
     let mut client = connect().await?;
     let peers = client.call(&Request::PeerList).await?;
     let bindings = client.call(&Request::WireGuardBindingList).await?;
+    let egress = client.call(&Request::EgressList).await?;
     let resolve = |selector: &str| -> Result<wireguard::GatewayIdentity, ClientError> {
         let matching = peers
             .as_array()
@@ -1799,8 +1800,30 @@ async fn wireguard_command(args: &[String]) -> Result<Vec<String>, ClientError> 
             .flatten()
             .find(|binding| binding["node_id"].as_str() == Some(node_id))
     };
+    let egress_for = |node_id: &str| {
+        egress
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|observation| observation["node_id"].as_str() == Some(node_id))
+            .map(|observation| wireguard::EgressFacts {
+                observed_at: observation["observed_at"].as_u64().unwrap_or(0),
+                public_ip_stable: observation["public_ip_stable"].as_bool().unwrap_or(false),
+                mapping_varies_by_destination: observation["mapping_varies_by_destination"]
+                    .as_bool()
+                    .unwrap_or(true),
+                mapped_endpoints: observation["mapped_endpoints"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|value| value.as_str().map(str::to_owned))
+                    .collect(),
+            })
+    };
     let left_observed = binding_for(&left_identity.node_id);
     let right_observed = binding_for(&right_identity.node_id);
+    let left_egress = egress_for(&left_identity.node_id);
+    let right_egress = egress_for(&right_identity.node_id);
     if left_prefixes.is_empty() {
         left_prefixes = observed_prefixes(left_observed)?;
     }
@@ -1828,6 +1851,7 @@ async fn wireguard_command(args: &[String]) -> Result<Vec<String>, ClientError> 
                 .or_else(|| observed_string(left_observed, "endpoint")),
             advertised_prefixes: left_prefixes,
             translation: translation("--left-translation")?,
+            egress: left_egress,
         },
         wireguard::GatewayBinding {
             identity: right_identity,
@@ -1837,7 +1861,12 @@ async fn wireguard_command(args: &[String]) -> Result<Vec<String>, ClientError> 
                 .or_else(|| observed_string(right_observed, "endpoint")),
             advertised_prefixes: right_prefixes,
             translation: translation("--right-translation")?,
+            egress: right_egress,
         },
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
     )
     .map_err(|error| err_usage(&error))?;
     if args.iter().any(|arg| arg == "--json") {
@@ -1858,6 +1887,7 @@ async fn wireguard_command(args: &[String]) -> Result<Vec<String>, ClientError> 
         if plan.ready { "ready" } else { "blocked" }
     ));
     lines.push(format!("  path: {:?}", plan.path).to_lowercase());
+    lines.push(format!("  reason: {}", plan.path_reason));
     for export in &plan.prefix_exports {
         lines.push(
             format!(

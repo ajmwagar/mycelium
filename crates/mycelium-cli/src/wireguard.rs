@@ -27,6 +27,15 @@ pub(crate) struct GatewayBinding {
     pub endpoint: Option<String>,
     pub advertised_prefixes: Vec<Prefix>,
     pub translation: PrefixTranslation,
+    pub egress: Option<EgressFacts>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub(crate) struct EgressFacts {
+    pub observed_at: u64,
+    pub public_ip_stable: bool,
+    pub mapping_varies_by_destination: bool,
+    pub mapped_endpoints: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -75,6 +84,7 @@ pub(crate) struct LinkPlan {
     pub ready: bool,
     pub blockers: Vec<String>,
     pub path: SitePathKind,
+    pub path_reason: String,
     pub prefix_exports: Vec<PrefixExport>,
     /// The exact overlay observations reconciliation will insert into the
     /// shared topology once both endpoints are active.
@@ -85,6 +95,7 @@ pub(crate) fn plan_link(
     interface: String,
     left: GatewayBinding,
     right: GatewayBinding,
+    now: u64,
 ) -> Result<LinkPlan, String> {
     if left.identity.node_id == right.identity.node_id {
         return Err("WireGuard link endpoints resolve to the same Mycelium identity".into());
@@ -118,18 +129,35 @@ pub(crate) fn plan_link(
             ));
         }
     }
-    let endpoint_count = [&left, &right]
-        .into_iter()
-        .filter(|binding| binding.endpoint.is_some())
-        .count();
-    let path = match endpoint_count {
-        2 => SitePathKind::Direct,
-        1 => SitePathKind::NatTraversal,
-        _ => SitePathKind::RelayRequired,
+    const EGRESS_MAX_AGE: u64 = 15 * 60;
+    let stable = |binding: &GatewayBinding| {
+        binding.egress.as_ref().is_some_and(|facts| {
+            now.saturating_sub(facts.observed_at) <= EGRESS_MAX_AGE
+                && facts.public_ip_stable
+                && !facts.mapping_varies_by_destination
+                && !facts.mapped_endpoints.is_empty()
+        })
     };
-    if endpoint_count == 0 {
-        blockers
-            .push("neither gateway has a stable endpoint; rendezvous or relay is required".into());
+    let stable_count = [&left, &right]
+        .into_iter()
+        .filter(|binding| stable(binding))
+        .count();
+    let (path, path_reason) = match stable_count {
+        2 => (
+            SitePathKind::Direct,
+            "both gateways have fresh stable egress mappings".into(),
+        ),
+        1 => (
+            SitePathKind::NatTraversal,
+            "one gateway has a fresh stable mapping; the other can initiate outbound".into(),
+        ),
+        _ => (
+            SitePathKind::RelayRequired,
+            "no fresh stable mapping pair is available".into(),
+        ),
+    };
+    if stable_count == 0 {
+        blockers.push("fresh NERP/STUN evidence requires rendezvous or relay".into());
     }
     let prefix_exports = left
         .advertised_prefixes
@@ -178,6 +206,7 @@ pub(crate) fn plan_link(
         ready: blockers.is_empty(),
         blockers,
         path,
+        path_reason,
         prefix_exports,
         topology_bindings,
     })
@@ -332,6 +361,7 @@ mod tests {
             endpoint: None,
             advertised_prefixes: vec![parse_prefix(prefix).unwrap()],
             translation: PrefixTranslation::None,
+            egress: None,
         }
     }
 
@@ -345,6 +375,7 @@ mod tests {
             "mycelium0".into(),
             binding("left", "home", "192.168.10.0/24"),
             binding("right", "lab", "192.168.10.128/25"),
+            100,
         )
         .unwrap_err();
         assert!(error.contains("overlap"));
@@ -356,6 +387,7 @@ mod tests {
             "mycelium0".into(),
             binding("left", "home", "192.168.10.0/24"),
             binding("right", "lab", "192.168.20.0/24"),
+            100,
         )
         .unwrap();
         assert!(!plan.ready);
@@ -372,10 +404,12 @@ mod tests {
         let mut left = binding("left", "home", "192.168.10.0/24");
         left.public_key = Some("left-key".into());
         left.endpoint = Some("198.51.100.10:51820".into());
+        left.egress = Some(stable_egress());
         let mut right = binding("right", "lab", "192.168.20.0/24");
         right.public_key = Some("right-key".into());
         right.endpoint = Some("203.0.113.20:51820".into());
-        let plan = plan_link("mycelium0".into(), left, right).unwrap();
+        right.egress = Some(stable_egress());
+        let plan = plan_link("mycelium0".into(), left, right, 100).unwrap();
         assert!(plan.ready);
         assert_eq!(plan.path, SitePathKind::Direct);
         assert_eq!(plan.prefix_exports.len(), 2);
@@ -386,11 +420,40 @@ mod tests {
         let mut left = binding("left", "home", "192.168.10.0/24");
         left.public_key = Some("left-key".into());
         left.endpoint = Some("198.51.100.10:51820".into());
+        left.egress = Some(stable_egress());
         let mut right = binding("right", "lab", "192.168.20.0/24");
         right.public_key = Some("right-key".into());
-        let plan = plan_link("mycelium0".into(), left, right).unwrap();
+        let plan = plan_link("mycelium0".into(), left, right, 100).unwrap();
         assert!(plan.ready);
         assert_eq!(plan.path, SitePathKind::NatTraversal);
+    }
+
+    #[test]
+    fn stale_or_destination_varying_egress_requires_relay() {
+        let mut left = binding("left", "home", "192.168.10.0/24");
+        left.public_key = Some("left-key".into());
+        left.egress = Some(EgressFacts {
+            observed_at: 1,
+            ..stable_egress()
+        });
+        let mut right = binding("right", "lab", "192.168.20.0/24");
+        right.public_key = Some("right-key".into());
+        right.egress = Some(EgressFacts {
+            mapping_varies_by_destination: true,
+            ..stable_egress()
+        });
+        let plan = plan_link("mycelium0".into(), left, right, 1_000).unwrap();
+        assert_eq!(plan.path, SitePathKind::RelayRequired);
+        assert!(!plan.ready);
+    }
+
+    fn stable_egress() -> EgressFacts {
+        EgressFacts {
+            observed_at: 100,
+            public_ip_stable: true,
+            mapping_varies_by_destination: false,
+            mapped_endpoints: vec!["198.51.100.10:51820".into()],
+        }
     }
 
     #[test]
