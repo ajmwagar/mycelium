@@ -4,9 +4,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use mycelium_core::{
-    CapResult, CapSpec, CredentialSet, Device, DeviceId, DeviceKind, DeviceMeta, Driver,
-    ExecContext, Inventory, MyceliumError, ParamType, Params, Result, Target, Value, ID_IDENTIFY,
-    ID_WLAN_LIST_SSID,
+    ActionRisk, CapResult, CapSpec, CredentialSet, Device, DeviceId, DeviceKind, DeviceMeta,
+    Driver, ExecContext, Inventory, MyceliumError, ParamType, Params, Result, Target, Value,
+    ID_IDENTIFY, ID_WLAN_LIST_SSID,
 };
 use mycelium_driver_edgeos::SshSession;
 
@@ -140,11 +140,9 @@ impl Device for UnifiDevice {
             ),
             (
                 ID_SET_INFORM.into(),
-                CapSpec::mutation("change the UniFi controller inform URL").param(
-                    "url",
-                    ParamType::Str,
-                    "HTTP(S) controller inform URL",
-                ),
+                CapSpec::mutation("change the UniFi controller inform URL")
+                    .verified_by(ActionRisk::Disruptive, ID_STATUS)
+                    .param("url", ParamType::Str, "HTTP(S) controller inform URL"),
             ),
             (
                 ID_REBOOT.into(),

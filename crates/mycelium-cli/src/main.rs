@@ -3139,6 +3139,19 @@ fn render_describe(id: &str, v: &serde_json::Value) -> Vec<String> {
 }
 
 fn render_call(v: &serde_json::Value) -> Vec<String> {
+    if let Some(digest) = v["plan_digest"].as_str() {
+        return vec![format!(
+            "{} device change {} ({} action receipt{})",
+            v["state"].as_str().unwrap_or("unknown"),
+            digest,
+            v["actions"].as_array().map_or(0, Vec::len),
+            if v["mode"].as_str() == Some("plan") {
+                ", plan only"
+            } else {
+                ""
+            }
+        )];
+    }
     let mut out = Vec::new();
     let res = &v["result"];
     let dry = res["dry_run"].as_bool().unwrap_or(false);

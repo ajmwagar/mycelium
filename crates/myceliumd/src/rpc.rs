@@ -517,15 +517,59 @@ impl Daemon {
                 write,
                 dry_run,
             } => {
-                let dev = self.inventory.get(&id)?;
                 let mut p = mycelium_core::Params::new();
                 for (k, v) in params {
                     p.insert(k, Value::from_json(&v));
                 }
+                let capabilities = self.inventory.capabilities(&id)?;
+                let declared = capabilities
+                    .iter()
+                    .find(|candidate| candidate.id == capability)
+                    .ok_or_else(|| MyceliumError::UnknownCapability(capability.clone()))?;
+                if declared.spec.mutation {
+                    let verification = declared.spec.verification.as_ref().ok_or_else(|| {
+                        MyceliumError::Validation(format!(
+                            "mutating capability `{capability}` has no verification contract; direct writes fail closed"
+                        ))
+                    })?;
+                    let mode = mycelium_core::ExecutionMode::from_legacy_flags(write, dry_run)
+                        .map_err(|error| {
+                            if !write && !dry_run {
+                                MyceliumError::WritesNotPermitted(error)
+                            } else {
+                                MyceliumError::Validation(error)
+                            }
+                        })?;
+                    let mut plan = mycelium_core::ActionPlan::new(format!("device:{id}"));
+                    plan.actions.push(mycelium_core::PlannedAction {
+                        device: id,
+                        capability,
+                        params: p,
+                        risk: verification.risk,
+                        before: None,
+                        expected_after: None,
+                        precondition: None,
+                        verification: mycelium_core::VerificationSpec {
+                            capability: verification.capability.clone(),
+                            params: verification.params.clone(),
+                            predicate: mycelium_core::VerificationPredicate::Succeeds,
+                        },
+                    });
+                    return to_value(
+                        crate::execution::execute(&self.inventory, &plan, mode).await?,
+                    )
+                    .map_err(json_err);
+                }
+                if write || dry_run {
+                    return Err(MyceliumError::Validation(format!(
+                        "read-only capability `{capability}` does not accept execution flags"
+                    )));
+                }
+                let dev = self.inventory.get(&id)?;
                 let ctx = mycelium_core::ExecContext {
                     capability: capability.clone(),
-                    allow_writes: write,
-                    dry_run,
+                    allow_writes: false,
+                    dry_run: false,
                 };
                 let res = dev.invoke(&ctx, &capability, p).await?;
                 Ok(cap_result_json(&id, &capability, &res))
@@ -2164,6 +2208,7 @@ fn network_action_plan(
             risk: mycelium_core::ActionRisk::Disruptive,
             before: None,
             expected_after: Some(expected.clone()),
+            precondition: None,
             verification: mycelium_core::VerificationSpec {
                 capability: mycelium_core::ID_VLAN_LIST.into(),
                 params: mycelium_core::Params::new(),
@@ -2215,6 +2260,7 @@ fn network_action_plan(
             risk: mycelium_core::ActionRisk::Disruptive,
             before: None,
             expected_after: Some(expected.clone()),
+            precondition: None,
             verification: mycelium_core::VerificationSpec {
                 capability: mycelium_core::ID_DHCP_LIST_POOLS.into(),
                 params: mycelium_core::Params::new(),
@@ -2489,7 +2535,12 @@ mod tests {
                 ),
                 (
                     "fake.apply".to_string(),
-                    CapSpec::mutation("apply fake state"),
+                    CapSpec::mutation("apply fake state")
+                        .verified_by(mycelium_core::ActionRisk::Low, "fake.ping"),
+                ),
+                (
+                    "fake.unverified".to_string(),
+                    CapSpec::mutation("unsafe fake state"),
                 ),
             ])
         }
@@ -2578,6 +2629,7 @@ mod tests {
             risk: mycelium_core::ActionRisk::Low,
             before: None,
             expected_after: None,
+            precondition: None,
             verification: mycelium_core::VerificationSpec {
                 capability: "fake.ping".into(),
                 params: Params::new(),
@@ -2596,7 +2648,7 @@ mod tests {
 
         let dry_run = daemon
             .dispatch(Request::ActionPlanApply {
-                plan,
+                plan: plan.clone(),
                 write: false,
                 dry_run: true,
             })
@@ -2616,6 +2668,23 @@ mod tests {
             .await;
         assert!(!ambiguous.ok);
         assert_eq!(ambiguous.kind.as_deref(), Some("validation"));
+
+        plan.actions[0].precondition = Some(mycelium_core::VerificationSpec {
+            capability: "fake.ping".into(),
+            params: Params::new(),
+            predicate: mycelium_core::VerificationPredicate::Equals {
+                expected: Value::Str("a state that is no longer present".into()),
+            },
+        });
+        let stale = daemon
+            .dispatch(Request::ActionPlanExecute {
+                plan,
+                mode: mycelium_core::ExecutionMode::Apply,
+            })
+            .await;
+        assert!(!stale.ok);
+        assert_eq!(stale.kind.as_deref(), Some("device"));
+        assert!(stale.error.unwrap().contains("observed state changed"));
     }
 
     #[test]
@@ -2844,6 +2913,29 @@ mod tests {
             resp.result.unwrap()["result"]["output"],
             serde_json::json!("pong:fake.ping")
         );
+
+        let planned = d
+            .dispatch(Request::DeviceCall {
+                id: "fake-1".into(),
+                capability: "fake.apply".into(),
+                params: serde_json::Map::new(),
+                write: false,
+                dry_run: true,
+            })
+            .await;
+        assert!(planned.ok, "{planned:?}");
+        assert_eq!(planned.result.unwrap()["mode"], "plan");
+        let refused = d
+            .dispatch(Request::DeviceCall {
+                id: "fake-1".into(),
+                capability: "fake.unverified".into(),
+                params: serde_json::Map::new(),
+                write: true,
+                dry_run: false,
+            })
+            .await;
+        assert!(!refused.ok);
+        assert_eq!(refused.kind.as_deref(), Some("validation"));
 
         // unrecognized target: loud
         let resp = d

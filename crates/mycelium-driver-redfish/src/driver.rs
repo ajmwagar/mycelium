@@ -4,9 +4,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use mycelium_core::{
-    CapResult, CapSpec, CredentialSet, Device, DeviceId, DeviceKind, DeviceMeta, Driver,
-    ExecContext, Inventory, MacAddress, MyceliumError, Observation, Origin, Params, Result, Secret,
-    ServiceRecord, ServiceState, Target, Value, ID_IDENTIFY,
+    ActionRisk, CapResult, CapSpec, CredentialSet, Device, DeviceId, DeviceKind, DeviceMeta,
+    Driver, ExecContext, Inventory, MacAddress, MyceliumError, Observation, Origin, Params, Result,
+    Secret, ServiceRecord, ServiceState, Target, Value, ID_IDENTIFY,
 };
 use reqwest::{Client, StatusCode};
 use serde_json::Value as Json;
@@ -320,7 +320,8 @@ impl Device for RedfishDevice {
             ),
             (
                 ID_POWER_ON.into(),
-                CapSpec::mutation("power on the server through Redfish"),
+                CapSpec::mutation("power on the server through Redfish")
+                    .verified_by(ActionRisk::Disruptive, ID_POWER_STATE),
             ),
             (
                 ID_THERMAL.into(),

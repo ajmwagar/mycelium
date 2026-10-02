@@ -56,3 +56,17 @@ A type ending in `Proposal` is advisory. A type ending in `Plan` must either be
 an `ActionPlan` or must never cross an apply boundary. New executable plan
 formats are not permitted; extend the shared capability/action vocabulary
 instead.
+
+## Direct capability calls
+
+Read-only `mycelium call` remains an immediate observation. A mutating
+capability call is never executed directly: its `CapSpec` must declare risk and
+a read-only verification capability, then the daemon lowers the call into a
+one-action `ActionPlan`. It therefore receives the same digest, preflight,
+verification, and receipt as a multi-device change. Mutations without a
+verification contract fail closed.
+
+Actions may also carry a read-only observed-state precondition. The executor
+evaluates every precondition before the first mutation; if the observed state
+no longer matches the reviewed plan, the whole execution fails as stale without
+partially changing the fleet.

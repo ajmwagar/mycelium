@@ -40,12 +40,52 @@ pub(crate) async fn execute(
                 capability: action.capability.clone(),
                 state: ExecutionState::Planned,
                 output: None,
+                precondition: None,
                 verification: None,
                 error: None,
             })
             .collect(),
     };
     persist(&receipt)?;
+
+    // Establish every observed-state precondition before the first mutation.
+    // A stale plan therefore fails without partially changing the fleet.
+    for (index, action) in plan.actions.iter().enumerate() {
+        let Some(precondition) = &action.precondition else {
+            continue;
+        };
+        let device = inventory.get(&action.device)?;
+        let observed = match device
+            .invoke(
+                &ExecContext::readonly(&precondition.capability),
+                &precondition.capability,
+                precondition.params.clone(),
+            )
+            .await
+        {
+            Ok(value)
+                if value.ok && verification_matches(&value.output, &precondition.predicate) =>
+            {
+                value
+            }
+            Ok(_) => {
+                return fail(
+                    &mut receipt,
+                    index,
+                    "observed state changed after planning".into(),
+                )
+            }
+            Err(error) => {
+                return fail(
+                    &mut receipt,
+                    index,
+                    format!("precondition observation failed: {error}"),
+                )
+            }
+        };
+        receipt.actions[index].precondition = Some(observed.output);
+        persist(&receipt)?;
+    }
 
     for (index, action) in plan.actions.iter().enumerate() {
         let device = inventory.get(&action.device)?;
@@ -142,6 +182,21 @@ fn preflight(inventory: &Inventory, plan: &ActionPlan) -> Result<()> {
             .spec
             .validate(&action.verification.params)
             .map_err(MyceliumError::Validation)?;
+        if let Some(precondition) = &action.precondition {
+            let spec = capabilities
+                .iter()
+                .find(|capability| capability.id == precondition.capability)
+                .ok_or_else(|| MyceliumError::UnknownCapability(precondition.capability.clone()))?;
+            if spec.spec.mutation {
+                return Err(MyceliumError::Validation(format!(
+                    "precondition capability `{}` must be read-only",
+                    precondition.capability
+                )));
+            }
+            spec.spec
+                .validate(&precondition.params)
+                .map_err(MyceliumError::Validation)?;
+        }
     }
     Ok(())
 }

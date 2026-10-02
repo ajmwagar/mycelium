@@ -1,6 +1,14 @@
 use serde::{Deserialize, Serialize};
 
-use crate::value::Value;
+use crate::{ActionRisk, Params, Value};
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MutationVerification {
+    pub risk: ActionRisk,
+    pub capability: String,
+    #[serde(default)]
+    pub params: Params,
+}
 
 /// Result of a capability invocation.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -48,6 +56,10 @@ pub struct CapSpec {
     /// Whether invoking this changes device state.
     #[serde(default)]
     pub mutation: bool,
+    /// Required to lower an ad-hoc mutation into the shared ActionPlan
+    /// executor. Missing metadata makes direct writes fail closed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification: Option<MutationVerification>,
     /// Free-form docs of the output shape.
     #[serde(default)]
     pub returns: Option<String>,
@@ -61,12 +73,22 @@ impl CapSpec {
             params: Vec::new(),
             optional: Vec::new(),
             mutation: false,
+            verification: None,
             returns: None,
         }
     }
 
     pub fn mutation(description: impl Into<String>) -> Self {
         Self { mutation: true, ..Self::readonly(description) }
+    }
+
+    pub fn verified_by(mut self, risk: ActionRisk, capability: impl Into<String>) -> Self {
+        self.verification = Some(MutationVerification {
+            risk,
+            capability: capability.into(),
+            params: Params::new(),
+        });
+        self
     }
 
     pub fn param(mut self, name: impl Into<String>, ty: ParamType, docs: impl Into<String>) -> Self {

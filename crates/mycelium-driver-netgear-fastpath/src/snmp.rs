@@ -256,6 +256,11 @@ fn action(
     before: Option<Value>,
     expected_after: Value,
 ) -> PlannedAction {
+    let precondition = before.clone().map(|expected| VerificationSpec {
+        capability: ID_SWITCH_OBSERVE.into(),
+        params: Params::new(),
+        predicate: VerificationPredicate::Contains { expected },
+    });
     PlannedAction {
         device: device.into(),
         capability: capability.into(),
@@ -263,6 +268,7 @@ fn action(
         risk: ActionRisk::Disruptive,
         before,
         expected_after: Some(expected_after.clone()),
+        precondition,
         verification: VerificationSpec {
             capability: ID_SWITCH_OBSERVE.into(),
             params: Params::new(),

@@ -54,7 +54,7 @@ pub use reconcile::{
     ExecutionReceipt, ExecutionState, PlanBlocker, PlannedAction, StateChangePlan,
     StateChangeReceipt, VerificationPredicate, VerificationSpec, ACTION_PLAN_SCHEMA_VERSION,
 };
-pub use spec::{CapResult, CapSpec, ParamSpec, ParamType};
+pub use spec::{CapResult, CapSpec, MutationVerification, ParamSpec, ParamType};
 pub use topology::{
     ipv4_in_cidr, Conflict, IpRecord, LeaseRecord, Link, LinkDuplex, LinkMedium, LinkState,
     MacAddress, MeshControlPlane, MeshCoordinator, MeshProtocol, NodeAnnotation, Observation,

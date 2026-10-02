@@ -72,6 +72,8 @@ pub struct PlannedAction {
     pub before: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_after: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub precondition: Option<VerificationSpec>,
     pub verification: VerificationSpec,
 }
 
@@ -189,6 +191,8 @@ pub struct ActionReceipt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub precondition: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verification: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -302,6 +306,7 @@ mod tests {
             risk: ActionRisk::Disruptive,
             before: None,
             expected_after: Some(Value::Int(20)),
+            precondition: None,
             verification: VerificationSpec {
                 capability: "vlan.list".into(),
                 params: Params::new(),
@@ -352,6 +357,7 @@ mod tests {
             risk: ActionRisk::Low,
             before: None,
             expected_after: None,
+            precondition: None,
             verification: VerificationSpec {
                 capability: "test.read".into(),
                 params: Params::new(),
