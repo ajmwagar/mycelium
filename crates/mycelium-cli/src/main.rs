@@ -5,6 +5,7 @@
 //! explicit `--write`, and `--dry-run` always shows the plan instead of
 //! applying it.
 
+mod completions;
 mod dns;
 mod enroll;
 mod invite;
@@ -43,6 +44,7 @@ fn main() {
             env!("CARGO_PKG_VERSION"),
             mycelium_peer_protocol::PROTOCOL_VERSION
         )]),
+        Some("completions") => completions::command(&args[1..], USAGE),
         Some(other) => rt_block(run(other, &args[1..])),
         None => Ok(usage()),
     };
@@ -79,6 +81,7 @@ const USAGE: &str = "\
 mycelium — control plane for your network appliances
 
 usage:
+  mycelium completions zsh|bash|fish
   mycelium setup [--gateway HTTPS-URL] [--claim CODE] [--ttl 8h] [--key PATH] [--certificate PATH]
   mycelium setup --repair [--site SITE] [--path MYCELIUM-HOME]
   mycelium pair --kind access --name NAME --unix-user USER... [--role ROLE]... [--listen ADDR] [--advertise URL] [--ca PATH] [--ttl 15m] [--credential-ttl 8h]

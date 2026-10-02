@@ -49,6 +49,22 @@ curl --proto '=https' --tlsv1.2 -fsS \
 After installation, enrollment can be repeated explicitly with
 `mycelium setup --gateway https://sso.fpl.dev`.
 
+### Shell completion
+
+Completion definitions are generated from the CLI's usage contract, so newly
+documented subcommands appear without maintaining a second command list:
+
+```sh
+# Zsh (current shell)
+source <(mycelium completions zsh)
+
+# Bash (current shell)
+source <(mycelium completions bash)
+
+# Fish (persistent)
+mycelium completions fish > ~/.config/fish/completions/mycelium.fish
+```
+
 An administrator can instead run a temporary pairing listener when OIDC is not
 appropriate. The self-contained claim carries the rendezvous URL and a
 high-entropy secret; the authority stores only its hash. The listener exits
