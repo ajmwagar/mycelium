@@ -639,6 +639,21 @@ mycelium security remediation apply <plan-sha256> --write
 mycelium security remediation verify <plan-sha256>
 ```
 
+Fleet operations are projections over the same converged peer state. Node
+classes are derived from signed platform, architecture, and site identity
+rather than duplicated in a second inventory:
+
+```sh
+mycelium fleet status
+mycelium fleet status --site wagar-house --platform linux
+mycelium fleet exec --site wagar-house --platform linux -- uptime
+```
+
+Signed release manifests select artifacts by the peer's compatible Rust target.
+Peers fetch matching bytes from any peer that has the same authorized SHA-256;
+`MYCELIUM_ARTIFACT_REQUEST_SECS` can tune the idle retry interval (five seconds
+by default) without changing chunk integrity or release authority.
+
 Full XCCDF evidence and generated plans remain local under
 `$MYCELIUM_HOME/security/evidence/`; gossip carries their SHA-256 digests and
 pass/fail/error/not-applicable counts. Mycelium refuses remediation-plan

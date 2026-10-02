@@ -121,6 +121,8 @@ usage:
     [--provider NAME] [--providers PATH]
   mycelium update status [--channel CHANNEL] [--fleet] [--json]
   mycelium update apply [--channel CHANNEL] [--path INSTALLED-BINARY] --write
+  mycelium fleet status [--site SITE] [--platform linux|darwin] [--json]
+  mycelium fleet exec [--site SITE] [--platform linux|darwin] [--user USER] -- COMMAND...
   mycelium wireguard plan LEFT RIGHT [--left-subnet CIDR...] [--right-subnet CIDR...]
     [--left-endpoint HOST:PORT] [--right-endpoint HOST:PORT]
     [--left-key PUBLIC-KEY] [--right-key PUBLIC-KEY] [--interface NAME] [--json]
@@ -482,6 +484,7 @@ async fn run(cmd: &str, args: &[String]) -> Result<Vec<String>, ClientError> {
         "plan" => plan(args).await,
         "ssh" => ssh(args, false).await,
         "exec" => ssh(args, true).await,
+        "fleet" => fleet(args).await,
         "scp" => scp(args).await,
         "scan" => {
             let f = parse_flags(args);
@@ -587,6 +590,112 @@ async fn run(cmd: &str, args: &[String]) -> Result<Vec<String>, ClientError> {
         other => Err(err_usage(&format!(
             "unknown command `{other}` (see `mycelium`)"
         ))),
+    }
+}
+
+async fn fleet(args: &[String]) -> Result<Vec<String>, ClientError> {
+    let action = args.first().map(String::as_str).unwrap_or("status");
+    let value_after = |flag: &str| {
+        args.windows(2)
+            .find(|pair| pair[0] == flag)
+            .map(|pair| pair[1].clone())
+    };
+    let site = value_after("--site");
+    let platform = value_after("--platform");
+    let user = value_after("--user");
+    let json = args.iter().any(|arg| arg == "--json");
+    let mut client = connect().await?;
+    let peers = client.call(&Request::PeerList).await?;
+    let mut selected = peers
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|peer| {
+            site.as_deref()
+                .is_none_or(|expected| peer["hello"]["site"].as_str() == Some(expected))
+                && platform.as_deref().is_none_or(|expected| {
+                    peer["hello"]["platform"]
+                        .as_str()
+                        .is_some_and(|actual| actual.eq_ignore_ascii_case(expected))
+                })
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    selected.sort_by(|left, right| {
+        left["hello"]["hostname"]
+            .as_str()
+            .cmp(&right["hello"]["hostname"].as_str())
+    });
+    match action {
+        "status" => {
+            let rows = selected
+                .into_iter()
+                .map(|peer| {
+                    let health = &peer["health"];
+                    serde_json::json!({
+                        "node_id": peer["hello"]["node_id"],
+                        "hostname": peer["hello"]["hostname"],
+                        "site": peer["hello"]["site"],
+                        "platform": peer["hello"]["platform"],
+                        "architecture": peer["hello"]["architecture"],
+                        "daemon_version": peer["hello"]["daemon_version"],
+                        "last_seen": peer["last_seen"],
+                        "load_average": health["load_average"],
+                        "ssh_listening": health["ssh_listening"],
+                        "update_state": health["platform_metrics"]["mycelium_update.activation_state"],
+                        "release_version": health["platform_metrics"]["mycelium_update.release_version"],
+                    })
+                })
+                .collect::<Vec<_>>();
+            if json {
+                return Ok(vec![serde_json::Value::Array(rows).to_string()]);
+            }
+            let mut lines = vec!["Fleet status:".into()];
+            for row in rows {
+                lines.push(format!(
+                    "  {} site={} platform={}/{} ssh={} daemon={} update={}",
+                    row["hostname"].as_str().unwrap_or("?"),
+                    row["site"].as_str().unwrap_or("?"),
+                    row["platform"].as_str().unwrap_or("?"),
+                    row["architecture"].as_str().unwrap_or("?"),
+                    row["ssh_listening"]
+                        .as_bool()
+                        .map_or("unknown", |up| if up { "up" } else { "down" }),
+                    row["daemon_version"].as_str().unwrap_or("?"),
+                    row["release_version"].as_str().unwrap_or("unrecorded"),
+                ));
+            }
+            Ok(lines)
+        }
+        "exec" => {
+            let separator = args
+                .iter()
+                .position(|arg| arg == "--")
+                .ok_or_else(|| err_usage("fleet exec needs a command after --"))?;
+            let command = &args[separator + 1..];
+            if command.is_empty() {
+                return Err(err_usage("fleet exec needs a command after --"));
+            }
+            if selected.is_empty() {
+                return Err(err_usage("fleet selector matched no peers"));
+            }
+            let mut lines = Vec::new();
+            for peer in selected {
+                let hostname = peer["hello"]["hostname"]
+                    .as_str()
+                    .ok_or_else(|| err_usage("peer has no hostname"))?;
+                lines.push(format!("==> {hostname}"));
+                let mut ssh_args = vec![hostname.to_owned()];
+                if let Some(user) = &user {
+                    ssh_args.extend(["--user".into(), user.clone()]);
+                }
+                ssh_args.push("--".into());
+                ssh_args.extend(command.iter().cloned());
+                ssh(&ssh_args, true).await?;
+            }
+            Ok(lines)
+        }
+        other => Err(err_usage(&format!("unknown fleet action `{other}`"))),
     }
 }
 
@@ -927,42 +1036,43 @@ async fn dns_command(args: &[String]) -> Result<Vec<String>, ClientError> {
 
 async fn security_command(args: &[String]) -> Result<Vec<String>, ClientError> {
     let action = args.first().map(String::as_str).unwrap_or("status");
-    let request = match action {
-        "status" => Request::SecurityPostureList,
-        "events" => Request::SecurityEventList,
-        "scan" => {
-            let value = |flag: &str| {
-                args.windows(2)
-                    .find(|pair| pair[0] == flag)
-                    .map(|pair| pair[1].clone())
-            };
-            Request::SecurityScan {
-                stig_content: value("--stig-content"),
-                stig_profile: value("--stig-profile"),
-                remediation_plan: args.iter().any(|arg| arg == "--remediation-plan"),
+    let request =
+        match action {
+            "status" => Request::SecurityPostureList,
+            "events" => Request::SecurityEventList,
+            "scan" => {
+                let value = |flag: &str| {
+                    args.windows(2)
+                        .find(|pair| pair[0] == flag)
+                        .map(|pair| pair[1].clone())
+                };
+                Request::SecurityScan {
+                    stig_content: value("--stig-content"),
+                    stig_profile: value("--stig-profile"),
+                    remediation_plan: args.iter().any(|arg| arg == "--remediation-plan"),
+                }
             }
-        }
-        "remediation" => match args.get(1).map(String::as_str).unwrap_or("list") {
-            "list" => Request::SecurityRemediationList,
-            "apply" => Request::SecurityRemediationApply {
-                digest: args.get(2).cloned().ok_or_else(|| {
-                    err_usage("security remediation apply needs a plan digest")
-                })?,
-                write: args.iter().any(|arg| arg == "--write"),
+            "remediation" => match args.get(1).map(String::as_str).unwrap_or("list") {
+                "list" => Request::SecurityRemediationList,
+                "apply" => Request::SecurityRemediationApply {
+                    digest: args.get(2).cloned().ok_or_else(|| {
+                        err_usage("security remediation apply needs a plan digest")
+                    })?,
+                    write: args.iter().any(|arg| arg == "--write"),
+                },
+                "verify" => Request::SecurityRemediationVerify {
+                    digest: args.get(2).cloned().ok_or_else(|| {
+                        err_usage("security remediation verify needs a plan digest")
+                    })?,
+                },
+                other => return Err(err_usage(&format!("unknown remediation action `{other}`"))),
             },
-            "verify" => Request::SecurityRemediationVerify {
-                digest: args.get(2).cloned().ok_or_else(|| {
-                    err_usage("security remediation verify needs a plan digest")
-                })?,
-            },
-            other => return Err(err_usage(&format!("unknown remediation action `{other}`"))),
-        },
-        _ => {
-            return Err(err_usage(
-                "security supports `status`, `scan`, and `events`",
-            ))
-        }
-    };
+            _ => {
+                return Err(err_usage(
+                    "security supports `status`, `scan`, and `events`",
+                ))
+            }
+        };
     let mut client = connect().await?;
     let value = client.call(&request).await?;
     if args.iter().any(|arg| arg == "--json") {

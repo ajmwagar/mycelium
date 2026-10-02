@@ -30,7 +30,7 @@ use tokio_rustls::{TlsAcceptor, TlsConnector};
 const HEALTH_INTERVAL: Duration = Duration::from_secs(60);
 const SECURITY_INTERVAL: Duration = Duration::from_secs(15 * 60);
 const DIGEST_INTERVAL: Duration = Duration::from_secs(15);
-const ARTIFACT_REQUEST_INTERVAL: Duration = Duration::from_secs(1);
+const DEFAULT_ARTIFACT_REQUEST_INTERVAL: Duration = Duration::from_secs(5);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_OBSERVATIONS_PER_MESSAGE: usize = 64;
 const MAX_OBSERVATION_MESSAGE_BYTES: usize = 900 * 1024;
@@ -771,7 +771,13 @@ impl Mesh {
         let mut lines = BufReader::new(reader).lines();
         let mut digest_interval = tokio::time::interval(DIGEST_INTERVAL);
         digest_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut artifact_interval = tokio::time::interval(ARTIFACT_REQUEST_INTERVAL);
+        let artifact_request_interval = std::env::var("MYCELIUM_ARTIFACT_REQUEST_SECS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|seconds| *seconds > 0)
+            .map(Duration::from_secs)
+            .unwrap_or(DEFAULT_ARTIFACT_REQUEST_INTERVAL);
+        let mut artifact_interval = tokio::time::interval(artifact_request_interval);
         artifact_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
