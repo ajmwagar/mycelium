@@ -1,3 +1,14 @@
+//! Deterministic authorization over Mycelium's gossiped authority graph.
+//!
+//! The resolver is deliberately pure and offline: configured public root keys,
+//! signed authority records, legacy migration roots, and a caller-supplied Unix
+//! timestamp fully determine every decision. Discovery proves availability and
+//! transport identity; neither one grants authority.
+//!
+//! Authority v1 is one level deep. Only configured roots may sign delegation
+//! and revocation records. Delegated workload keys may publish the exact access,
+//! release, or package records their capabilities permit, but cannot delegate.
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use mycelium_peer_protocol::{
@@ -5,26 +16,43 @@ use mycelium_peer_protocol::{
 };
 use serde::Serialize;
 
+/// The trust path responsible for an authorization decision.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthoritySource {
+    /// The workload record was signed directly by a configured root.
     Root,
+    /// An active root-signed delegation permits the workload signer.
     Delegation,
+    /// A deprecated per-feature key setting permits the signer.
     Legacy,
+    /// No active trust path permits the requested operation.
     Denied,
 }
 
+/// An auditable result returned by every authority check.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct AuthorityDecision {
+    /// Whether the operation is permitted.
     pub authorized: bool,
+    /// The trust path used, or `Denied` when no path exists.
     pub source: AuthoritySource,
+    /// Public-key identity whose workload record is being checked.
     pub signer: String,
+    /// Stable operation name such as `access.publish`.
     pub action: String,
+    /// Delegation responsible for approval, when applicable.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub delegation_id: Option<String>,
+    /// Operator-readable explanation of the decision.
     pub reason: String,
 }
 
+/// Resolves root, delegated, revoked, and legacy authorization consistently.
+///
+/// Invalid records are ignored. Revocation wins over delegation regardless of
+/// gossip arrival order. The supplied `now` value makes decisions reproducible
+/// in tests and explicit at every call site.
 pub struct AuthorityResolver<'a> {
     roots: &'a BTreeSet<String>,
     legacy_access: &'a BTreeSet<String>,
@@ -42,6 +70,11 @@ struct Delegation {
 }
 
 impl<'a> AuthorityResolver<'a> {
+    /// Builds a resolver from configured roots and a converged record snapshot.
+    ///
+    /// `legacy_access` and `legacy_release` preserve compatibility with
+    /// `MYCELIUM_ACCESS_KEYS` and `MYCELIUM_RELEASE_KEYS`; decisions using them
+    /// are reported as [`AuthoritySource::Legacy`].
     pub fn new(
         roots: &'a BTreeSet<String>,
         legacy_access: &'a BTreeSet<String>,
@@ -97,6 +130,7 @@ impl<'a> AuthorityResolver<'a> {
         }
     }
 
+    /// Checks permission to publish signed access records.
     pub fn access(&self, signer: &str) -> AuthorityDecision {
         self.decide(
             signer,
@@ -106,6 +140,7 @@ impl<'a> AuthorityResolver<'a> {
         )
     }
 
+    /// Checks permission to publish a Mycelium self-update release.
     pub fn release(&self, signer: &str) -> AuthorityDecision {
         self.decide(
             signer,
@@ -115,6 +150,7 @@ impl<'a> AuthorityResolver<'a> {
         )
     }
 
+    /// Checks permission to promote a signed package manifest.
     pub fn package(&self, package: &PackageManifest) -> AuthorityDecision {
         self.package_fields(
             &package.signer,
@@ -124,6 +160,11 @@ impl<'a> AuthorityResolver<'a> {
         )
     }
 
+    /// Checks package promotion using its policy-relevant tuple.
+    ///
+    /// This supports explain/plan paths without manufacturing a signed package
+    /// manifest. Matching is exact; empty constraint sets in the capability are
+    /// wildcards.
     pub fn package_fields(
         &self,
         signer: &str,

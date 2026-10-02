@@ -710,26 +710,42 @@ impl PackageManifest {
     }
 }
 
+/// A narrowly scoped operation that an authority root may delegate.
+///
+/// Empty package constraint sets are wildcards. For example, an empty
+/// `targets` set permits the named packages on every target, while a non-empty
+/// set permits only exact target-triple matches.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum AuthorityCapability {
+    /// Publish signed access grants and access revocations.
     AccessPublish,
+    /// Publish a signed Mycelium self-update release manifest.
     ReleasePublish,
+    /// Promote a signed, named software package into the mesh.
     PackagePromote {
+        /// Permitted package names; empty means all package names.
         #[serde(default)]
         packages: BTreeSet<String>,
+        /// Permitted release channels; empty means all channels.
         #[serde(default)]
         channels: BTreeSet<String>,
+        /// Permitted target triples; empty means all targets.
         #[serde(default)]
         targets: BTreeSet<String>,
     },
 }
 
 impl AuthorityCapability {
+    /// Returns whether this capability permits the supplied signed package.
     pub fn permits_package(&self, package: &PackageManifest) -> bool {
         self.permits_package_fields(&package.name, &package.channel, &package.target)
     }
 
+    /// Returns whether this capability permits an exact package tuple.
+    ///
+    /// This is the projection used by `authority explain`, where no manifest
+    /// needs to be constructed merely to inspect a policy decision.
     pub fn permits_package_fields(&self, name: &str, channel: &str, target: &str) -> bool {
         match self {
             Self::PackagePromote {
@@ -746,29 +762,54 @@ impl AuthorityCapability {
     }
 }
 
+/// A root-issued change to the shared authority graph.
+///
+/// Authority v1 deliberately supports one delegation level: a configured root
+/// may delegate capabilities to a workload signer, but a delegated signer may
+/// not issue further authority statements.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AuthorityStatement {
+    /// Grants bounded capabilities to one Ed25519 public-key identity.
     Delegate {
+        /// Stable, globally unique identifier referenced by revocations.
         delegation_id: String,
+        /// Hex-encoded Ed25519 public key receiving the capabilities.
         subject: String,
+        /// Operations the subject may perform.
         capabilities: Vec<AuthorityCapability>,
+        /// First valid Unix timestamp, inclusive.
         not_before: u64,
+        /// Expiration Unix timestamp, exclusive.
         not_after: u64,
     },
+    /// Permanently invalidates one delegation after `revoked_at`.
     Revoke {
+        /// Stable identifier for this revocation observation.
         revocation_id: String,
+        /// Identifier of the delegation being revoked.
         delegation_id: String,
+        /// Unix timestamp at which the revocation takes effect.
         revoked_at: u64,
+        /// Human-readable audit reason.
         reason: String,
     },
 }
 
+/// A signed, gossipable authority statement.
+///
+/// `signer` is the hex-encoded Ed25519 public key. Peers accept the record only
+/// when that key is configured as an authority root; signature validity alone
+/// never grants root authority.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthorityRecord {
+    /// Wire protocol version covered by the signature.
     pub protocol_version: u16,
+    /// Delegation or revocation covered by the signature.
     pub statement: AuthorityStatement,
+    /// Hex-encoded Ed25519 authority-root public key.
     pub signer: String,
+    /// Hex-encoded Ed25519 signature over the canonical record fields.
     pub signature: String,
 }
 
@@ -780,6 +821,10 @@ struct UnsignedAuthority<'a> {
 }
 
 impl AuthorityRecord {
+    /// Creates a root-signed authority record.
+    ///
+    /// Callers must still verify that the resulting signer is a configured
+    /// authority root before publishing the record.
     pub fn sign(
         key: &SigningKey,
         statement: AuthorityStatement,
@@ -798,6 +843,10 @@ impl AuthorityRecord {
         })
     }
 
+    /// Verifies the record's protocol version and Ed25519 signature.
+    ///
+    /// This proves integrity and signer possession only. Root membership and
+    /// delegation policy are evaluated by the daemon's authority resolver.
     pub fn verify(&self) -> Result<(), String> {
         if self.protocol_version != PROTOCOL_VERSION {
             return Err(format!("unsupported protocol {}", self.protocol_version));
