@@ -5,10 +5,11 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use mycelium_core::{
-    AllocationReceipt, AllocationValue, CredentialSet, DeviceId, DeviceMeta, DiscoveryRequest,
-    DiscoveryScope, Driver, Inventory, LogicalNetwork, MeshControlPlane, MeshCoordinator,
-    MeshProtocol, MyceliumError, NetworkBinding, NetworkDriftReport, NetworkDriftState,
-    Observation, Origin, OverlayPeerRecord, Result, Secret, Target, Topology, Transport, Value,
+    AllocationReceipt, AllocationValue, CredentialSet, DeviceId, DeviceMeta, DhcpScopeIntent,
+    DiscoveryRequest, DiscoveryScope, Driver, Inventory, LogicalNetwork, MeshControlPlane,
+    MeshCoordinator, MeshProtocol, MyceliumError, NetworkBinding, NetworkDriftReport,
+    NetworkDriftState, Observation, Origin, OverlayPeerRecord, Result, Secret, Target, Topology,
+    Transport, Value,
 };
 use mycelium_driver_darwin::DarwinDriver;
 use mycelium_driver_edgeos::{EdgeOsDriver, SshSession};
@@ -136,6 +137,7 @@ pub struct Daemon {
     allocations: Mutex<BTreeMap<String, AllocationReceipt>>,
     networks: Mutex<BTreeMap<String, LogicalNetwork>>,
     network_bindings: Mutex<BTreeMap<String, NetworkBinding>>,
+    dhcp_scopes: Mutex<BTreeMap<String, DhcpScopeIntent>>,
     pub mesh: Arc<crate::peer::Mesh>,
 }
 
@@ -245,6 +247,15 @@ impl Daemon {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
             Err(error) => return Err(MyceliumError::Io(error)),
         };
+        let dhcp_scopes = match std::fs::read_to_string(crate::dhcp_scopes_path()) {
+            Ok(text) => serde_json::from_str::<Vec<DhcpScopeIntent>>(&text)
+                .map_err(|error| MyceliumError::Parse(format!("dhcp-scopes.json: {error}")))?
+                .into_iter()
+                .map(|scope| (scope.identity.clone(), scope))
+                .collect(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
+            Err(error) => return Err(MyceliumError::Io(error)),
+        };
 
         let mesh = crate::peer::Mesh::boot()
             .map_err(|error| MyceliumError::Validation(format!("peer mesh: {error}")))?;
@@ -257,6 +268,7 @@ impl Daemon {
             allocations: Mutex::new(allocations),
             networks: Mutex::new(networks),
             network_bindings: Mutex::new(network_bindings),
+            dhcp_scopes: Mutex::new(dhcp_scopes),
             mesh,
         };
         // Reconnect saved devices; failures are recorded but keep the entry
@@ -366,6 +378,24 @@ impl Daemon {
         std::fs::write(
             &temporary,
             serde_json::to_string_pretty(&bindings).map_err(json_err)?,
+        )?;
+        std::fs::rename(temporary, path)?;
+        Ok(())
+    }
+
+    async fn persist_dhcp_scopes(&self) -> Result<()> {
+        let scopes = self
+            .dhcp_scopes
+            .lock()
+            .await
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        let path = crate::dhcp_scopes_path();
+        let temporary = path.with_extension(format!("json.tmp-{}", std::process::id()));
+        std::fs::write(
+            &temporary,
+            serde_json::to_string_pretty(&scopes).map_err(json_err)?,
         )?;
         std::fs::rename(temporary, path)?;
         Ok(())
@@ -1108,11 +1138,12 @@ impl Daemon {
                 let allocations = self.allocations.lock().await;
                 let topology = self.topology.lock().await;
                 let bindings = self.network_bindings.lock().await;
+                let dhcp_scopes = self.dhcp_scopes.lock().await;
                 let plans = selected
                     .into_iter()
                     .map(|network| {
                         let report = network_drift_report(network, &allocations, &topology);
-                        network_action_plan(report, &allocations, &bindings)
+                        network_action_plan(report, &allocations, &bindings, &dhcp_scopes)
                     })
                     .collect::<Vec<_>>();
                 to_value(plans).map_err(json_err)
@@ -1189,6 +1220,97 @@ impl Daemon {
                 bindings.insert(candidate.identity.clone(), candidate.clone());
                 drop(bindings);
                 self.persist_network_bindings().await?;
+                to_value(candidate).map_err(json_err)
+            }
+            Request::NetworkDhcpList { network } => {
+                let matching_ids = self
+                    .networks
+                    .lock()
+                    .await
+                    .values()
+                    .filter(|logical| {
+                        network.as_ref().is_none_or(|selector| {
+                            logical.identity == *selector || logical.name == *selector
+                        })
+                    })
+                    .map(|logical| logical.identity.clone())
+                    .collect::<BTreeSet<_>>();
+                let scopes = self
+                    .dhcp_scopes
+                    .lock()
+                    .await
+                    .values()
+                    .filter(|scope| network.is_none() || matching_ids.contains(&scope.network))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                to_value(scopes).map_err(json_err)
+            }
+            Request::NetworkDhcpSet {
+                network,
+                device,
+                pool,
+                range_start,
+                range_end,
+                dns_servers,
+                write,
+                dry_run,
+            } => {
+                validate_network_name(&pool.to_ascii_lowercase().replace('_', "-"))?;
+                let networks = self.networks.lock().await;
+                let logical = networks
+                    .values()
+                    .find(|candidate| candidate.identity == network || candidate.name == network)
+                    .ok_or_else(|| {
+                        MyceliumError::Validation(format!("unknown logical network `{network}`"))
+                    })?;
+                let network_id = logical.identity.clone();
+                drop(networks);
+                let capabilities = self.inventory.capabilities(&device)?;
+                if !capabilities
+                    .iter()
+                    .any(|capability| capability.id == mycelium_core::ID_DHCP_ENSURE_POOL)
+                {
+                    return Err(MyceliumError::Unsupported {
+                        device,
+                        capability: mycelium_core::ID_DHCP_ENSURE_POOL.into(),
+                    });
+                }
+                let range_start = range_start
+                    .parse()
+                    .map_err(|_| MyceliumError::Validation("invalid DHCP range start".into()))?;
+                let range_end = range_end
+                    .parse()
+                    .map_err(|_| MyceliumError::Validation("invalid DHCP range end".into()))?;
+                let dns_servers = dns_servers
+                    .into_iter()
+                    .map(|value| {
+                        value.parse().map_err(|_| {
+                            MyceliumError::Validation(format!("invalid DNS server `{value}`"))
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let candidate = DhcpScopeIntent::new(
+                    network_id,
+                    device,
+                    pool,
+                    range_start,
+                    range_end,
+                    dns_servers,
+                );
+                if dry_run {
+                    return to_value(serde_json::json!({"dry_run": true, "scope": candidate}))
+                        .map_err(json_err);
+                }
+                if !write {
+                    return Err(MyceliumError::WritesNotPermitted(
+                        "DHCP scope intent requires --write".into(),
+                    ));
+                }
+                self.dhcp_scopes
+                    .lock()
+                    .await
+                    .insert(candidate.identity.clone(), candidate.clone());
+                self.persist_dhcp_scopes().await?;
                 to_value(candidate).map_err(json_err)
             }
             Request::PeerList => to_value(self.mesh.views().await).map_err(json_err),
@@ -1920,6 +2042,7 @@ fn network_action_plan(
     report: NetworkDriftReport,
     allocations: &BTreeMap<String, AllocationReceipt>,
     bindings: &BTreeMap<String, NetworkBinding>,
+    dhcp_scopes: &BTreeMap<String, DhcpScopeIntent>,
 ) -> mycelium_core::ActionPlan {
     let mut plan = report.action_plan();
     let placements = bindings
@@ -1946,14 +2069,15 @@ fn network_action_plan(
             AllocationValue::Vlan { id } => Some(id.0),
             _ => None,
         });
-    let address = receipts
+    let subnet = receipts
         .iter()
         .find_map(|receipt| match receipt.allocation {
             AllocationValue::Subnet {
+                network,
                 prefix,
                 gateway: Some(gateway),
                 ..
-            } => Some(format!("{gateway}/{prefix}")),
+            } => Some((format!("{network}/{prefix}"), gateway, prefix)),
             _ => None,
         });
     let Some(vlan) = vlan else {
@@ -1964,7 +2088,7 @@ fn network_action_plan(
         });
         return plan;
     };
-    let Some(address) = address else {
+    let Some((subnet_cidr, gateway, prefix)) = subnet else {
         plan.blockers.push(mycelium_core::PlanBlocker {
             code: "gateway_address_required".into(),
             message: "vlan.assign requires a gateway CIDR from the subnet allocation".into(),
@@ -1972,6 +2096,7 @@ fn network_action_plan(
         });
         return plan;
     };
+    let address = format!("{gateway}/{prefix}");
     for binding in placements {
         let expected = Value::Map(mycelium_core::Params::from_iter([
             ("id".into(), Value::Int(i64::from(vlan))),
@@ -1992,6 +2117,57 @@ fn network_action_plan(
             expected_after: Some(expected.clone()),
             verification: mycelium_core::VerificationSpec {
                 capability: mycelium_core::ID_VLAN_LIST.into(),
+                params: mycelium_core::Params::new(),
+                predicate: mycelium_core::VerificationPredicate::Contains { expected },
+            },
+        });
+    }
+    for scope in dhcp_scopes
+        .values()
+        .filter(|scope| scope.network == report.network.identity)
+    {
+        let expected_range = Value::Map(mycelium_core::Params::from_iter([
+            ("start".into(), Value::Str(scope.range_start.to_string())),
+            ("stop".into(), Value::Str(scope.range_end.to_string())),
+        ]));
+        let expected_subnet = Value::Map(mycelium_core::Params::from_iter([
+            ("cidr".into(), Value::Str(subnet_cidr.clone())),
+            ("default_router".into(), Value::Str(gateway.to_string())),
+            ("ranges".into(), Value::List(vec![expected_range])),
+        ]));
+        let expected = Value::Map(mycelium_core::Params::from_iter([
+            ("name".into(), Value::Str(scope.pool.clone())),
+            ("subnets".into(), Value::List(vec![expected_subnet])),
+        ]));
+        plan.actions.push(mycelium_core::PlannedAction {
+            device: scope.device.clone(),
+            capability: mycelium_core::ID_DHCP_ENSURE_POOL.into(),
+            params: mycelium_core::Params::from_iter([
+                ("pool".into(), Value::Str(scope.pool.clone())),
+                ("subnet".into(), Value::Str(subnet_cidr.clone())),
+                ("gateway".into(), Value::Str(gateway.to_string())),
+                (
+                    "range_start".into(),
+                    Value::Str(scope.range_start.to_string()),
+                ),
+                ("range_end".into(), Value::Str(scope.range_end.to_string())),
+                (
+                    "dns_servers".into(),
+                    Value::List(
+                        scope
+                            .dns_servers
+                            .iter()
+                            .map(ToString::to_string)
+                            .map(Value::Str)
+                            .collect(),
+                    ),
+                ),
+            ]),
+            risk: mycelium_core::ActionRisk::Disruptive,
+            before: None,
+            expected_after: Some(expected.clone()),
+            verification: mycelium_core::VerificationSpec {
+                capability: mycelium_core::ID_DHCP_LIST_POOLS.into(),
                 params: mycelium_core::Params::new(),
                 predicate: mycelium_core::VerificationPredicate::Contains { expected },
             },
@@ -2326,6 +2502,7 @@ mod tests {
             allocations: Mutex::new(BTreeMap::new()),
             networks: Mutex::new(BTreeMap::new()),
             network_bindings: Mutex::new(BTreeMap::new()),
+            dhcp_scopes: Mutex::new(BTreeMap::new()),
             mesh: crate::peer::Mesh::ephemeral_for_test(),
         }
     }
@@ -2462,6 +2639,15 @@ mod tests {
             (subnet.identity.clone(), subnet),
         ]);
         let bindings = BTreeMap::from([(binding.identity.clone(), binding)]);
+        let dhcp = DhcpScopeIntent::new(
+            &network.identity,
+            "edge-router",
+            "CCTV",
+            "192.168.30.100".parse().unwrap(),
+            "192.168.30.220".parse().unwrap(),
+            vec!["192.168.30.1".parse().unwrap()],
+        );
+        let dhcp_scopes = BTreeMap::from([(dhcp.identity.clone(), dhcp)]);
         let plan = network_action_plan(
             NetworkDriftReport {
                 network,
@@ -2474,14 +2660,23 @@ mod tests {
             },
             &allocations,
             &bindings,
+            &dhcp_scopes,
         );
         assert!(plan.ready_to_apply());
-        assert_eq!(plan.actions.len(), 1);
+        assert_eq!(plan.actions.len(), 2);
         assert_eq!(plan.actions[0].capability, mycelium_core::ID_VLAN_ASSIGN);
         assert_eq!(plan.actions[0].params["id"], Value::Int(30));
         assert_eq!(
             plan.actions[0].params["address"],
             Value::Str("192.168.30.1/24".into())
+        );
+        assert_eq!(
+            plan.actions[1].capability,
+            mycelium_core::ID_DHCP_ENSURE_POOL
+        );
+        assert_eq!(
+            plan.actions[1].params["subnet"],
+            Value::Str("192.168.30.0/24".into())
         );
     }
 

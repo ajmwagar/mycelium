@@ -104,6 +104,9 @@ fn value_contains(actual: &Value, expected: &Value) -> bool {
         return true;
     }
     match (actual, expected) {
+        (Value::List(actual), Value::List(expected)) => expected
+            .iter()
+            .all(|expected| actual.iter().any(|actual| value_contains(actual, expected))),
         (Value::List(values), _) => values.iter().any(|value| value_contains(value, expected)),
         (Value::Map(actual), Value::Map(expected)) => expected.iter().all(|(key, value)| {
             actual

@@ -26,16 +26,16 @@ pub mod topology;
 pub mod value;
 
 pub use allocation::{
-    AllocationBasis, AllocationReceipt, AllocationStrategy, AllocationValue, LogicalNetwork,
-    NetworkBinding, NetworkDriftReport, NetworkDriftState,
+    AllocationBasis, AllocationReceipt, AllocationStrategy, AllocationValue, DhcpScopeIntent,
+    LogicalNetwork, NetworkBinding, NetworkDriftReport, NetworkDriftState,
 };
 pub use boot::{BootPath, BootPlanError, BootReachability, BootTarget, NbdePlan};
 pub use capabilities::{DhcpManagement, DnsFiltering, Identity, Sensors, VlanManagement, Wireless};
 pub use capabilities::{
-    ID_CAPABILITIES, ID_DHCP_ADD_STATIC_LEASE, ID_DHCP_LIST_POOLS, ID_DNS_BLOCK,
-    ID_DNS_LIST_ENTRIES, ID_IDENTIFY, ID_NET_FORWARD_ENSURE, ID_NET_VIP_ENSURE, ID_SENSOR_HISTORY,
-    ID_SENSOR_READ, ID_SWITCH_OBSERVE, ID_SYSTEM_HEALTH, ID_VLAN_ASSIGN, ID_VLAN_CREATE,
-    ID_VLAN_LIST, ID_WLAN_GUEST_ENABLE, ID_WLAN_LIST_SSID,
+    ID_CAPABILITIES, ID_DHCP_ADD_STATIC_LEASE, ID_DHCP_ENSURE_POOL, ID_DHCP_LIST_POOLS,
+    ID_DNS_BLOCK, ID_DNS_LIST_ENTRIES, ID_IDENTIFY, ID_NET_FORWARD_ENSURE, ID_NET_VIP_ENSURE,
+    ID_SENSOR_HISTORY, ID_SENSOR_READ, ID_SWITCH_OBSERVE, ID_SYSTEM_HEALTH, ID_VLAN_ASSIGN,
+    ID_VLAN_CREATE, ID_VLAN_LIST, ID_WLAN_GUEST_ENABLE, ID_WLAN_LIST_SSID,
 };
 pub use credentials::{CredentialSet, Secret};
 pub use device::{DeviceId, DeviceKind, DeviceMeta};

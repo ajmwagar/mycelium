@@ -82,6 +82,10 @@ pub fn network_bindings_path() -> PathBuf {
     home_dir().join("network-bindings.json")
 }
 
+pub fn dhcp_scopes_path() -> PathBuf {
+    home_dir().join("dhcp-scopes.json")
+}
+
 pub fn peer_key_path() -> PathBuf {
     home_dir().join("peer.key")
 }

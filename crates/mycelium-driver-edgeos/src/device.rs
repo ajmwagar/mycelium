@@ -10,7 +10,7 @@ use mycelium_core::{
 };
 use mycelium_core::{
     DhcpManagement, Identity, VlanManagement, ID_CAPABILITIES, ID_DHCP_ADD_STATIC_LEASE,
-    ID_DHCP_LIST_POOLS, ID_IDENTIFY, ID_VLAN_ASSIGN, ID_VLAN_LIST,
+    ID_DHCP_ENSURE_POOL, ID_DHCP_LIST_POOLS, ID_IDENTIFY, ID_VLAN_ASSIGN, ID_VLAN_LIST,
 };
 use mycelium_ssdp::parse_responses as parse_ssdp_responses;
 
@@ -55,6 +55,20 @@ fn caps() -> &'static BTreeMap<String, CapSpec> {
                 ID_DHCP_LIST_POOLS.to_owned(),
                 CapSpec::readonly("dhcp-server shared networks, subnets, ranges, static leases")
                     .returns("list of {name, subnets:[{cidr, ranges, static-leases, ...}]}"),
+            ),
+            (
+                ID_DHCP_ENSURE_POOL.to_owned(),
+                CapSpec::mutation("ensure a DHCP pool matches declared network intent")
+                    .param("pool", ParamType::Str, "shared-network name")
+                    .param("subnet", ParamType::Str, "IPv4 subnet CIDR")
+                    .param("gateway", ParamType::Str, "default router address")
+                    .param("range_start", ParamType::Str, "first dynamic address")
+                    .param("range_end", ParamType::Str, "last dynamic address")
+                    .param(
+                        "dns_servers",
+                        ParamType::List,
+                        "ordered DNS server addresses",
+                    ),
             ),
             (
                 ID_DHCP_ADD_STATIC_LEASE.to_owned(),
@@ -431,6 +445,67 @@ impl Device for EdgeOsDevice {
                 Ok(CapResult::ok(
                     serde_json_to_value(&config.dhcp)?,
                 ))
+            }
+            ID_DHCP_ENSURE_POOL => {
+                let pool = get_str(&params, "pool")?;
+                let subnet = get_str(&params, "subnet")?;
+                let gateway = get_str(&params, "gateway")?;
+                let range_start = get_str(&params, "range_start")?;
+                let range_end = get_str(&params, "range_end")?;
+                check_token("pool", &pool)?;
+                let (network, prefix) = parse_cidr_str(&subnet).ok_or_else(|| {
+                    MyceliumError::Validation(format!("invalid DHCP subnet `{subnet}`"))
+                })?;
+                let parse_address = |name: &str, value: &str| -> Result<IpAddr> {
+                    let address = value.parse::<IpAddr>().map_err(|_| {
+                        MyceliumError::Validation(format!("invalid {name} address `{value}`"))
+                    })?;
+                    if !mycelium_core::ipv4_in_cidr(address, network, prefix) {
+                        return Err(MyceliumError::Validation(format!(
+                            "{name} address `{value}` is outside {subnet}"
+                        )));
+                    }
+                    Ok(address)
+                };
+                let gateway = parse_address("gateway", &gateway)?;
+                let range_start = parse_address("range_start", &range_start)?;
+                let range_end = parse_address("range_end", &range_end)?;
+                if u32::from(match range_start {
+                    IpAddr::V4(value) => value,
+                    _ => unreachable!(),
+                }) > u32::from(match range_end {
+                    IpAddr::V4(value) => value,
+                    _ => unreachable!(),
+                }) {
+                    return Err(MyceliumError::Validation(
+                        "DHCP range start must not exceed range end".into(),
+                    ));
+                }
+                let dns_servers = params
+                    .get("dns_servers")
+                    .and_then(Value::as_list)
+                    .ok_or_else(|| MyceliumError::Validation("dns_servers must be a list".into()))?
+                    .iter()
+                    .map(|value| {
+                        value
+                            .as_str()
+                            .and_then(|value| value.parse::<IpAddr>().ok())
+                            .ok_or_else(|| MyceliumError::Validation("invalid DNS server".into()))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let base =
+                    format!("set service dhcp-server shared-network-name {pool} subnet {subnet}");
+                let mut commands = vec![
+                    format!("{base} default-router '{gateway}'"),
+                    format!("{base} range 0 start '{range_start}'"),
+                    format!("{base} range 0 stop '{range_end}'"),
+                ];
+                commands.extend(
+                    dns_servers
+                        .into_iter()
+                        .map(|server| format!("{base} name-server '{server}'")),
+                );
+                self.run_config(ctx, commands).await
             }
             ID_DHCP_ADD_STATIC_LEASE => {
                 let mac_s = get_str(&params, "mac")?;

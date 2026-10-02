@@ -127,6 +127,23 @@ pub enum Request {
         #[serde(default)]
         dry_run: bool,
     },
+    NetworkDhcpList {
+        #[serde(default)]
+        network: Option<String>,
+    },
+    NetworkDhcpSet {
+        network: String,
+        device: String,
+        pool: String,
+        range_start: String,
+        range_end: String,
+        #[serde(default)]
+        dns_servers: Vec<String>,
+        #[serde(default)]
+        write: bool,
+        #[serde(default)]
+        dry_run: bool,
+    },
     /// Return the locally converged view of signed peer observations.
     PeerList,
     WireGuardBindingList,

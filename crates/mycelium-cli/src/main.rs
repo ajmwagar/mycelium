@@ -106,6 +106,8 @@ usage:
   mycelium networks apply --plan PATH --write [--dry-run] [--json]
   mycelium networks bindings [NAME] [--json]
   mycelium networks bind NAME --device ID --port PORT [--tagged] --write [--dry-run]
+  mycelium networks dhcp list [NAME] [--json]
+  mycelium networks dhcp set NAME --device ID --pool NAME --range START-END [--dns IP]... --write [--dry-run]
   mycelium peers [--json]
   mycelium releases list [--json]
   mycelium releases keygen --path PATH --write [--json]
@@ -2698,8 +2700,59 @@ async fn networks(args: &[String]) -> Result<Vec<String>, ClientError> {
                 .await?;
             Ok(vec![value.to_string()])
         }
+        Some("dhcp") => {
+            let action = args.get(1).map(String::as_str).unwrap_or("list");
+            if action == "list" {
+                let network = args.get(2).filter(|value| !value.starts_with('-')).cloned();
+                let mut client = connect().await?;
+                let value = client.call(&Request::NetworkDhcpList { network }).await?;
+                return Ok(vec![value.to_string()]);
+            }
+            if action != "set" {
+                return Err(err_usage("networks dhcp supports list|set"));
+            }
+            let network = args
+                .get(2)
+                .filter(|value| !value.starts_with('-'))
+                .cloned()
+                .ok_or_else(|| err_usage("networks dhcp set needs NAME"))?;
+            let value_after = |flag: &str| {
+                args.windows(2)
+                    .find(|pair| pair[0] == flag)
+                    .map(|pair| pair[1].clone())
+            };
+            let device = value_after("--device")
+                .ok_or_else(|| err_usage("DHCP intent needs --device ID"))?;
+            let pool =
+                value_after("--pool").ok_or_else(|| err_usage("DHCP intent needs --pool NAME"))?;
+            let range = value_after("--range")
+                .ok_or_else(|| err_usage("DHCP intent needs --range START-END"))?;
+            let (range_start, range_end) = range
+                .split_once('-')
+                .map(|(start, end)| (start.to_owned(), end.to_owned()))
+                .ok_or_else(|| err_usage("DHCP range must be START-END"))?;
+            let dns_servers = args
+                .windows(2)
+                .filter(|pair| pair[0] == "--dns")
+                .map(|pair| pair[1].clone())
+                .collect();
+            let mut client = connect().await?;
+            let value = client
+                .call(&Request::NetworkDhcpSet {
+                    network,
+                    device,
+                    pool,
+                    range_start,
+                    range_end,
+                    dns_servers,
+                    write: flags.write,
+                    dry_run: flags.dry_run,
+                })
+                .await?;
+            Ok(vec![value.to_string()])
+        }
         _ => Err(err_usage(
-            "usage: mycelium networks list|adopt|drift|plan|apply|bindings|bind ...",
+            "usage: mycelium networks list|adopt|drift|plan|apply|bindings|bind|dhcp ...",
         )),
     }
 }

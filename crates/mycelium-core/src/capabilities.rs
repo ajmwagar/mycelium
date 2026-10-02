@@ -26,6 +26,7 @@ pub const ID_SWITCH_OBSERVE: &str = "switch.observe";
 pub const ID_NET_VIP_ENSURE: &str = "net.vip.ensure";
 pub const ID_NET_FORWARD_ENSURE: &str = "net.forward.ensure";
 pub const ID_DHCP_LIST_POOLS: &str = "dhcp.list-pools";
+pub const ID_DHCP_ENSURE_POOL: &str = "dhcp.ensure-pool";
 pub const ID_DHCP_ADD_STATIC_LEASE: &str = "dhcp.add-static-lease";
 pub const ID_DNS_LIST_ENTRIES: &str = "dns.list-entries";
 pub const ID_DNS_BLOCK: &str = "dns.block";

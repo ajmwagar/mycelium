@@ -676,6 +676,18 @@ mycelium networks bind cctv --device netgear-titan --port 1/g8 --tagged --write
 mycelium networks bindings cctv
 ```
 
+DHCP policy declares only choices that cannot be inferred. The subnet,
+prefix, gateway, and VLAN remain derived from allocation receipts:
+
+```sh
+mycelium networks dhcp set cctv --device edge-router --pool CCTV \
+  --range 192.168.30.100-192.168.30.220 --dns 192.168.30.1 --dry-run
+mycelium networks dhcp set cctv --device edge-router --pool CCTV \
+  --range 192.168.30.100-192.168.30.220 --dns 192.168.30.1 --write
+mycelium networks plan cctv --json > cctv-plan.json
+mycelium networks apply --plan cctv-plan.json --dry-run
+```
+
 The daemon validates every action and read-only verification capability before
 the first mutation. It stops at the first failed action or postcondition.
 Plans with drift blockers cannot execute; unsupported DHCP, VLAN, or trunk

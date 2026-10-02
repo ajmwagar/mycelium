@@ -81,6 +81,45 @@ pub struct NetworkBinding {
     pub generation: u64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DhcpScopeIntent {
+    pub identity: String,
+    pub network: String,
+    pub device: String,
+    pub pool: String,
+    pub range_start: IpAddr,
+    pub range_end: IpAddr,
+    #[serde(default)]
+    pub dns_servers: Vec<IpAddr>,
+    pub generation: u64,
+}
+
+impl DhcpScopeIntent {
+    pub fn new(
+        network: impl Into<String>,
+        device: impl Into<String>,
+        pool: impl Into<String>,
+        range_start: IpAddr,
+        range_end: IpAddr,
+        dns_servers: Vec<IpAddr>,
+    ) -> Self {
+        let network = network.into();
+        let device = device.into();
+        let pool = pool.into();
+        Self {
+            identity: stable_identity(&format!("dhcp|{network}|{device}|{pool}"))
+                .replacen("alloc-", "dhcp-", 1),
+            network,
+            device,
+            pool,
+            range_start,
+            range_end,
+            dns_servers,
+            generation: 1,
+        }
+    }
+}
+
 impl NetworkBinding {
     pub fn new(
         network: impl Into<String>,
@@ -267,5 +306,26 @@ mod tests {
         let other = NetworkBinding::new("net-a", "switch-a", "1/g2", true);
         assert_eq!(first.identity, same.identity);
         assert_ne!(first.identity, other.identity);
+    }
+
+    #[test]
+    fn dhcp_scope_identity_ignores_mutable_policy_values() {
+        let first = DhcpScopeIntent::new(
+            "net-a",
+            "router",
+            "LAN",
+            "10.0.0.10".parse().unwrap(),
+            "10.0.0.100".parse().unwrap(),
+            vec![],
+        );
+        let changed = DhcpScopeIntent::new(
+            "net-a",
+            "router",
+            "LAN",
+            "10.0.0.20".parse().unwrap(),
+            "10.0.0.200".parse().unwrap(),
+            vec!["1.1.1.1".parse().unwrap()],
+        );
+        assert_eq!(first.identity, changed.identity);
     }
 }
