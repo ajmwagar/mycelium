@@ -914,7 +914,18 @@ impl Daemon {
                 to_value(crate::execution::list_receipts()?).map_err(json_err)
             }
             Request::Scan => {
-                let (discovered_targets, mut warnings) = self.discover_managed_targets().await;
+                let (discovered_targets, mut warnings) = match tokio::time::timeout(
+                    std::time::Duration::from_secs(20),
+                    self.discover_managed_targets(),
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => (
+                        Vec::new(),
+                        vec!["managed-target discovery exceeded its 20s probe budget".into()],
+                    ),
+                };
                 let mut observations = Vec::new();
                 for dev in self.inventory.devices() {
                     match dev.observe().await {
