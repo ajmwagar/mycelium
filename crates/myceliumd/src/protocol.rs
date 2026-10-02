@@ -175,6 +175,10 @@ pub enum Request {
         #[serde(default)]
         dry_run: bool,
     },
+    SecurityInspectionPlan {
+        intent: mycelium_core::InspectionIntent,
+        candidates: Vec<mycelium_core::InspectionCandidate>,
+    },
     SecurityScan {
         #[serde(default)]
         stig_content: Option<String>,

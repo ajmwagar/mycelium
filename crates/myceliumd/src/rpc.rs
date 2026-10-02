@@ -1392,6 +1392,9 @@ impl Daemon {
                 )
                 .map_err(json_err)
             }
+            Request::SecurityInspectionPlan { intent, candidates } => {
+                to_value(mycelium_core::plan_inspection(intent, &candidates)).map_err(json_err)
+            }
             Request::SecurityScan {
                 stig_content,
                 stig_profile,

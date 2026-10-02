@@ -690,6 +690,12 @@ in the structured JSON log line. Sink configuration and delivery state live in
 `$MYCELIUM_HOME/security/siem/`; the spool refuses new events at its bound rather
 than silently dropping them.
 
+Network inspection placement is engine-neutral: coverage intent and observed
+candidate facts produce a deterministic plan with scored placements and blind
+spots. Suricata is not required. See
+[`docs/inspection-placement.md`](docs/inspection-placement.md) for the candidate
+contract and CLI runbook.
+
 Fleet operations are projections over the same converged peer state. Node
 classes are derived from signed platform, architecture, and site identity
 rather than duplicated in a second inventory:

@@ -19,6 +19,7 @@ pub mod discovery;
 pub mod driver;
 pub mod error;
 pub mod exec;
+pub mod inspection;
 pub mod inventory;
 pub mod reconcile;
 pub mod spec;
@@ -43,6 +44,10 @@ pub use discovery::{DiscoveryProtocol, DiscoveryRequest, DiscoveryScope};
 pub use driver::{Driver, Target};
 pub use error::{MyceliumError, Result};
 pub use exec::{ExecContext, ExecOutcome, RecordingTransport, Transport};
+pub use inspection::{
+    plan_inspection, CandidateAssessment, InspectionCandidate, InspectionDepth, InspectionIntent,
+    InspectionPlacement, InspectionPlan, ObservationMethod, INSPECTION_SCHEMA_VERSION,
+};
 pub use inventory::{result_from_outcome, CapabilityInfo, Device, Inventory, InvokeResult};
 pub use reconcile::{
     verification_matches, ActionPlan, ActionRisk, PlanBlocker, PlannedAction,

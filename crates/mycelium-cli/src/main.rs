@@ -18,8 +18,9 @@ mod stun;
 mod wireguard;
 
 use mycelium_core::{
-    ActionPlan, ActionRisk, AllocationReceipt, BootReachability, DiscoveryProtocol, LogicalNetwork,
-    NbdePlan, NetworkDriftReport, Topology, ID_SWITCH_OBSERVE,
+    ActionPlan, ActionRisk, AllocationReceipt, BootReachability, DiscoveryProtocol,
+    InspectionCandidate, InspectionDepth, InspectionIntent, LogicalNetwork, NbdePlan,
+    NetworkDriftReport, Topology, ID_SWITCH_OBSERVE,
 };
 use mycelium_driver_netgear_fastpath::{FastpathConfig, FastpathIntent, SnmpSwitchState};
 use myceliumd::client::{Client, ClientError};
@@ -150,6 +151,7 @@ usage:
   mycelium security sinks add mqtt NAME HOST [--port PORT] [--topic TOPIC] [--client-id ID] [--tls] [--username-env ENV --password-env ENV] --write [--dry-run]
   mycelium security export status [--json]
   mycelium security export run [--sink NAME] --write [--dry-run] [--json]
+  mycelium security inspection plan --network NAME... --candidates FILE [--depth host-flows|packet-metadata|deep-packets] [--redundancy N] [--json]
   mycelium security remediation list [--json]
   mycelium security remediation apply DIGEST --write [--json]
   mycelium security remediation verify DIGEST [--json]
@@ -1145,6 +1147,37 @@ async fn security_command(args: &[String]) -> Result<Vec<String>, ClientError> {
             },
             other => return Err(err_usage(&format!("unknown export action `{other}`"))),
         },
+        "inspection" => match args.get(1).map(String::as_str).unwrap_or("plan") {
+            "plan" => {
+                let networks = args
+                    .windows(2)
+                    .filter(|pair| pair[0] == "--network")
+                    .map(|pair| pair[1].clone())
+                    .collect();
+                let depth = match value("--depth").as_deref().unwrap_or("host-flows") {
+                    "host-flows" => InspectionDepth::HostFlows,
+                    "packet-metadata" => InspectionDepth::PacketMetadata,
+                    "deep-packets" => InspectionDepth::DeepPackets,
+                    other => return Err(err_usage(&format!("unknown inspection depth `{other}`"))),
+                };
+                let redundancy = value("--redundancy")
+                    .map(|value| value.parse::<u8>())
+                    .transpose()
+                    .map_err(|_| err_usage("--redundancy must be an integer from 1 to 255"))?
+                    .unwrap_or(1);
+                let intent = InspectionIntent::new(networks, depth, redundancy)
+                    .map_err(|error| err_usage(&error))?;
+                let path = value("--candidates").ok_or_else(|| {
+                    err_usage("inspection plan currently requires --candidates FILE")
+                })?;
+                let candidates: Vec<InspectionCandidate> =
+                    serde_json::from_slice(&std::fs::read(&path)?).map_err(|error| {
+                        err_usage(&format!("invalid inspection candidates `{path}`: {error}"))
+                    })?;
+                Request::SecurityInspectionPlan { intent, candidates }
+            }
+            other => return Err(err_usage(&format!("unknown inspection action `{other}`"))),
+        },
         _ => return Err(err_usage(
             "security supports `status`, `scan`, `events`, `remediation`, `sinks`, and `export`",
         )),
@@ -1193,6 +1226,29 @@ async fn security_command(args: &[String]) -> Result<Vec<String>, ClientError> {
             lines.push(format!(
                 "  {}",
                 serde_json::to_string(&item).map_err(|error| err_usage(&error.to_string()))?
+            ));
+        }
+        return Ok(lines);
+    }
+    if action == "inspection" {
+        let plan: mycelium_core::InspectionPlan = serde_json::from_value(value)
+            .map_err(|error| err_usage(&format!("invalid inspection plan: {error}")))?;
+        let mut lines = vec![format!(
+            "Inspection placements (depth={:?}, redundancy={}):",
+            plan.intent.depth, plan.intent.redundancy
+        )];
+        for placement in plan.placements {
+            lines.push(format!(
+                "  {} method={:?} score={} networks={}",
+                placement.hostname,
+                placement.method,
+                placement.score,
+                placement.networks.into_iter().collect::<Vec<_>>().join(",")
+            ));
+        }
+        for (network, missing) in plan.blind_spots {
+            lines.push(format!(
+                "  BLIND SPOT network={network} missing_copies={missing}"
             ));
         }
         return Ok(lines);
