@@ -59,3 +59,16 @@ Inspection depths are intentionally engine-neutral:
 
 An engine or deployment driver must explicitly advertise a supported depth.
 The planner never treats software installation as proof of traffic visibility.
+
+## Lightweight host observer
+
+Linux peers establish a local TCP baseline from `/proc/net/tcp` during the
+existing bounded security scan. Subsequent scans emit normalized events for a
+new listening port and for a large connection-count increase (at least 32 and
+more than twice the previous observation). The first observation establishes a
+baseline rather than treating every existing service as an incident.
+
+The baseline remains local under
+`$MYCELIUM_HOME/security/host-network-baseline.json`. Only normalized changes
+enter signed gossip and the SIEM/MQTT exporters. This is useful endpoint
+telemetry, not a claim of whole-network packet visibility.

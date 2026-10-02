@@ -143,10 +143,16 @@ pub(crate) fn collect(
         })
         .collect::<Vec<_>>();
     #[cfg(target_os = "linux")]
-    events.extend(linux_security_events(
-        observed_at,
-        MAX_SECURITY_EVENTS.saturating_sub(events.len()),
-    ));
+    {
+        events.extend(linux_security_events(
+            observed_at,
+            MAX_SECURITY_EVENTS.saturating_sub(events.len()),
+        ));
+        events.extend(host_network_events(
+            observed_at,
+            MAX_SECURITY_EVENTS.saturating_sub(events.len()),
+        ));
+    }
     let batch = SecurityEventBatch {
         schema_version: 1,
         node_id: hello.node_id.clone(),
@@ -181,6 +187,136 @@ fn linux_security_events(observed_at: u64, limit: usize) -> Vec<SecurityEvent> {
         .filter_map(|line| normalize_journal_event(line, observed_at))
         .take(limit)
         .collect()
+}
+
+#[cfg(any(target_os = "linux", test))]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+struct HostNetworkBaseline {
+    #[serde(default)]
+    listeners: BTreeSet<u16>,
+    established_connections: usize,
+}
+
+#[cfg(target_os = "linux")]
+fn host_network_events(observed_at: u64, limit: usize) -> Vec<SecurityEvent> {
+    if limit == 0 {
+        return Vec::new();
+    }
+    match host_network_events_inner(observed_at, limit) {
+        Ok(events) => events,
+        Err(error) => vec![SecurityEvent {
+            id: sha256_hex(format!("host-network-sensor:{observed_at}:{error}").as_bytes()),
+            observed_at,
+            category: "sensor_health".into(),
+            action: "observe_host_network".into(),
+            outcome: "failure".into(),
+            severity: SecuritySeverity::High,
+            message: format!("host network observer failed: {error}"),
+            fields: [("sensor".into(), "linux_proc_net".into())].into(),
+        }],
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn host_network_events_inner(
+    observed_at: u64,
+    limit: usize,
+) -> Result<Vec<SecurityEvent>, AnyError> {
+    let snapshot = parse_proc_net_tcp(&std::fs::read_to_string("/proc/net/tcp")?);
+    let path = crate::home_dir().join("security/host-network-baseline.json");
+    let previous = match std::fs::read(&path) {
+        Ok(bytes) => Some(serde_json::from_slice::<HostNetworkBaseline>(&bytes)?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    let mut events = Vec::new();
+    if let Some(previous) = previous {
+        for port in snapshot.listeners.difference(&previous.listeners) {
+            events.push(SecurityEvent {
+                id: sha256_hex(format!("listener-opened:{port}:{observed_at}").as_bytes()),
+                observed_at,
+                category: "network_exposure".into(),
+                action: "listener_opened".into(),
+                outcome: "observed".into(),
+                severity: SecuritySeverity::Medium,
+                message: format!("new TCP listener observed on port {port}"),
+                fields: [
+                    ("port".into(), port.to_string()),
+                    ("transport".into(), "tcp".into()),
+                ]
+                .into(),
+            });
+        }
+        if snapshot.established_connections >= 32
+            && snapshot.established_connections > previous.established_connections.saturating_mul(2)
+        {
+            events.push(SecurityEvent {
+                id: sha256_hex(
+                    format!(
+                        "connection-spike:{}:{observed_at}",
+                        snapshot.established_connections
+                    )
+                    .as_bytes(),
+                ),
+                observed_at,
+                category: "network_behavior".into(),
+                action: "connection_spike".into(),
+                outcome: "observed".into(),
+                severity: SecuritySeverity::Medium,
+                message: format!(
+                    "established TCP connections increased from {} to {}",
+                    previous.established_connections, snapshot.established_connections
+                ),
+                fields: [
+                    (
+                        "previous".into(),
+                        previous.established_connections.to_string(),
+                    ),
+                    (
+                        "current".into(),
+                        snapshot.established_connections.to_string(),
+                    ),
+                ]
+                .into(),
+            });
+        }
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
+    std::fs::write(&temporary, serde_json::to_vec_pretty(&snapshot)?)?;
+    std::fs::rename(temporary, path)?;
+    events.truncate(limit);
+    Ok(events)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn parse_proc_net_tcp(text: &str) -> HostNetworkBaseline {
+    let mut baseline = HostNetworkBaseline::default();
+    for line in text.lines().skip(1) {
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+        let Some(local) = fields.get(1) else {
+            continue;
+        };
+        let Some(state) = fields.get(3) else {
+            continue;
+        };
+        match *state {
+            "0A" => {
+                if let Some((_, port)) = local.rsplit_once(':').and_then(|(address, port)| {
+                    u16::from_str_radix(port, 16)
+                        .ok()
+                        .map(|port| (address, port))
+                }) {
+                    baseline.listeners.insert(port);
+                }
+            }
+            "01" => baseline.established_connections += 1,
+            _ => {}
+        }
+    }
+    baseline
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -597,5 +733,17 @@ mod tests {
         assert_eq!(event.outcome, "failure");
         assert_eq!(event.observed_at, 12);
         assert_eq!(event.severity, SecuritySeverity::Medium);
+    }
+
+    #[test]
+    fn proc_tcp_snapshot_counts_listeners_and_established_connections() {
+        let snapshot = parse_proc_net_tcp(
+            "  sl  local_address rem_address   st\n\
+             0: 0100007F:0016 00000000:0000 0A\n\
+             1: 0B00007F:9C4D 0100007F:01BB 01\n\
+             2: 00000000:1F90 00000000:0000 0A\n",
+        );
+        assert_eq!(snapshot.listeners, [22, 8080].into());
+        assert_eq!(snapshot.established_connections, 1);
     }
 }
