@@ -1058,6 +1058,13 @@ impl Topology {
                 if other_id == &node.id {
                     continue;
                 }
+                // A device node may contain addresses from several interfaces while
+                // `mac` is only its representative identity. It is therefore not an
+                // authoritative IP-to-MAC binding. Neighbor observations and signed
+                // device identities are checked independently when they arrive.
+                if other.device {
+                    continue;
+                }
                 if let Some(site) = &origin.site {
                     if !other.sites.contains(site) {
                         continue;
@@ -1323,6 +1330,31 @@ mod tests {
             topo.conflicts.as_slice(),
             [Conflict::SameIpDiffMac { .. }]
         ));
+    }
+
+    #[test]
+    fn neighbor_does_not_conflict_with_multi_interface_device_summary() {
+        let mut topology = Topology::empty();
+        topology.observe_all([Observation::DevicePort {
+            device: "darwin-studio".into(),
+            port: "en0".into(),
+            mac: MacAddress::parse("9c:76:0e:42:a8:6b"),
+            ips: vec![ip("192.168.10.84"), ip("192.168.2.3")],
+            state: LinkState::Up,
+            medium: Some(LinkMedium::Ethernet),
+            speed_mbps: Some(1000),
+            duplex: Some(LinkDuplex::Full),
+            origin: Origin::new("darwin-studio", "ifconfig").at_site("wagar-house"),
+        }]);
+        topology.observe_all([Observation::Neighbor {
+            mac: MacAddress::parse("32:10:ce:6c:1c:c8"),
+            ip: ip("192.168.10.84"),
+            hostname: Some("studio".into()),
+            port: None,
+            origin: Origin::new("darwin-studio", "arp").at_site("wagar-house"),
+        }]);
+
+        assert!(topology.conflicts.is_empty());
     }
 
     #[test]
