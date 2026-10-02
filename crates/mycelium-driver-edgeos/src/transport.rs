@@ -363,8 +363,18 @@ fn sshpass_argv(ssh_argv: Vec<String>) -> Vec<String> {
 }
 
 fn which(bin: &str) -> Option<std::path::PathBuf> {
-    std::env::split_paths(&std::env::var_os("PATH")?)
-        .map(|p| p.join(bin))
+    let configured = std::env::var_os("PATH")
+        .map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+        .unwrap_or_default();
+    configured
+        .into_iter()
+        .chain([
+            std::path::PathBuf::from("/opt/homebrew/bin"),
+            std::path::PathBuf::from("/usr/local/bin"),
+            std::path::PathBuf::from("/usr/bin"),
+            std::path::PathBuf::from("/bin"),
+        ])
+        .map(|path| path.join(bin))
         .find(|p| p.is_file())
 }
 
