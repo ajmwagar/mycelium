@@ -617,7 +617,10 @@ On Debian-family Linux hosts the lightweight scan reports cached package
 updates and reboot state. Scanner availability is explicit, so an absent CVE
 or compliance backend is never represented as a clean result. Normalized,
 bounded security events form the transport-neutral SIEM feed; a future sink
-can export those records without changing the peer protocol.
+can export those records without changing the peer protocol. Linux observers
+also normalize a bounded 15-minute journal window for SSH authentication,
+sudo, kernel faults, and OOM events. Raw journals remain on the node; signed
+gossip carries at most 128 normalized events with stable deduplication IDs.
 
 OpenSCAP can run an explicit DISA STIG evaluation when compatible SCAP content
 is installed:

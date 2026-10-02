@@ -119,7 +119,8 @@ pub(crate) fn collect(
         findings,
         compliance,
     };
-    let events = posture
+    #[allow(unused_mut)]
+    let mut events = posture
         .findings
         .iter()
         .take(MAX_SECURITY_EVENTS)
@@ -140,7 +141,12 @@ pub(crate) fn collect(
             ]
             .into(),
         })
-        .collect();
+        .collect::<Vec<_>>();
+    #[cfg(target_os = "linux")]
+    events.extend(linux_security_events(
+        observed_at,
+        MAX_SECURITY_EVENTS.saturating_sub(events.len()),
+    ));
     let batch = SecurityEventBatch {
         schema_version: 1,
         node_id: hello.node_id.clone(),
@@ -150,6 +156,80 @@ pub(crate) fn collect(
         events,
     };
     Ok((posture, batch))
+}
+
+#[cfg(target_os = "linux")]
+fn linux_security_events(observed_at: u64, limit: usize) -> Vec<SecurityEvent> {
+    if limit == 0 {
+        return Vec::new();
+    }
+    let Ok(output) = bounded_output(
+        "journalctl",
+        &[
+            "--since",
+            "15 minutes ago",
+            "--no-pager",
+            "--output=json",
+            "--lines=256",
+        ],
+        Duration::from_secs(10),
+    ) else {
+        return Vec::new();
+    };
+    output
+        .lines()
+        .filter_map(|line| normalize_journal_event(line, observed_at))
+        .take(limit)
+        .collect()
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn normalize_journal_event(line: &str, observed_at: u64) -> Option<SecurityEvent> {
+    let value: serde_json::Value = serde_json::from_str(line).ok()?;
+    let unit = value["_SYSTEMD_UNIT"]
+        .as_str()
+        .or_else(|| value["SYSLOG_IDENTIFIER"].as_str())
+        .unwrap_or("unknown");
+    let message = value["MESSAGE"].as_str()?.trim();
+    let lower = message.to_ascii_lowercase();
+    let (category, action, outcome, severity) = if unit.contains("ssh")
+        && (lower.contains("failed password") || lower.contains("authentication failure"))
+    {
+        (
+            "authentication",
+            "login",
+            "failure",
+            SecuritySeverity::Medium,
+        )
+    } else if unit.contains("ssh") && lower.contains("accepted publickey") {
+        (
+            "authentication",
+            "login",
+            "success",
+            SecuritySeverity::Informational,
+        )
+    } else if unit.contains("sudo") && lower.contains("command=") {
+        ("privilege", "sudo", "success", SecuritySeverity::Low)
+    } else if lower.contains("segfault") || lower.contains("out of memory") {
+        ("system", "fault", "failure", SecuritySeverity::High)
+    } else {
+        return None;
+    };
+    let cursor = value["__CURSOR"].as_str().unwrap_or(message);
+    Some(SecurityEvent {
+        id: sha256_hex(format!("journal:{cursor}").as_bytes()),
+        observed_at: value["__REALTIME_TIMESTAMP"]
+            .as_str()
+            .and_then(|micros| micros.parse::<u64>().ok())
+            .map(|micros| micros / 1_000_000)
+            .unwrap_or(observed_at),
+        category: category.into(),
+        action: action.into(),
+        outcome: outcome.into(),
+        severity,
+        message: message.chars().take(512).collect(),
+        fields: [("unit".into(), unit.into())].into(),
+    })
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -505,5 +585,17 @@ mod tests {
     fn remediation_plan_digest_is_path_safe() {
         assert!(plan_path("../oops").is_err());
         assert!(plan_path(&"a".repeat(64)).is_ok());
+    }
+
+    #[test]
+    fn journal_authentication_failure_is_normalized() {
+        let event = normalize_journal_event(
+            r#"{"_SYSTEMD_UNIT":"ssh.service","MESSAGE":"Failed password for root","__CURSOR":"s=1","__REALTIME_TIMESTAMP":"12000000"}"#,
+            99,
+        ).unwrap();
+        assert_eq!(event.category, "authentication");
+        assert_eq!(event.outcome, "failure");
+        assert_eq!(event.observed_at, 12);
+        assert_eq!(event.severity, SecuritySeverity::Medium);
     }
 }

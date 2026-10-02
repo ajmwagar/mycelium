@@ -98,6 +98,7 @@ usage:
   mycelium networks list [--json]
   mycelium networks adopt NAME --site SITE --subnet CIDR [--vlan ID] --write [--dry-run]
   mycelium networks drift [NAME] [--json]
+  mycelium networks plan [NAME] [--json]
   mycelium peers [--json]
   mycelium releases list [--json]
   mycelium releases keygen --path PATH --write [--json]
@@ -2578,7 +2579,43 @@ async fn networks(args: &[String]) -> Result<Vec<String>, ClientError> {
             }
             Ok(output)
         }
-        _ => Err(err_usage("usage: mycelium networks list|adopt|drift ...")),
+        Some("plan") => {
+            let name = flags.rest.first().cloned();
+            let mut client = connect().await?;
+            let value = client.call(&Request::NetworkDrift { name }).await?;
+            let reports: Vec<NetworkDriftReport> = serde_json::from_value(value)
+                .map_err(|error| err_usage(&format!("bad network drift report: {error}")))?;
+            let plans = reports
+                .iter()
+                .map(NetworkDriftReport::action_plan)
+                .collect::<Vec<_>>();
+            if flags.json {
+                return Ok(vec![serde_json::to_string(&plans).map_err(|error| {
+                    err_usage(&format!("cannot serialize plans: {error}"))
+                })?]);
+            }
+            let mut output = Vec::new();
+            for plan in plans {
+                output.push(format!(
+                    "{}: {} actions={} blockers={}",
+                    plan.scope,
+                    if plan.ready_to_apply() {
+                        "ready"
+                    } else {
+                        "blocked"
+                    },
+                    plan.actions.len(),
+                    plan.blockers.len()
+                ));
+                for blocker in plan.blockers {
+                    output.push(format!("  blocker {}: {}", blocker.code, blocker.message));
+                }
+            }
+            Ok(output)
+        }
+        _ => Err(err_usage(
+            "usage: mycelium networks list|adopt|drift|plan ...",
+        )),
     }
 }
 

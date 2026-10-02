@@ -4,6 +4,7 @@ use std::net::IpAddr;
 use serde::{Deserialize, Serialize};
 
 use crate::topology::VlanId;
+use crate::{ActionPlan, PlanBlocker};
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -104,6 +105,45 @@ pub struct NetworkDriftReport {
     pub evidence_sources: BTreeSet<String>,
 }
 
+impl NetworkDriftReport {
+    /// Derive a vendor-neutral plan from evidence. Driver actions are only
+    /// added when a concrete managed binding exists; missing facts block.
+    pub fn action_plan(&self) -> ActionPlan {
+        let mut plan = ActionPlan::new(format!("network:{}", self.network.identity));
+        plan.desired_revision = Some(format!("generation:{}", self.network.generation));
+        for receipt in &self.missing_receipts {
+            plan.blockers.push(PlanBlocker {
+                code: "missing_allocation_receipt".into(),
+                message: format!("allocation receipt {receipt} is unavailable"),
+                resource: Some(receipt.clone()),
+            });
+        }
+        for allocation in &self.missing_allocations {
+            plan.blockers.push(PlanBlocker {
+                code: "allocation_not_observed".into(),
+                message: format!("desired allocation {allocation} is not observed"),
+                resource: Some(allocation.clone()),
+            });
+        }
+        for mismatch in &self.gateway_mismatches {
+            plan.blockers.push(PlanBlocker {
+                code: "gateway_mismatch".into(),
+                message: mismatch.clone(),
+                resource: Some(self.network.identity.clone()),
+            });
+        }
+        if plan.blockers.is_empty() && self.known_members.is_empty() {
+            plan.blockers.push(PlanBlocker {
+                code: "no_managed_bindings".into(),
+                message: "network has no managed device bindings from which to derive actions"
+                    .into(),
+                resource: Some(self.network.identity.clone()),
+            });
+        }
+        plan
+    }
+}
+
 impl AllocationReceipt {
     pub fn imported(
         site: impl Into<String>,
@@ -166,5 +206,22 @@ mod tests {
             BTreeSet::from(["alloc-a".into(), "alloc-b".into()]),
         );
         assert_eq!(first.identity, second.identity);
+    }
+
+    #[test]
+    fn network_plan_fails_loudly_without_a_managed_binding() {
+        let network = LogicalNetwork::adopted("home", "cctv", BTreeSet::new());
+        let report = NetworkDriftReport {
+            network,
+            state: NetworkDriftState::InSync,
+            missing_receipts: BTreeSet::new(),
+            missing_allocations: BTreeSet::new(),
+            gateway_mismatches: BTreeSet::new(),
+            known_members: BTreeSet::new(),
+            evidence_sources: BTreeSet::new(),
+        };
+        let plan = report.action_plan();
+        assert!(!plan.ready_to_apply());
+        assert_eq!(plan.blockers[0].code, "no_managed_bindings");
     }
 }
