@@ -7,6 +7,10 @@ and coordinates health, releases, and bounded access without requiring a central
 controller. It is Rust-first, scriptable, and designed to fail closed around
 mutating operations.
 
+The project boundary is documented in [the Unix-style scope audit](docs/scope-audit.md):
+Mycelium owns access, trusted self-updates, topology, resource observation, and
+movement detection; adjacent systems remain replaceable adapters.
+
 Desired state follows one boundary: intent produces read-only proposals, and
 supported proposals lower into the single vendor-neutral `ActionPlan` executor.
 Applied plans have canonical identities and durable per-action receipts. See
