@@ -114,6 +114,7 @@ usage:
   mycelium networks dhcp list [NAME] [--json]
   mycelium networks dhcp set NAME --device ID --pool NAME --range START-END [--dns IP]... --write [--dry-run]
   mycelium peers [--json]
+  mycelium hardware [PEER] [--json]
   mycelium releases list [--json]
   mycelium releases keygen --path PATH --write [--json]
   mycelium releases publish --binary PATH --signing-key PATH --version VERSION --channel CHANNEL [--target TRIPLE] --write [--dry-run] [--json]
@@ -569,6 +570,7 @@ async fn run(cmd: &str, args: &[String]) -> Result<Vec<String>, ClientError> {
                 Ok(render_peers(&value))
             }
         }
+        "hardware" => hardware(args).await,
         "releases" => releases(args).await,
         "access" => access(args).await,
         "update" => update(args).await,
@@ -2022,6 +2024,66 @@ fn render_peers(value: &serde_json::Value) -> Vec<String> {
         ));
     }
     lines
+}
+
+async fn hardware(args: &[String]) -> Result<Vec<String>, ClientError> {
+    let flags = parse_flags(args);
+    let selector = flags.rest.first().map(String::as_str);
+    let mut client = connect().await?;
+    let peers = client.call(&Request::PeerList).await?;
+    let mut snapshots = peers
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|peer| {
+            selector.is_none_or(|selector| {
+                peer["origin"]
+                    .as_str()
+                    .is_some_and(|origin| origin.starts_with(selector))
+                    || peer["hello"]["hostname"].as_str() == Some(selector)
+            })
+        })
+        .filter_map(|peer| {
+            peer.get("hardware")
+                .filter(|value| !value.is_null())
+                .cloned()
+        })
+        .collect::<Vec<_>>();
+    snapshots.sort_by(|left, right| left["hostname"].as_str().cmp(&right["hostname"].as_str()));
+    if selector.is_some() && snapshots.is_empty() {
+        return Err(err_usage("peer has no hardware snapshot or is unknown"));
+    }
+    if flags.json {
+        return Ok(vec![serde_json::Value::Array(snapshots).to_string()]);
+    }
+    let mut lines = vec!["hardware:".into()];
+    for snapshot in snapshots {
+        let hostname = snapshot["hostname"].as_str().unwrap_or("unknown");
+        let devices = snapshot["devices"].as_array().cloned().unwrap_or_default();
+        lines.push(format!("  {hostname} devices={}", devices.len()));
+        for device in devices {
+            let kind = device["kind"].as_str().unwrap_or("unknown");
+            let bus = device["bus"].as_str().unwrap_or("unknown");
+            let locator = device["locator"].as_str().unwrap_or("?");
+            let model = device["model"].as_str().unwrap_or("unknown");
+            let capabilities = device["capabilities"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(serde_json::Value::as_str)
+                .collect::<Vec<_>>()
+                .join(",");
+            let suffix = if capabilities.is_empty() {
+                String::new()
+            } else {
+                format!(" capabilities={capabilities}")
+            };
+            lines.push(format!(
+                "    {kind} bus={bus} locator={locator} model={model}{suffix}"
+            ));
+        }
+    }
+    Ok(lines)
 }
 
 fn unix_now() -> u64 {

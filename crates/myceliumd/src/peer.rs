@@ -12,9 +12,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use ed25519_dalek::SigningKey;
 use mycelium_peer_protocol::{
     decode_hex, encode_hex, local_build_target, local_compatible_targets, sha256_hex, AccessRecord,
-    AccessStatement, FilesystemHealth, HostHealth, PeerEvent, PeerHello, PeerMessage, Platform,
-    ProcessHealth, ReleaseManifest, SecurityEventBatch, SecurityPosture, SignedEnvelope,
-    TopologySnapshot, TransportCredentialBinding, TransportKind, WireGuardBinding,
+    AccessStatement, FilesystemHealth, HardwareSnapshot, HostHealth, PeerEvent, PeerHello,
+    PeerMessage, Platform, ProcessHealth, ReleaseManifest, SecurityEventBatch, SecurityPosture,
+    SignedEnvelope, TopologySnapshot, TransportCredentialBinding, TransportKind, WireGuardBinding,
     MAX_SECURITY_EVENTS, MAX_SECURITY_FINDINGS, PROTOCOL_VERSION,
 };
 use rand_core::OsRng;
@@ -29,6 +29,7 @@ use tokio_rustls::{TlsAcceptor, TlsConnector};
 
 const HEALTH_INTERVAL: Duration = Duration::from_secs(60);
 const SECURITY_INTERVAL: Duration = Duration::from_secs(15 * 60);
+const HARDWARE_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const DIGEST_INTERVAL: Duration = Duration::from_secs(15);
 const SSH_RENEWAL_INTERVAL: Duration = Duration::from_secs(15 * 60);
 const DEFAULT_ARTIFACT_REQUEST_INTERVAL: Duration = Duration::from_secs(5);
@@ -43,6 +44,7 @@ pub struct PeerView {
     pub origin: String,
     pub hello: Option<PeerHello>,
     pub health: Option<HostHealth>,
+    pub hardware: Option<HardwareSnapshot>,
     pub transports: Vec<TransportCredentialBinding>,
     pub last_seen: u64,
 }
@@ -276,6 +278,26 @@ impl Mesh {
             }
         });
 
+        let hardware_collector = self.clone();
+        tokio::spawn(async move {
+            loop {
+                let hello = hardware_collector.hello.clone();
+                match tokio::task::spawn_blocking(move || crate::hardware::collect(&hello)).await {
+                    Ok(Ok(snapshot)) => {
+                        if let Err(error) = hardware_collector
+                            .publish(PeerEvent::Hardware(snapshot))
+                            .await
+                        {
+                            eprintln!("myceliumd: publish hardware inventory: {error}");
+                        }
+                    }
+                    Ok(Err(error)) => eprintln!("myceliumd: collect hardware inventory: {error}"),
+                    Err(error) => eprintln!("myceliumd: hardware inventory task: {error}"),
+                }
+                tokio::time::sleep(HARDWARE_INTERVAL).await;
+            }
+        });
+
         if let Some(tls) = TlsSettings::from_env()? {
             self.publish(PeerEvent::Transport(
                 tls.identity_binding(&self.hello.node_id)?,
@@ -309,6 +331,7 @@ impl Mesh {
                 origin: envelope.origin.clone(),
                 hello: None,
                 health: None,
+                hardware: None,
                 transports: Vec::new(),
                 last_seen: 0,
             });
@@ -321,6 +344,7 @@ impl Mesh {
                 PeerEvent::Access(_) => {}
                 PeerEvent::Transport(binding) => view.transports.push(binding.clone()),
                 PeerEvent::WireGuard(binding) => view.transports.push(binding.credential.clone()),
+                PeerEvent::Hardware(snapshot) => view.hardware = Some(snapshot.clone()),
                 PeerEvent::SecurityPosture(_) => {}
                 PeerEvent::SecurityEvents(_) => {}
                 PeerEvent::Unknown => {}
@@ -732,6 +756,7 @@ impl Mesh {
                 }
                 PeerEvent::Transport(binding) => binding.validate_for(&envelope.origin).is_ok(),
                 PeerEvent::WireGuard(binding) => binding.validate_for(&envelope.origin).is_ok(),
+                PeerEvent::Hardware(snapshot) => snapshot.validate_for(&envelope.origin).is_ok(),
                 PeerEvent::SecurityPosture(posture) => {
                     posture.node_id == envelope.origin
                         && posture.findings.len() <= MAX_SECURITY_FINDINGS
@@ -1153,6 +1178,7 @@ fn event_key(envelope: &SignedEnvelope) -> String {
             format!("{}:transport:{:?}", envelope.origin, binding.kind)
         }
         PeerEvent::WireGuard(_) => format!("{}:wireguard", envelope.origin),
+        PeerEvent::Hardware(_) => format!("{}:hardware", envelope.origin),
         PeerEvent::SecurityPosture(_) => format!("{}:security-posture", envelope.origin),
         PeerEvent::SecurityEvents(_) => format!("{}:security-events", envelope.origin),
         PeerEvent::Unknown => format!("{}:unknown", envelope.origin),
@@ -1168,6 +1194,7 @@ fn event_origin_matches(envelope: &SignedEnvelope) -> bool {
         | PeerEvent::Access(_) => true,
         PeerEvent::Transport(binding) => binding.validate_for(&envelope.origin).is_ok(),
         PeerEvent::WireGuard(binding) => binding.validate_for(&envelope.origin).is_ok(),
+        PeerEvent::Hardware(snapshot) => snapshot.validate_for(&envelope.origin).is_ok(),
         PeerEvent::SecurityPosture(posture) => posture.node_id == envelope.origin,
         PeerEvent::SecurityEvents(events) => events.node_id == envelope.origin,
         PeerEvent::Unknown => false,

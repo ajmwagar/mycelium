@@ -101,6 +101,7 @@ pub enum PeerEvent {
     Access(AccessRecord),
     Transport(TransportCredentialBinding),
     WireGuard(WireGuardBinding),
+    Hardware(HardwareSnapshot),
     SecurityPosture(SecurityPosture),
     SecurityEvents(SecurityEventBatch),
     /// A future event kind this binary does not understand. Receivers discard
@@ -118,6 +119,7 @@ enum KnownPeerEvent {
     Access(AccessRecord),
     Transport(TransportCredentialBinding),
     WireGuard(WireGuardBinding),
+    Hardware(HardwareSnapshot),
     SecurityPosture(SecurityPosture),
     SecurityEvents(SecurityEventBatch),
 }
@@ -138,6 +140,7 @@ impl<'de> Deserialize<'de> for PeerEvent {
                     | "access"
                     | "transport"
                     | "wire_guard"
+                    | "hardware"
                     | "security_posture"
                     | "security_events"
             )
@@ -155,6 +158,7 @@ impl<'de> Deserialize<'de> for PeerEvent {
             KnownPeerEvent::Access(value) => Self::Access(value),
             KnownPeerEvent::Transport(value) => Self::Transport(value),
             KnownPeerEvent::WireGuard(value) => Self::WireGuard(value),
+            KnownPeerEvent::Hardware(value) => Self::Hardware(value),
             KnownPeerEvent::SecurityPosture(value) => Self::SecurityPosture(value),
             KnownPeerEvent::SecurityEvents(value) => Self::SecurityEvents(value),
         })
@@ -163,6 +167,106 @@ impl<'de> Deserialize<'de> for PeerEvent {
 
 pub const MAX_SECURITY_FINDINGS: usize = 256;
 pub const MAX_SECURITY_EVENTS: usize = 128;
+pub const MAX_HARDWARE_DEVICES: usize = 4096;
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HardwareKind {
+    PciDevice,
+    UsbDevice,
+    StorageController,
+    StorageDevice,
+    StorageVolume,
+    Accelerator,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HardwareBus {
+    Pci,
+    Usb,
+    Nvme,
+    Sata,
+    Scsi,
+    Virtio,
+    Thunderbolt,
+    Integrated,
+    Unknown,
+}
+
+/// One node in a peer-local physical/logical hardware graph.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HardwareDevice {
+    /// Stable within this peer, derived from a platform locator rather than a label.
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+    pub locator: String,
+    pub kind: HardwareKind,
+    pub bus: HardwareBus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vendor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// SHA-256 of a hardware serial when one is available; raw serials are not gossiped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serial_hash: Option<String>,
+    #[serde(default)]
+    pub capabilities: BTreeSet<String>,
+    #[serde(default)]
+    pub properties: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HardwareSnapshot {
+    pub schema_version: u16,
+    pub node_id: String,
+    pub hostname: String,
+    pub observed_at: u64,
+    pub devices: Vec<HardwareDevice>,
+}
+
+impl HardwareSnapshot {
+    pub fn validate_for(&self, origin: &str) -> Result<(), String> {
+        if self.schema_version != 1 {
+            return Err(format!(
+                "unsupported hardware schema {}",
+                self.schema_version
+            ));
+        }
+        if self.node_id != origin {
+            return Err("hardware snapshot does not belong to its signed origin".into());
+        }
+        if self.devices.len() > MAX_HARDWARE_DEVICES {
+            return Err("hardware snapshot exceeds the device limit".into());
+        }
+        let mut ids = BTreeSet::new();
+        for device in &self.devices {
+            if device.id.len() > 128
+                || device.locator.is_empty()
+                || device.locator.len() > 512
+                || !ids.insert(device.id.as_str())
+            {
+                return Err("hardware snapshot contains an invalid or duplicate identity".into());
+            }
+            if device.capabilities.len() > 32 || device.properties.len() > 64 {
+                return Err("hardware device metadata exceeds its field limit".into());
+            }
+            if device
+                .capabilities
+                .iter()
+                .any(|value| value.is_empty() || value.len() > 128)
+                || device
+                    .properties
+                    .iter()
+                    .any(|(key, value)| key.is_empty() || key.len() > 128 || value.len() > 1024)
+            {
+                return Err("hardware device metadata contains an invalid field".into());
+            }
+        }
+        Ok(())
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -836,6 +940,38 @@ mod tests {
         .unwrap();
         assert_eq!(binding.credential.kind, TransportKind::WireGuard);
         assert_eq!(binding.credential.public_key, "wg-key");
+    }
+
+    #[test]
+    fn hardware_snapshot_is_peer_scoped_bounded_and_signed() {
+        let key = SigningKey::from_bytes(&[29; 32]);
+        let node_id = encode_hex(key.verifying_key().as_bytes());
+        let snapshot = HardwareSnapshot {
+            schema_version: 1,
+            node_id: node_id.clone(),
+            hostname: "worker".into(),
+            observed_at: 1,
+            devices: vec![HardwareDevice {
+                id: "hw:accelerator".into(),
+                parent: None,
+                locator: "darwin:display:integrated".into(),
+                kind: HardwareKind::Accelerator,
+                bus: HardwareBus::Integrated,
+                vendor: Some("Apple".into()),
+                model: Some("Apple GPU".into()),
+                serial_hash: None,
+                capabilities: BTreeSet::from(["metal".into()]),
+                properties: BTreeMap::new(),
+            }],
+        };
+        snapshot.validate_for(&node_id).unwrap();
+        assert!(snapshot.validate_for("another-peer").is_err());
+        let mut envelope = SignedEnvelope::sign(&key, 1, 1, PeerEvent::Hardware(snapshot)).unwrap();
+        envelope.verify().unwrap();
+        if let PeerEvent::Hardware(snapshot) = &mut envelope.event {
+            snapshot.devices[0].capabilities.insert("tampered".into());
+        }
+        assert!(envelope.verify().is_err());
     }
 
     #[test]

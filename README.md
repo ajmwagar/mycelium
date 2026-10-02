@@ -669,6 +669,27 @@ The saved inventory contains the environment-variable name, never the AP
 password. UniFi network-wide configuration remains controller-owned; the AP
 driver is for observation, recovery, and explicit adoption operations.
 
+## Hardware and accelerator inventory
+
+Each peer periodically publishes a signed, bounded hardware graph covering
+PCIe, USB, storage, and accelerators. Stable identities derive from the peer
+identity plus the platform locator; raw device serial numbers are never
+gossiped and are represented only by SHA-256 fingerprints.
+
+```sh
+mycelium hardware
+mycelium hardware agora-one
+mycelium hardware Averys-Mac-Studio --json
+```
+
+Linux reads kernel facts from sysfs, including PCI IDs and drivers, negotiated
+and maximum PCIe links, NUMA and IOMMU placement, USB port ancestry and speed,
+and block-device/partition relationships. Darwin uses `system_profiler`'s JSON
+interface. Apple integrated GPUs are represented as accelerators on an
+`integrated` bus with a `metal` capability—not as discrete PCIe GPUs. This
+shared representation is observation-only; Shroud, QEMU/KVM, containers, and
+future provisioning drivers consume it rather than reimplementing discovery.
+
 ## Security posture, STIG, and SIEM events
 
 Every agent periodically publishes a bounded security-posture observation

@@ -18,6 +18,7 @@
 
 pub mod client;
 mod execution;
+mod hardware;
 pub mod peer;
 pub mod protocol;
 pub mod rpc;
