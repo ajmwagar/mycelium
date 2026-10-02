@@ -12,6 +12,7 @@ mod oidc_gateway;
 mod pair;
 mod setup;
 mod ssh_access;
+mod stun;
 mod wireguard;
 
 use mycelium_core::{
@@ -122,6 +123,7 @@ usage:
   mycelium wireguard plan LEFT RIGHT --left-subnet CIDR... --right-subnet CIDR...
     [--left-endpoint HOST:PORT] [--right-endpoint HOST:PORT]
     [--left-key PUBLIC-KEY] [--right-key PUBLIC-KEY] [--interface NAME] [--json]
+  mycelium egress probe --server HOST:PORT... [--bind IP] [--json]
   mycelium enroll init [--path CA-DIR] --write
   mycelium enroll issue NAME --site SITE --address DNS-OR-IP [--san DNS-OR-IP]... --binary PATH --target TRIPLE [--peer HOST:PORT]... [--ca CA-DIR] [--path OUTPUT-DIR] --write
   mycelium enroll install --bundle DIR [--path MYCELIUM-HOME] --write
@@ -508,6 +510,7 @@ async fn run(cmd: &str, args: &[String]) -> Result<Vec<String>, ClientError> {
         "access" => access(args).await,
         "update" => update(args).await,
         "wireguard" => wireguard_command(args).await,
+        "egress" => egress_command(args).await,
         "enroll" => enroll_command(args).await,
         "annotate" => {
             let f = parse_flags(args);
@@ -810,6 +813,90 @@ async fn releases(args: &[String]) -> Result<Vec<String>, ClientError> {
             serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string())
         ])
     }
+}
+
+async fn egress_command(args: &[String]) -> Result<Vec<String>, ClientError> {
+    if args.first().map(String::as_str) != Some("probe") {
+        return Err(err_usage("egress currently supports `probe`"));
+    }
+    let servers = args
+        .windows(2)
+        .filter(|pair| pair[0] == "--server")
+        .map(|pair| pair[1].clone())
+        .collect::<Vec<_>>();
+    if servers.is_empty() {
+        return Err(err_usage(
+            "egress probe needs at least one configurable --server HOST:PORT",
+        ));
+    }
+    let bind = args
+        .windows(2)
+        .find(|pair| pair[0] == "--bind")
+        .map(|pair| {
+            pair[1]
+                .parse::<std::net::IpAddr>()
+                .map_err(|_| err_usage(&format!("invalid bind address `{}`", pair[1])))
+        })
+        .transpose()?;
+    let mut results = Vec::new();
+    let mut failures = Vec::new();
+    let mut source = bind.map(|address| std::net::SocketAddr::new(address, 0));
+    for server in servers {
+        match stun::probe(&server, source).await {
+            Ok(result) => {
+                source = Some(result.source);
+                results.push(result);
+            }
+            Err(error) => failures.push(error),
+        }
+    }
+    if results.is_empty() {
+        return Err(err_usage(&format!(
+            "every STUN probe failed: {}",
+            failures.join("; ")
+        )));
+    }
+    let mapped_ips = results
+        .iter()
+        .map(|result| result.mapped.ip())
+        .collect::<std::collections::BTreeSet<_>>();
+    let mapped_endpoints = results
+        .iter()
+        .map(|result| result.mapped)
+        .collect::<std::collections::BTreeSet<_>>();
+    let report = serde_json::json!({
+        "bind": bind,
+        "results": results,
+        "failures": failures,
+        "public_ip_stable": mapped_ips.len() == 1,
+        "mapping_varies_by_destination": mapped_endpoints.len() > 1,
+    });
+    if args.iter().any(|arg| arg == "--json") {
+        return Ok(vec![report.to_string()]);
+    }
+    let mut lines = vec![format!(
+        "egress: public_ip_stable={} mapping_varies_by_destination={}",
+        report["public_ip_stable"].as_bool().unwrap_or(false),
+        report["mapping_varies_by_destination"]
+            .as_bool()
+            .unwrap_or(false)
+    )];
+    for result in report["results"].as_array().into_iter().flatten() {
+        lines.push(format!(
+            "  {} source={} mapped={} latency={}ms",
+            result["server"].as_str().unwrap_or("?"),
+            result["source"].as_str().unwrap_or("?"),
+            result["mapped"].as_str().unwrap_or("?"),
+            result["latency_ms"].as_u64().unwrap_or(0),
+        ));
+    }
+    for failure in report["failures"].as_array().into_iter().flatten() {
+        lines.push(format!(
+            "  warning: {}",
+            failure.as_str().unwrap_or("unknown STUN failure")
+        ));
+    }
+    Ok(lines)
 }
 
 async fn wireguard_command(args: &[String]) -> Result<Vec<String>, ClientError> {
