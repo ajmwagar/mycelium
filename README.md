@@ -130,6 +130,8 @@ the selected drivers identify the device, and Mycelium derives a healthy peer
 on the matching LAN as an SSH jump when the local node is not attached:
 
 ```sh
+install -m 600 .env ~/.mycelium/credentials.env
+
 mycelium credentials map set network-appliances \
   --driver edgeos \
   --cidr 192.168.0.0/16 \
@@ -145,7 +147,10 @@ The credential map persists selectors and environment-variable/key references,
 never secret values. A mapping authorizes an authentication attempt; driver
 recognition still determines what the endpoint is. Successful discoveries are
 persisted as managed targets, while failures appear in scan warnings instead of
-being silently classified.
+being silently classified. Service credentials belong in the owner-only
+`~/.mycelium/credentials.env`; node/service settings remain separately in
+`~/.mycelium/node.env`. The daemon reads both owner-only files on every
+platform, including Darwin where launchd has no `EnvironmentFile` directive.
 
 ## Design
 

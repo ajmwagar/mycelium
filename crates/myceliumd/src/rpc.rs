@@ -2693,6 +2693,7 @@ pub fn cap_result_json(
 pub async fn serve() -> std::io::Result<()> {
     let home = crate::home_dir();
     std::fs::create_dir_all(&home)?;
+    crate::load_service_env()?;
     let socket = crate::socket_path();
     if socket.exists() {
         match UnixStream::connect(&socket).await {

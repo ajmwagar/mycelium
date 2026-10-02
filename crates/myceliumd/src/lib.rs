@@ -25,6 +25,7 @@ pub mod protocol;
 pub mod resources;
 pub mod rpc;
 mod security;
+mod service_env;
 pub mod siem;
 pub mod ssh_renewal;
 mod state_change;
@@ -72,6 +73,12 @@ pub fn devices_path() -> PathBuf {
 
 pub fn credential_map_path() -> PathBuf {
     home_dir().join("credential-map.json")
+}
+
+pub(crate) fn load_service_env() -> std::io::Result<()> {
+    let home = home_dir();
+    service_env::load_missing(&home.join("node.env"))?;
+    service_env::load_missing(&home.join("credentials.env"))
 }
 
 pub fn topology_path() -> PathBuf {
