@@ -93,6 +93,7 @@ usage:
   mycelium describe <id> [--json]
   mycelium call <id> <capability> [--param k=v ...] [--write] [--dry-run]
   mycelium plan switch <id> --desired <startup-config> [--json]
+  mycelium executions [--json]
   mycelium scan
   mycelium topology [--json]
   mycelium discovery scopes [--json]
@@ -502,6 +503,29 @@ async fn run(cmd: &str, args: &[String]) -> Result<Vec<String>, ClientError> {
             Ok(render_call(&v))
         }
         "plan" => plan(args).await,
+        "executions" => {
+            let flags = parse_flags(args);
+            let mut client = connect().await?;
+            let value = client.call(&Request::ExecutionReceiptList).await?;
+            if flags.json {
+                return Ok(vec![value.to_string()]);
+            }
+            let mut lines = vec!["Execution receipts:".into()];
+            for receipt in value.as_array().into_iter().flatten() {
+                lines.push(format!(
+                    "  {} state={} mode={} scope={}",
+                    receipt
+                        .get("plan_digest")
+                        .or_else(|| receipt.get("change_digest"))
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("?"),
+                    receipt["state"].as_str().unwrap_or("?"),
+                    receipt["mode"].as_str().unwrap_or("?"),
+                    receipt["scope"].as_str().unwrap_or("?")
+                ));
+            }
+            Ok(lines)
+        }
         "ssh" => ssh(args, false).await,
         "exec" => ssh(args, true).await,
         "fleet" => fleet(args).await,
@@ -2605,10 +2629,11 @@ async fn allocations(args: &[String]) -> Result<Vec<String>, ClientError> {
             if flags.json || flags.dry_run {
                 Ok(vec![value.to_string()])
             } else {
+                let result = &value["result"];
                 Ok(vec![format!(
                     "imported {} allocation receipt(s) for {}",
-                    value["imported"].as_u64().unwrap_or(0),
-                    value["site"].as_str().unwrap_or("?")
+                    result["imported"].as_u64().unwrap_or(0),
+                    result["site"].as_str().unwrap_or("?")
                 )])
             }
         }

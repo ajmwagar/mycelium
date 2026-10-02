@@ -36,6 +36,20 @@ per-action outputs and verification evidence, and identify partial failure.
 They do not claim rollback. Compensation must be modeled as another explicit,
 reviewable action.
 
+Mycelium-owned intent uses the parallel `StateChangePlan` transaction boundary.
+It shares canonical identity, typed execution mode, durable receipts, and
+fail-loud persistence, but it does not invent a device capability or
+postcondition. Network adoption, physical bindings, DHCP intent, discovery
+scopes, and allocation records use this boundary. If persistence fails, the
+daemon restores its previous in-memory state before recording failure.
+
+Inspect both device and state receipts with:
+
+```sh
+mycelium executions
+mycelium executions --json
+```
+
 ## Planner rule
 
 A type ending in `Proposal` is advisory. A type ending in `Plan` must either be

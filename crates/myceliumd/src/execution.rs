@@ -194,3 +194,22 @@ fn now() -> u64 {
         .unwrap_or_default()
         .as_secs()
 }
+
+pub(crate) fn list_receipts() -> Result<Vec<serde_json::Value>> {
+    let mut receipts = Vec::new();
+    let Ok(entries) = std::fs::read_dir(receipts_dir()) else {
+        return Ok(receipts);
+    };
+    for entry in entries {
+        let entry = entry?;
+        if entry.path().extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        receipts.push(
+            serde_json::from_slice(&std::fs::read(entry.path())?)
+                .map_err(|error| MyceliumError::Parse(error.to_string()))?,
+        );
+    }
+    receipts.sort_by_key(|receipt| std::cmp::Reverse(receipt["started_at"].as_u64().unwrap_or(0)));
+    Ok(receipts)
+}

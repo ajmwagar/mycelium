@@ -57,6 +57,7 @@ pub enum Request {
         plan: mycelium_core::ActionPlan,
         mode: mycelium_core::ExecutionMode,
     },
+    ExecutionReceiptList,
     /// Pull observations from every open device and merge the topology.
     Scan,
     Topology,

@@ -114,11 +114,7 @@ impl ActionPlan {
     /// Content identity independent of JSON object insertion order. This is
     /// the review/apply boundary and the durable receipt key.
     pub fn digest(&self) -> String {
-        let value = serde_json::to_value(self).expect("ActionPlan is serializable");
-        let canonical = canonical_json(&value);
-        let mut hash = Sha256::new();
-        hash.update(canonical.as_bytes());
-        format!("{:x}", hash.finalize())
+        canonical_digest(self)
     }
 
     pub fn action_id(&self, index: usize) -> Option<String> {
@@ -130,6 +126,49 @@ impl ActionPlan {
         hash.update(canonical_json(&value).as_bytes());
         Some(format!("{:x}", hash.finalize()))
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct StateChangePlan {
+    pub schema_version: u32,
+    pub operation: String,
+    pub scope: String,
+    pub desired: serde_json::Value,
+}
+
+impl StateChangePlan {
+    pub fn new(
+        operation: impl Into<String>,
+        scope: impl Into<String>,
+        desired: serde_json::Value,
+    ) -> Self {
+        Self {
+            schema_version: 1,
+            operation: operation.into(),
+            scope: scope.into(),
+            desired,
+        }
+    }
+    pub fn digest(&self) -> String {
+        canonical_digest(self)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct StateChangeReceipt {
+    pub schema_version: u32,
+    pub change_digest: String,
+    pub operation: String,
+    pub scope: String,
+    pub mode: ExecutionMode,
+    pub state: ExecutionState,
+    pub started_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -201,6 +240,13 @@ fn canonical_json(value: &serde_json::Value) -> String {
             )
         }
     }
+}
+
+pub fn canonical_digest<T: Serialize>(value: &T) -> String {
+    let value = serde_json::to_value(value).expect("digest input is serializable");
+    let mut hash = Sha256::new();
+    hash.update(canonical_json(&value).as_bytes());
+    format!("{:x}", hash.finalize())
 }
 
 pub fn verification_matches(actual: &Value, predicate: &VerificationPredicate) -> bool {
@@ -315,5 +361,20 @@ mod tests {
         assert_eq!(plan.digest(), plan.digest());
         assert_eq!(plan.action_id(0), plan.action_id(0));
         assert_eq!(plan.digest().len(), 64);
+    }
+
+    #[test]
+    fn state_change_identity_is_canonical() {
+        let left = StateChangePlan::new(
+            "network.adopt",
+            "network:cctv",
+            serde_json::json!({"b": 2, "a": 1}),
+        );
+        let right = StateChangePlan::new(
+            "network.adopt",
+            "network:cctv",
+            serde_json::json!({"a": 1, "b": 2}),
+        );
+        assert_eq!(left.digest(), right.digest());
     }
 }

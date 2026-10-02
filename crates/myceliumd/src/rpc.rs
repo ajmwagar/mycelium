@@ -550,6 +550,9 @@ impl Daemon {
                 to_value(crate::execution::execute(&self.inventory, &plan, mode).await?)
                     .map_err(json_err)
             }
+            Request::ExecutionReceiptList => {
+                to_value(crate::execution::list_receipts()?).map_err(json_err)
+            }
             Request::Scan => {
                 let mut warnings = Vec::new();
                 let mut observations = Vec::new();
@@ -739,43 +742,75 @@ impl Daemon {
                     protocols: protocols.into_iter().collect(),
                     segments: segments.into_iter().collect(),
                 };
-                if dry_run {
-                    return to_value(serde_json::json!({"dry_run": true, "scope": scope}))
+                let mode = crate::state_change::mode_from_flags(write, dry_run)?;
+                let transaction = crate::state_change::StateChangeTransaction::begin(
+                    mycelium_core::StateChangePlan::new(
+                        "discovery.scope.set",
+                        format!("observer:{observer}"),
+                        to_value(&scope).map_err(json_err)?,
+                    ),
+                    mode,
+                )?;
+                if transaction.mode() == mycelium_core::ExecutionMode::Plan {
+                    return to_value(transaction.finish(to_value(&scope).map_err(json_err)?)?)
                         .map_err(json_err);
                 }
-                if !write {
-                    return Err(MyceliumError::WritesNotPermitted(
-                        "discovery scope changes require --write".into(),
-                    ));
-                }
-                self.discovery_scopes
+                let previous = self
+                    .discovery_scopes
                     .lock()
                     .await
                     .insert(observer, scope.clone());
-                self.persist_discovery().await?;
-                to_value(scope).map_err(json_err)
+                if let Err(error) = self.persist_discovery().await {
+                    let mut scopes = self.discovery_scopes.lock().await;
+                    match previous {
+                        Some(value) => {
+                            scopes.insert(scope.observer.clone(), value);
+                        }
+                        None => {
+                            scopes.remove(&scope.observer);
+                        }
+                    }
+                    transaction.fail(error.to_string())?;
+                    unreachable!();
+                }
+                to_value(transaction.finish(to_value(scope).map_err(json_err)?)?).map_err(json_err)
             }
             Request::DiscoveryScopeRemove {
                 observer,
                 write,
                 dry_run,
             } => {
-                if dry_run {
-                    return to_value(serde_json::json!({
-                        "dry_run": true,
-                        "observer": observer
-                    }))
+                let mode = crate::state_change::mode_from_flags(write, dry_run)?;
+                let desired = serde_json::json!({"observer": observer});
+                let transaction = crate::state_change::StateChangeTransaction::begin(
+                    mycelium_core::StateChangePlan::new(
+                        "discovery.scope.remove",
+                        format!("observer:{observer}"),
+                        desired,
+                    ),
+                    mode,
+                )?;
+                if transaction.mode() == mycelium_core::ExecutionMode::Plan {
+                    return to_value(
+                        transaction.finish(serde_json::json!({"observer": observer}))?,
+                    )
                     .map_err(json_err);
                 }
-                if !write {
-                    return Err(MyceliumError::WritesNotPermitted(
-                        "discovery scope changes require --write".into(),
-                    ));
-                }
                 let removed = self.discovery_scopes.lock().await.remove(&observer);
-                self.persist_discovery().await?;
-                to_value(serde_json::json!({"removed": removed.is_some(), "observer": observer}))
-                    .map_err(json_err)
+                if let Err(error) = self.persist_discovery().await {
+                    if let Some(value) = removed {
+                        self.discovery_scopes
+                            .lock()
+                            .await
+                            .insert(observer.clone(), value);
+                    }
+                    transaction.fail(error.to_string())?;
+                    unreachable!();
+                }
+                to_value(transaction.finish(
+                    serde_json::json!({"removed": removed.is_some(), "observer": observer}),
+                )?)
+                .map_err(json_err)
             }
             Request::AllocationList => {
                 let receipts = self
@@ -803,31 +838,33 @@ impl Daemon {
                     .filter(|candidate| !existing.contains_key(&candidate.identity))
                     .collect::<Vec<_>>();
                 drop(existing);
-                if dry_run {
-                    return to_value(serde_json::json!({
-                        "dry_run": true,
-                        "site": site,
-                        "additions": additions,
-                    }))
-                    .map_err(json_err);
-                }
-                if !write {
-                    return Err(MyceliumError::WritesNotPermitted(
-                        "allocation imports require --write".into(),
-                    ));
+                let result = serde_json::json!({"site": site, "imported": additions.len(), "receipts": additions});
+                let mode = crate::state_change::mode_from_flags(write, dry_run)?;
+                let transaction = crate::state_change::StateChangeTransaction::begin(
+                    mycelium_core::StateChangePlan::new(
+                        "allocation.import",
+                        format!("site:{site}"),
+                        result.clone(),
+                    ),
+                    mode,
+                )?;
+                if transaction.mode() == mycelium_core::ExecutionMode::Plan {
+                    return to_value(transaction.finish(result)?).map_err(json_err);
                 }
                 let mut allocations = self.allocations.lock().await;
                 for receipt in &additions {
                     allocations.insert(receipt.identity.clone(), receipt.clone());
                 }
                 drop(allocations);
-                self.persist_allocations().await?;
-                to_value(serde_json::json!({
-                    "site": site,
-                    "imported": additions.len(),
-                    "receipts": additions,
-                }))
-                .map_err(json_err)
+                if let Err(error) = self.persist_allocations().await {
+                    let mut allocations = self.allocations.lock().await;
+                    for receipt in &additions {
+                        allocations.remove(&receipt.identity);
+                    }
+                    transaction.fail(error.to_string())?;
+                    unreachable!();
+                }
+                to_value(transaction.finish(result)?).map_err(json_err)
             }
             Request::AllocationRecord {
                 site,
@@ -891,24 +928,39 @@ impl Daemon {
                     }
                     candidate = merged;
                 }
-                if dry_run {
-                    return to_value(serde_json::json!({
-                        "dry_run": true,
-                        "receipt": candidate,
-                    }))
-                    .map_err(json_err);
+                let mode = crate::state_change::mode_from_flags(write, dry_run)?;
+                let transaction = crate::state_change::StateChangeTransaction::begin(
+                    mycelium_core::StateChangePlan::new(
+                        "allocation.record",
+                        format!("allocation:{}", candidate.identity),
+                        to_value(&candidate).map_err(json_err)?,
+                    ),
+                    mode,
+                )?;
+                if transaction.mode() == mycelium_core::ExecutionMode::Plan {
+                    return to_value(transaction.finish(to_value(&candidate).map_err(json_err)?)?)
+                        .map_err(json_err);
                 }
-                if !write {
-                    return Err(MyceliumError::WritesNotPermitted(
-                        "allocation recording requires --write".into(),
-                    ));
-                }
-                self.allocations
+                let previous = self
+                    .allocations
                     .lock()
                     .await
                     .insert(candidate.identity.clone(), candidate.clone());
-                self.persist_allocations().await?;
-                to_value(candidate).map_err(json_err)
+                if let Err(error) = self.persist_allocations().await {
+                    let mut allocations = self.allocations.lock().await;
+                    match previous {
+                        Some(value) => {
+                            allocations.insert(candidate.identity.clone(), value);
+                        }
+                        None => {
+                            allocations.remove(&candidate.identity);
+                        }
+                    }
+                    transaction.fail(error.to_string())?;
+                    unreachable!();
+                }
+                to_value(transaction.finish(to_value(candidate).map_err(json_err)?)?)
+                    .map_err(json_err)
             }
             Request::NetworkList => {
                 let networks = self
@@ -989,24 +1041,39 @@ impl Daemon {
                     }
                 }
                 drop(networks);
-                if dry_run {
-                    return to_value(serde_json::json!({
-                        "dry_run": true,
-                        "network": candidate,
-                    }))
-                    .map_err(json_err);
+                let mode = crate::state_change::mode_from_flags(write, dry_run)?;
+                let transaction = crate::state_change::StateChangeTransaction::begin(
+                    mycelium_core::StateChangePlan::new(
+                        "network.adopt",
+                        format!("network:{}", candidate.identity),
+                        to_value(&candidate).map_err(json_err)?,
+                    ),
+                    mode,
+                )?;
+                if transaction.mode() == mycelium_core::ExecutionMode::Plan {
+                    return to_value(transaction.finish(to_value(&candidate).map_err(json_err)?)?)
+                        .map_err(json_err);
                 }
-                if !write {
-                    return Err(MyceliumError::WritesNotPermitted(
-                        "network adoption requires --write".into(),
-                    ));
-                }
-                self.networks
+                let previous = self
+                    .networks
                     .lock()
                     .await
                     .insert(candidate.identity.clone(), candidate.clone());
-                self.persist_networks().await?;
-                to_value(candidate).map_err(json_err)
+                if let Err(error) = self.persist_networks().await {
+                    let mut networks = self.networks.lock().await;
+                    match previous {
+                        Some(value) => {
+                            networks.insert(candidate.identity.clone(), value);
+                        }
+                        None => {
+                            networks.remove(&candidate.identity);
+                        }
+                    }
+                    transaction.fail(error.to_string())?;
+                    unreachable!();
+                }
+                to_value(transaction.finish(to_value(candidate).map_err(json_err)?)?)
+                    .map_err(json_err)
             }
             Request::NetworkDrift { name } => {
                 let networks = self.networks.lock().await;
@@ -1111,25 +1178,45 @@ impl Daemon {
                     });
                 }
                 let candidate = NetworkBinding::new(network_id, device, port, tagged);
-                if dry_run {
-                    return to_value(serde_json::json!({"dry_run": true, "binding": candidate}))
+                let mode = crate::state_change::mode_from_flags(write, dry_run)?;
+                let transaction = crate::state_change::StateChangeTransaction::begin(
+                    mycelium_core::StateChangePlan::new(
+                        "network.binding.set",
+                        format!("binding:{}", candidate.identity),
+                        to_value(&candidate).map_err(json_err)?,
+                    ),
+                    mode,
+                )?;
+                if transaction.mode() == mycelium_core::ExecutionMode::Plan {
+                    return to_value(transaction.finish(to_value(&candidate).map_err(json_err)?)?)
                         .map_err(json_err);
-                }
-                if !write {
-                    return Err(MyceliumError::WritesNotPermitted(
-                        "network binding requires --write".into(),
-                    ));
                 }
                 let mut bindings = self.network_bindings.lock().await;
                 if let Some(existing) = bindings.get(&candidate.identity) {
                     if existing == &candidate {
-                        return to_value(existing).map_err(json_err);
+                        return to_value(
+                            transaction.finish(to_value(existing).map_err(json_err)?)?,
+                        )
+                        .map_err(json_err);
                     }
                 }
-                bindings.insert(candidate.identity.clone(), candidate.clone());
+                let previous = bindings.insert(candidate.identity.clone(), candidate.clone());
                 drop(bindings);
-                self.persist_network_bindings().await?;
-                to_value(candidate).map_err(json_err)
+                if let Err(error) = self.persist_network_bindings().await {
+                    let mut bindings = self.network_bindings.lock().await;
+                    match previous {
+                        Some(value) => {
+                            bindings.insert(candidate.identity.clone(), value);
+                        }
+                        None => {
+                            bindings.remove(&candidate.identity);
+                        }
+                    }
+                    transaction.fail(error.to_string())?;
+                    unreachable!();
+                }
+                to_value(transaction.finish(to_value(candidate).map_err(json_err)?)?)
+                    .map_err(json_err)
             }
             Request::NetworkDhcpList { network } => {
                 let matching_ids = self
@@ -1206,21 +1293,39 @@ impl Daemon {
                     range_end,
                     dns_servers,
                 );
-                if dry_run {
-                    return to_value(serde_json::json!({"dry_run": true, "scope": candidate}))
+                let mode = crate::state_change::mode_from_flags(write, dry_run)?;
+                let transaction = crate::state_change::StateChangeTransaction::begin(
+                    mycelium_core::StateChangePlan::new(
+                        "network.dhcp.set",
+                        format!("dhcp:{}", candidate.identity),
+                        to_value(&candidate).map_err(json_err)?,
+                    ),
+                    mode,
+                )?;
+                if transaction.mode() == mycelium_core::ExecutionMode::Plan {
+                    return to_value(transaction.finish(to_value(&candidate).map_err(json_err)?)?)
                         .map_err(json_err);
                 }
-                if !write {
-                    return Err(MyceliumError::WritesNotPermitted(
-                        "DHCP scope intent requires --write".into(),
-                    ));
-                }
-                self.dhcp_scopes
+                let previous = self
+                    .dhcp_scopes
                     .lock()
                     .await
                     .insert(candidate.identity.clone(), candidate.clone());
-                self.persist_dhcp_scopes().await?;
-                to_value(candidate).map_err(json_err)
+                if let Err(error) = self.persist_dhcp_scopes().await {
+                    let mut scopes = self.dhcp_scopes.lock().await;
+                    match previous {
+                        Some(value) => {
+                            scopes.insert(candidate.identity.clone(), value);
+                        }
+                        None => {
+                            scopes.remove(&candidate.identity);
+                        }
+                    }
+                    transaction.fail(error.to_string())?;
+                    unreachable!();
+                }
+                to_value(transaction.finish(to_value(candidate).map_err(json_err)?)?)
+                    .map_err(json_err)
             }
             Request::PeerList => to_value(self.mesh.views().await).map_err(json_err),
             Request::WireGuardBindingList => {
