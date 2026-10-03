@@ -884,6 +884,10 @@ mycelium resources --kind gpu
 mycelium resources --kind storage --node home-pi
 mycelium resources show gpu/RESOURCE_ID
 mycelium resources watch
+mycelium services
+mycelium services --kind mcp
+mycelium services --kind adb --node agora-one
+mycelium services watch
 ```
 
 Topology answers where things are and how they connect. Resources answer what
@@ -892,6 +896,13 @@ resource attachment edges, so refreshing GPU or storage facts does not create a
 new topology generation unless placement actually changes. Resource facts use
 the provider-neutral `fpl-resource-observation` contract; Mycelium is one
 optional producer, and discovery never grants authority.
+
+Services are a separate projection of lightweight topology evidence. Mycelium
+currently recognizes explicit MCP, DCP, Unibus, Isochrone, and ADB service or
+product names; TCP port 5555 is treated only as derived-confidence ADB evidence.
+Recognition performs no additional network I/O. Endpoints, protocols, formats,
+freshness, and provenance use the same provider-neutral observation envelope,
+while each protocol retains its own session behavior and authorization.
 
 `mycelium targets` lists appliances explicitly enrolled behind management
 drivers. The former `mycelium devices` spelling remains a compatibility alias;

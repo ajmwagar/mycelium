@@ -1158,6 +1158,10 @@ impl Daemon {
                 to_value(feed.read_since(since, limit)).map_err(json_err)
             }
             Request::Resources => to_value(self.converged_resources().await).map_err(json_err),
+            Request::Services => {
+                let topology = self.converged_topology().await?;
+                to_value(crate::services::project(&topology)).map_err(json_err)
+            }
             Request::DiscoveryScopeList => {
                 let scopes = self
                     .discovery_scopes

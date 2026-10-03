@@ -199,6 +199,57 @@ pub struct ResourceCatalog {
     pub attachments: Vec<Observation<Attachment>>,
 }
 
+/// A provider-neutral description of a reachable service. Discovery proves
+/// availability only; consumers retain ownership of authorization and
+/// protocol negotiation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Service {
+    /// Open vocabulary such as `mcp`, `dcp`, `unibus`, `isochrone`, or `adb`.
+    pub kind: String,
+    #[serde(default)]
+    pub endpoints: BTreeSet<String>,
+    #[serde(default)]
+    pub protocols: BTreeSet<String>,
+    #[serde(default)]
+    pub formats: BTreeSet<String>,
+    #[serde(default)]
+    pub attributes: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ServiceId(pub String);
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServiceObservation {
+    pub schema_version: u16,
+    pub service_id: ServiceId,
+    pub observed_at: u64,
+    pub expires_at: u64,
+    pub provenance: Provenance,
+    pub confidence: Confidence,
+    pub value: Service,
+}
+
+impl ServiceObservation {
+    pub fn is_fresh_at(&self, now: u64) -> bool {
+        self.observed_at <= now && now < self.expires_at
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServiceCatalog {
+    pub schema_version: u16,
+    pub observations: Vec<ServiceObservation>,
+}
+
+impl ServiceCatalog {
+    pub fn normalize(&mut self) {
+        self.observations
+            .sort_by(|left, right| left.service_id.cmp(&right.service_id));
+    }
+}
+
 impl ResourceCatalog {
     pub fn normalize(&mut self) {
         self.observations

@@ -80,6 +80,8 @@ pub enum Request {
     },
     /// Provider-neutral usable resources projected from discovery facts.
     Resources,
+    /// Provider-neutral recognized services projected from topology facts.
+    Services,
     DiscoveryScopeList,
     DiscoveryScopeSet {
         observer: String,

@@ -121,6 +121,7 @@ usage:
   mycelium networks dhcp set NAME --device ID --pool NAME --range START-END [--dns IP]... --write [--dry-run]
   mycelium peers [--json]
   mycelium resources [show ID | watch [--once]] [--kind KIND] [--node NODE] [--json]
+  mycelium services [show ID | watch [--once]] [--kind KIND] [--node NODE] [--json]
   mycelium debug hardware [PEER] [--json]
   mycelium releases list [--json]
   mycelium releases keygen --path PATH --write [--json]
@@ -605,6 +606,7 @@ async fn run(cmd: &str, args: &[String]) -> Result<Vec<String>, ClientError> {
             }
         }
         "resources" => resources(args).await,
+        "services" => services(args).await,
         "debug" if args.first().is_some_and(|argument| argument == "hardware") => {
             hardware(&args[1..]).await
         }
@@ -2724,6 +2726,108 @@ async fn resources(args: &[String]) -> Result<Vec<String>, ClientError> {
     Ok(render_resources(&catalog))
 }
 
+async fn services(args: &[String]) -> Result<Vec<String>, ClientError> {
+    let action = args.first().map(String::as_str).unwrap_or("list");
+    if action == "watch" {
+        return catalog_watch(Request::Services, &args[1..], "services").await;
+    }
+    let show = if action == "show" {
+        Some(
+            args.get(1)
+                .ok_or_else(|| err_usage("services show needs a service ID"))?,
+        )
+    } else {
+        None
+    };
+    let mut kind = None;
+    let mut node = None;
+    let mut json = false;
+    let mut index = if action == "show" { 2 } else { 0 };
+    while index < args.len() {
+        match args[index].as_str() {
+            "--kind" | "--node" => {
+                let flag = args[index].clone();
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| err_usage(&format!("services {flag} needs a value")))?
+                    .clone();
+                if flag == "--kind" {
+                    kind = Some(value);
+                } else {
+                    node = Some(value);
+                }
+            }
+            "--json" => json = true,
+            "list" if index == 0 => {}
+            argument => {
+                return Err(err_usage(&format!(
+                    "unknown services argument `{argument}`"
+                )))
+            }
+        }
+        index += 1;
+    }
+    let mut client = connect().await?;
+    let value = client.call(&Request::Services).await?;
+    let mut catalog: fpl_resource_observation::ServiceCatalog = serde_json::from_value(value)
+        .map_err(|error| err_usage(&format!("bad service catalog: {error}")))?;
+    catalog.observations.retain(|observation| {
+        show.is_none_or(|id| observation.service_id.0 == *id)
+            && kind
+                .as_deref()
+                .is_none_or(|kind| observation.value.kind == kind)
+            && node.as_deref().is_none_or(|node| {
+                observation
+                    .value
+                    .attributes
+                    .get("node_id")
+                    .is_some_and(|id| id.starts_with(node))
+                    || observation
+                        .value
+                        .attributes
+                        .get("node_label")
+                        .is_some_and(|label| label == node)
+            })
+    });
+    if show.is_some() && catalog.observations.is_empty() {
+        return Err(err_usage("unknown service"));
+    }
+    if json {
+        return Ok(vec![
+            serde_json::to_string(&catalog).map_err(|error| err_usage(&error.to_string()))?
+        ]);
+    }
+    Ok(render_service_catalog(&catalog))
+}
+
+fn render_service_catalog(catalog: &fpl_resource_observation::ServiceCatalog) -> Vec<String> {
+    let now = unix_now();
+    let mut lines = vec!["services:".into()];
+    for observation in &catalog.observations {
+        let state = if observation.is_fresh_at(now) {
+            "available"
+        } else {
+            "expired"
+        };
+        let node = observation
+            .value
+            .attributes
+            .get("node_label")
+            .or_else(|| observation.value.attributes.get("node_id"))
+            .map(String::as_str)
+            .unwrap_or("unknown");
+        lines.push(format!(
+            "  {} kind={} node={} state={} confidence={:?}",
+            observation.service_id.0, observation.value.kind, node, state, observation.confidence
+        ));
+        for endpoint in &observation.value.endpoints {
+            lines.push(format!("    {endpoint}"));
+        }
+    }
+    lines
+}
+
 async fn credential_map(args: &[String]) -> Result<Vec<String>, ClientError> {
     if args.first().map(String::as_str) != Some("map") {
         return Err(err_usage("credentials needs `map list|set|remove`"));
@@ -2916,14 +3020,22 @@ fn render_resources(catalog: &fpl_resource_observation::ResourceCatalog) -> Vec<
 }
 
 async fn resources_watch(args: &[String]) -> Result<Vec<String>, ClientError> {
+    catalog_watch(Request::Resources, args, "resources").await
+}
+
+async fn catalog_watch(
+    request: Request,
+    args: &[String],
+    name: &str,
+) -> Result<Vec<String>, ClientError> {
     let once = args.iter().any(|argument| argument == "--once");
     if args.iter().any(|argument| argument != "--once") {
-        return Err(err_usage("resources watch accepts only --once"));
+        return Err(err_usage(&format!("{name} watch accepts only --once")));
     }
     let mut client = connect().await?;
     let mut previous = None;
     loop {
-        let value = client.call(&Request::Resources).await?;
+        let value = client.call(&request).await?;
         let encoded = serde_json::to_string(&value)
             .map_err(|error| err_usage(&format!("encode resource catalog: {error}")))?;
         if previous.as_ref() != Some(&encoded) {
