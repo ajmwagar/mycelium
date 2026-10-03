@@ -772,8 +772,10 @@ ownership, so boot prompts such as LUKS can be answered interactively. Press
 
 ## UniFi access points
 
-The controller driver owns site-wide WLAN, AP, and client state through the
-UniFi Network API. Controller credentials remain environment-backed:
+The built-in bounded Lua AP dialect uses the Rust-owned SSH transport for local
+AP recovery and status. The native controller driver owns site-wide WLAN, AP,
+and client state through the UniFi Network API. Controller credentials remain
+environment-backed:
 
 ```sh
 mycelium add 192.168.20.12:8443 --driver unifi-controller \

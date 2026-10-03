@@ -16,8 +16,10 @@ use mycelium_driver_edgeos::{EdgeOsDriver, SshSession};
 use mycelium_driver_linux::LinuxDriver;
 use mycelium_driver_redfish::RedfishDriver;
 use mycelium_driver_snmp::SnmpDriver;
-use mycelium_driver_unifi::{UnifiControllerDriver, UnifiDriver};
-use mycelium_plugins_lua::{AdvertisementRecognizer, Connect, Plugin, BUILTIN_RECOGNIZERS};
+use mycelium_driver_unifi::UnifiControllerDriver;
+use mycelium_plugins_lua::{
+    AdvertisementRecognizer, Connect, Plugin, BUILTIN_RECOGNIZERS, UNIFI_AP_PLUGIN,
+};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
@@ -181,9 +183,12 @@ impl Daemon {
             Arc::new(LinuxDriver::default()),
             Arc::new(RedfishDriver::default()),
             Arc::new(SnmpDriver::default()),
-            Arc::new(UnifiDriver::default()),
             Arc::new(UnifiControllerDriver::default()),
         ];
+        let unifi_ap = Arc::new(Plugin::load(UNIFI_AP_PLUGIN)?);
+        drivers.push(
+            Arc::new(unifi_ap.driver_named("unifi", Arc::new(SshConnect))) as Arc<dyn Driver>,
+        );
         let mut recognizers = BUILTIN_RECOGNIZERS
             .iter()
             .map(|(name, source)| {

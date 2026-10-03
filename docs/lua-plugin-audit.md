@@ -85,15 +85,18 @@ when at least two real drivers share the need.
 
 ## Recommended sequence
 
+Status: the bounded probe/decoder ABI and built-in UniFi AP Lua driver now
+replace the native AP implementation; the HTTP controller driver remains Rust.
+Shared Rust helper consolidation continues independently.
+
 1. Extract shared Rust helpers for stable IDs, CIDRs, and SSH command execution.
 2. Add declarative probe and bounded decoders to the Lua driver ABI, with
    negative tests for command injection, oversized output, malformed identity,
    and mutation bypass.
-3. Port the UniFi AP SSH driver to a built-in Lua plugin and run both
-   implementations against the same fixtures until their identities,
-   capabilities, dry-runs, and parsed results match.
+3. Port the UniFi AP SSH driver to a built-in Lua plugin and verify identity,
+   capability, dry-run, structured-argument, and decoded-result parity.
 4. Remove the native UniFi AP implementation after parity; keep the controller
-   driver in Rust.
+   driver in Rust. **Completed.**
 5. Add a pure SNMP classification/profile ABI over normalized Rust varbinds.
 6. Revisit EdgeOS only at the normalized-intent-to-command boundary. Do not
    move its network model or reconciliation state machine into Lua.

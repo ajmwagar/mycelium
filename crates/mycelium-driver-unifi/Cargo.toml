@@ -3,11 +3,10 @@ name = "mycelium-driver-unifi"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "mycelium SSH driver for controller-managed UniFi access points"
+description = "mycelium HTTP driver for the UniFi Network controller"
 
 [dependencies]
 mycelium-core.workspace = true
-mycelium-driver-edgeos.workspace = true
 async-trait.workspace = true
 reqwest.workspace = true
 serde.workspace = true

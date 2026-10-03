@@ -28,14 +28,25 @@
 //!   parse_fn = function(outputs, params)   -- named by `parse`
 //!     return { result = … }
 //!   end,
+//!   probe = function(target)               -- optional, paired with recognize
+//!     return { commands = {
+//!       { program = "vendor-info", args = { "--json" }, decode = "json" }
+//!     } }
+//!   end,
+//!   recognize = function(outputs, target)  -- pure recognition decision
+//!     return outputs[1].product == "expected"
+//!   end,
 //! }
 //! ```
 //!
 //! Plugins never touch sockets, files, or the wall clock: they *declare*
 //! commands, and the Rust host runs them through a [`Transport`] — after
 //! the write-gate/dry-run checks in `core::Device::invoke`, which every
-//! plugin call passes through. Control flow stays deterministic (tenet #7);
-//! the sandbox removes os/io/debug/require (defense in depth).
+//! plugin call passes through. Dynamic arguments use structured command
+//! declarations and are quoted by Rust. Host decoders (`json`, `lines`, and
+//! `key_value`) enforce output, depth, and node bounds before Lua sees data.
+//! Control flow stays deterministic (tenet #7); the sandbox removes
+//! os/io/debug/require (defense in depth).
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -48,12 +59,21 @@ use mycelium_core::{
     Driver, ExecContext, Inventory, MyceliumError, Params, Result, ServiceAdvertisement, Target,
     Transport, Value, ID_IDENTIFY,
 };
+use serde::Deserialize;
 use tokio::sync::Mutex;
 
 pub const BAMBU_RECOGNIZER: &str = include_str!("../recognizers/bambu.lua");
 pub const HOMEKIT_RECOGNIZER: &str = include_str!("../recognizers/homekit.lua");
 pub const AIRPLAY_RECOGNIZER: &str = include_str!("../recognizers/airplay.lua");
 pub const PRINT_SCAN_RECOGNIZER: &str = include_str!("../recognizers/print_scan.lua");
+pub const UNIFI_AP_PLUGIN: &str = include_str!("../plugins/unifi_ap.lua");
+
+const MAX_COMMANDS: usize = 32;
+const MAX_ARGUMENTS: usize = 64;
+const MAX_ARGUMENT_BYTES: usize = 4096;
+const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
+const MAX_JSON_DEPTH: usize = 32;
+const MAX_JSON_NODES: usize = 65_536;
 
 /// Built-ins are data interpreted through the same bounded interface as
 /// operator-installed recognizers. The tuple label makes startup diagnostics
@@ -132,6 +152,7 @@ pub struct Plugin {
     pub kind: DeviceKind,
     pub source: Arc<str>,
     has_match: bool,
+    has_probe: bool,
 }
 
 impl Plugin {
@@ -161,11 +182,35 @@ impl Plugin {
             }
         }
         let has_match = plugin.get::<mlua::Function>("match").is_ok();
-        Ok(Self { name, kind, source, has_match })
+        let has_probe = plugin.get::<mlua::Function>("probe").is_ok();
+        let has_recognize = plugin.get::<mlua::Function>("recognize").is_ok();
+        if has_probe != has_recognize {
+            return Err(MyceliumError::Plugin {
+                plugin: name,
+                message: "`plugin.probe` and `plugin.recognize` must be declared together".into(),
+            });
+        }
+        Ok(Self {
+            name,
+            kind,
+            source,
+            has_match,
+            has_probe,
+        })
     }
 
     pub fn driver(self: Arc<Self>, connect: Arc<dyn Connect>) -> LuaDriver {
         LuaDriver::new(self, connect)
+    }
+
+    /// Preserve a stable public driver name for a built-in dialect while
+    /// operator-installed plugins continue to use `lua:<plugin>` names.
+    pub fn driver_named(
+        self: Arc<Self>,
+        driver_name: impl Into<String>,
+        connect: Arc<dyn Connect>,
+    ) -> LuaDriver {
+        LuaDriver::new_named(self, connect, driver_name.into())
     }
 
     fn declared_caps(&self, lua: &Lua) -> Result<BTreeMap<String, CapSpec>> {
@@ -309,6 +354,221 @@ where
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum OutputDecoder {
+    #[default]
+    Raw,
+    Json,
+    Lines,
+    KeyValue,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StructuredCommand {
+    program: String,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    decode: OutputDecoder,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DecodedRawCommand {
+    command: String,
+    #[serde(default)]
+    decode: OutputDecoder,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum CommandDeclaration {
+    Raw(String),
+    Structured(StructuredCommand),
+    DecodedRaw(DecodedRawCommand),
+}
+
+#[derive(Debug)]
+struct PlannedCommand {
+    rendered: String,
+    decode: OutputDecoder,
+}
+
+fn target_json(target: &Target) -> serde_json::Value {
+    match target {
+        Target::Host { host, port, jump } => serde_json::json!({
+            "address": host,
+            "port": port.unwrap_or(0),
+            "jump": jump,
+        }),
+        Target::Subnet { network } => serde_json::json!({"subnet": network}),
+    }
+}
+
+fn shell_quote(argument: &str) -> String {
+    format!("'{}'", argument.replace('\'', "'\\''"))
+}
+
+fn commands_from_plan(plugin: &str, plan: &serde_json::Value) -> Result<Vec<PlannedCommand>> {
+    let Some(commands) = plan.get("commands") else {
+        return Ok(Vec::new());
+    };
+    let declarations: Vec<CommandDeclaration> =
+        serde_json::from_value(commands.clone()).map_err(|error| MyceliumError::Plugin {
+            plugin: plugin.into(),
+            message: format!("commands must be strings or structured command objects: {error}"),
+        })?;
+    if declarations.len() > MAX_COMMANDS {
+        return Err(MyceliumError::Plugin {
+            plugin: plugin.into(),
+            message: format!("command plan exceeds the {MAX_COMMANDS}-command limit"),
+        });
+    }
+    declarations
+        .into_iter()
+        .map(|declaration| match declaration {
+            CommandDeclaration::Raw(command) => {
+                if command.is_empty() || command.len() > MAX_ARGUMENT_BYTES * 4 {
+                    return Err(MyceliumError::Plugin {
+                        plugin: plugin.into(),
+                        message: "raw command is empty or exceeds the command-size limit".into(),
+                    });
+                }
+                Ok(PlannedCommand {
+                    rendered: command,
+                    decode: OutputDecoder::Raw,
+                })
+            }
+            CommandDeclaration::DecodedRaw(command) => {
+                if command.command.is_empty() || command.command.len() > MAX_ARGUMENT_BYTES * 4 {
+                    return Err(MyceliumError::Plugin {
+                        plugin: plugin.into(),
+                        message: "raw command is empty or exceeds the command-size limit".into(),
+                    });
+                }
+                Ok(PlannedCommand {
+                    rendered: command.command,
+                    decode: command.decode,
+                })
+            }
+            CommandDeclaration::Structured(command) => {
+                let safe_program = !command.program.is_empty()
+                    && command.program.len() <= 256
+                    && command.program.chars().all(|character| {
+                        character.is_ascii_alphanumeric()
+                            || matches!(character, '/' | '_' | '-' | '.')
+                    });
+                let safe_arguments = command.args.len() <= MAX_ARGUMENTS
+                    && command.args.iter().all(|argument| {
+                        argument.len() <= MAX_ARGUMENT_BYTES
+                            && !argument.contains(['\0', '\r', '\n'])
+                    });
+                if !safe_program || !safe_arguments {
+                    return Err(MyceliumError::Plugin {
+                        plugin: plugin.into(),
+                        message: "structured command exceeds program or argument bounds".into(),
+                    });
+                }
+                let mut rendered = command.program;
+                for argument in command.args {
+                    rendered.push(' ');
+                    rendered.push_str(&shell_quote(&argument));
+                }
+                Ok(PlannedCommand {
+                    rendered,
+                    decode: command.decode,
+                })
+            }
+        })
+        .collect()
+}
+
+fn validate_json_bounds(value: &serde_json::Value) -> bool {
+    fn visit(value: &serde_json::Value, depth: usize, nodes: &mut usize) -> bool {
+        *nodes += 1;
+        if depth > MAX_JSON_DEPTH || *nodes > MAX_JSON_NODES {
+            return false;
+        }
+        match value {
+            serde_json::Value::Array(values) => {
+                values.iter().all(|value| visit(value, depth + 1, nodes))
+            }
+            serde_json::Value::Object(values) => {
+                values.values().all(|value| visit(value, depth + 1, nodes))
+            }
+            _ => true,
+        }
+    }
+    visit(value, 0, &mut 0)
+}
+
+fn decode_output(plugin: &str, decoder: OutputDecoder, output: &str) -> Result<serde_json::Value> {
+    match decoder {
+        OutputDecoder::Raw => Ok(serde_json::Value::String(output.to_owned())),
+        OutputDecoder::Lines => Ok(serde_json::Value::Array(
+            output
+                .lines()
+                .map(|line| serde_json::Value::String(line.to_owned()))
+                .collect(),
+        )),
+        OutputDecoder::KeyValue => Ok(serde_json::Value::Object(
+            output
+                .lines()
+                .filter_map(|line| line.split_once(':'))
+                .map(|(key, value)| {
+                    (
+                        key.trim().to_ascii_lowercase().replace(' ', "_"),
+                        serde_json::Value::String(value.trim().to_owned()),
+                    )
+                })
+                .filter(|(key, value)| !key.is_empty() && value.as_str() != Some(""))
+                .collect(),
+        )),
+        OutputDecoder::Json => {
+            let value: serde_json::Value =
+                serde_json::from_str(output).map_err(|error| MyceliumError::Plugin {
+                    plugin: plugin.into(),
+                    message: format!("command returned invalid JSON: {error}"),
+                })?;
+            if !validate_json_bounds(&value) {
+                return Err(MyceliumError::Plugin {
+                    plugin: plugin.into(),
+                    message: "decoded JSON exceeds depth or node bounds".into(),
+                });
+            }
+            Ok(value)
+        }
+    }
+}
+
+async fn execute_commands(
+    plugin: &str,
+    transport: &dyn Transport,
+    commands: &[PlannedCommand],
+    ignore_errors: bool,
+) -> Result<Vec<serde_json::Value>> {
+    let mut outputs = Vec::with_capacity(commands.len());
+    for command in commands {
+        let output = transport.exec(&command.rendered).await?;
+        if output.stdout.len() > MAX_OUTPUT_BYTES || output.stderr.len() > MAX_OUTPUT_BYTES {
+            return Err(MyceliumError::Plugin {
+                plugin: plugin.into(),
+                message: format!("command output exceeds the {MAX_OUTPUT_BYTES}-byte limit"),
+            });
+        }
+        if !output.success() && !ignore_errors {
+            return Err(MyceliumError::Device {
+                exit_code: output.exit_code,
+                stderr: output.stderr.trim().to_owned(),
+            });
+        }
+        outputs.push(decode_output(plugin, command.decode, &output.stdout)?);
+    }
+    Ok(outputs)
+}
+
 pub struct LuaDriver {
     plugin: Arc<Plugin>,
     connect: Arc<dyn Connect>,
@@ -318,7 +578,15 @@ pub struct LuaDriver {
 impl LuaDriver {
     pub fn new(plugin: Arc<Plugin>, connect: Arc<dyn Connect>) -> Self {
         let driver_name = format!("lua:{}", plugin.name);
-        Self { plugin, connect, driver_name }
+        Self::new_named(plugin, connect, driver_name)
+    }
+
+    fn new_named(plugin: Arc<Plugin>, connect: Arc<dyn Connect>, driver_name: String) -> Self {
+        Self {
+            plugin,
+            connect,
+            driver_name,
+        }
     }
 }
 
@@ -328,19 +596,37 @@ impl Driver for LuaDriver {
         &self.driver_name
     }
 
-    async fn recognizes(&self, target: &Target, _creds: &CredentialSet) -> Result<bool> {
+    async fn recognizes(&self, target: &Target, creds: &CredentialSet) -> Result<bool> {
+        if self.plugin.has_probe {
+            let transport = self.connect.connect(target, creds).await?;
+            let lua = instantiate(&self.plugin.source, &self.plugin.name)?;
+            let plugin = plugin_table(&lua, &self.plugin.name)?;
+            let target = target_json(target);
+            let probe: mlua::Function = plugin.get("probe").expect("validated at load");
+            let output: LuaValue = probe
+                .call(JsonBridge(target.clone()))
+                .map_err(|error| err(&self.plugin.name, &error))?;
+            let plan: serde_json::Value = lua
+                .from_value(output)
+                .map_err(|error| err(&self.plugin.name, &error))?;
+            let commands = commands_from_plan(&self.plugin.name, &plan)?;
+            let outputs =
+                execute_commands(&self.plugin.name, transport.as_ref(), &commands, false).await?;
+            let recognize: mlua::Function = plugin.get("recognize").expect("validated at load");
+            return recognize
+                .call((
+                    JsonBridge(serde_json::Value::Array(outputs)),
+                    JsonBridge(target),
+                ))
+                .map_err(|error| err(&self.plugin.name, &error));
+        }
         if !self.plugin.has_match {
             return Ok(false);
         }
         let lua = instantiate(&self.plugin.source, &self.plugin.name)?;
         let plugin = plugin_table(&lua, &self.plugin.name)?;
         let f: mlua::Function = plugin.get("match").expect("checked");
-        let desc = serde_json::to_value(match target {
-            Target::Host { host, port, .. } => serde_json::json!({"address": host, "port": port.unwrap_or(0)}),
-            Target::Subnet { network } => serde_json::json!({"subnet": network}),
-        })
-        .expect("infallible");
-        let arg = JsonBridge(desc);
+        let arg = JsonBridge(target_json(target));
         let hit: bool = f.call(arg).map_err(|e| err(&self.plugin.name, &e))?;
         Ok(hit)
     }
@@ -381,13 +667,25 @@ impl Driver for LuaDriver {
             _ => Params::new(),
         };
         let slug = |s: &str| {
-            s.replace(|c: char| !(c.is_ascii_alphanumeric()), "-").trim_matches('-').to_owned()
+            s.to_ascii_lowercase()
+                .replace(|c: char| !(c.is_ascii_alphanumeric()), "-")
+                .trim_matches('-')
+                .to_owned()
         };
-        let id = DeviceId::new(format!(
-            "{}-{}",
-            slug(map.get("hostname").and_then(|v| v.as_str()).unwrap_or("device")),
-            slug(&self.plugin.name)
-        ));
+        let id = match map.get("stable_id").and_then(Value::as_str) {
+            Some(stable_id) if !stable_id.trim().is_empty() => {
+                DeviceId::new(format!("{}-{}", slug(&self.plugin.name), slug(stable_id)))
+            }
+            _ => DeviceId::new(format!(
+                "{}-{}",
+                slug(
+                    map.get("hostname")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("device")
+                ),
+                slug(&self.plugin.name)
+            )),
+        };
         let meta = DeviceMeta {
             id: id.clone(),
             kind: self.plugin.kind,
@@ -484,32 +782,27 @@ impl Device for LuaDevice {
             lua.from_value(out).map_err(|e| err(&self.plugin.name, &e))?
         };
 
-        let commands: Vec<String> = plan
-            .get("commands")
-            .and_then(|c| c.as_array())
-            .map(|a| a.iter().map(|s| s.as_str().unwrap_or_default().to_owned()).collect())
-            .unwrap_or_default();
+        let commands = commands_from_plan(&self.plugin.name, &plan)?;
 
         // 2. Dry-run never touches the transport: the plan *is* the output.
         if ctx.dry_run && !commands.is_empty() {
             return Ok(CapResult::dry_run(Value::List(
-                commands.into_iter().map(Value::Str).collect(),
+                commands
+                    .into_iter()
+                    .map(|command| Value::Str(command.rendered))
+                    .collect(),
             )));
         }
 
         // 3. Run the declared commands through the host transport.
         let ignore_errors = plan.get("ignore_errors").and_then(|v| v.as_bool()) == Some(true);
-        let mut outputs = Vec::new();
-        for cmd in &commands {
-            let out = self.transport.exec(cmd).await?;
-            if !out.success() && !ignore_errors {
-                return Err(MyceliumError::Device {
-                    exit_code: out.exit_code,
-                    stderr: out.stderr.trim().to_owned(),
-                });
-            }
-            outputs.push(serde_json::Value::String(out.stdout));
-        }
+        let outputs = execute_commands(
+            &self.plugin.name,
+            self.transport.as_ref(),
+            &commands,
+            ignore_errors,
+        )
+        .await?;
 
         // 4. Pure result, or hand outputs to the named parse function.
         let parse_name = plan.get("parse").and_then(|p| p.as_str()).map(str::to_owned);
@@ -708,6 +1001,123 @@ mod tests {
             let recognizer = AdvertisementRecognizer::load(*source).unwrap();
             assert!(recognizer.recognize(&advertisement).unwrap().is_none());
         }
+    }
+
+    #[test]
+    fn probe_and_recognize_must_be_declared_together() {
+        let source = r#"
+          plugin = {
+            name = "broken", kind = "other",
+            capabilities = function() return {} end,
+            exec = function() return { result = {} } end,
+            probe = function() return { commands = {} } end,
+          }
+        "#;
+        let error = Plugin::load(source).err().expect("plugin must be rejected");
+        assert!(error.to_string().contains("declared together"));
+    }
+
+    #[test]
+    fn structured_arguments_are_shell_quoted_and_bounded() {
+        let plan = serde_json::json!({
+            "commands": [{"program": "set-inform", "args": ["http://host/a'; reboot"]}]
+        });
+        let commands = commands_from_plan("test", &plan).unwrap();
+        assert_eq!(
+            commands[0].rendered,
+            "set-inform 'http://host/a'\\''; reboot'"
+        );
+        let invalid = serde_json::json!({
+            "commands": [{"program": "sh -c", "args": []}]
+        });
+        assert!(commands_from_plan("test", &invalid).is_err());
+    }
+
+    #[tokio::test]
+    async fn unifi_plugin_probes_attaches_and_decodes_json() {
+        const INFO: &str = "mca-cli-op info 2>/dev/null || info 2>/dev/null";
+        let transport = Arc::new(RecordingTransport::new());
+        transport.reply(
+            INFO,
+            "Model: UAP-AC-Pro-Gen2\nVersion: 6.6.77.15402\nMAC Address: 24:a4:3c:00:00:01\nHostname: office-ap\n",
+        );
+        transport.reply("wstalist", r#"[{"mac":"aa:bb:cc:dd:ee:ff"}]"#);
+        let plugin = Arc::new(Plugin::load(UNIFI_AP_PLUGIN).unwrap());
+        let connector_transport = transport.clone();
+        let driver = plugin.driver_named(
+            "unifi",
+            Arc::new(move |_: Target, _| {
+                let transport = connector_transport.clone();
+                async move { Ok(transport as Arc<dyn Transport>) }
+            }),
+        );
+        assert_eq!(driver.name(), "unifi");
+        let target = Target::host("192.168.99.11");
+        let credentials = CredentialSet::default();
+        assert!(driver.recognizes(&target, &credentials).await.unwrap());
+
+        let inventory = Inventory::new();
+        let id = driver
+            .attach(&target, &credentials, &inventory)
+            .await
+            .unwrap();
+        assert_eq!(id.to_string(), "unifi-24-a4-3c-00-00-01");
+        let device = inventory.get(&id.to_string()).unwrap();
+        assert_eq!(device.meta().vendor.as_deref(), Some("Ubiquiti"));
+        assert_eq!(device.meta().model.as_deref(), Some("UAP-AC-Pro-Gen2"));
+        let stations = device
+            .invoke(
+                &ExecContext::readonly("wlan.list-stations"),
+                "wlan.list-stations",
+                Params::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(stations.output.as_list().unwrap().len(), 1);
+
+        let set_inform = &device.capabilities()["unifi.set-inform"];
+        assert!(set_inform.mutation);
+        assert_eq!(
+            set_inform
+                .verification
+                .as_ref()
+                .map(|verification| verification.capability.as_str()),
+            Some("unifi.status")
+        );
+        let calls_before = transport.calls.lock().unwrap().len();
+        let dry_run = device
+            .invoke(
+                &ExecContext {
+                    capability: "unifi.set-inform".into(),
+                    allow_writes: false,
+                    dry_run: true,
+                },
+                "unifi.set-inform",
+                params_internal("url", "http://host/a';reboot"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            dry_run.output,
+            Value::List(vec![Value::Str(
+                "set-inform 'http://host/a'\\'';reboot'".into()
+            )])
+        );
+        assert_eq!(transport.calls.lock().unwrap().len(), calls_before);
+    }
+
+    #[tokio::test]
+    async fn command_output_is_bounded_before_decoding() {
+        let transport = RecordingTransport::new();
+        transport.reply("huge", "x".repeat(MAX_OUTPUT_BYTES + 1));
+        let commands = vec![PlannedCommand {
+            rendered: "huge".into(),
+            decode: OutputDecoder::Raw,
+        }];
+        let error = execute_commands("test", &transport, &commands, false)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("output exceeds"));
     }
 
     #[tokio::test]
