@@ -13,6 +13,7 @@
 pub mod allocation;
 pub mod boot;
 pub mod capabilities;
+pub mod classification;
 pub mod credentials;
 pub mod device;
 pub mod discovery;
@@ -39,6 +40,7 @@ pub use capabilities::{
     ID_SENSOR_HISTORY, ID_SENSOR_READ, ID_SWITCH_OBSERVE, ID_SYSTEM_HEALTH, ID_VLAN_ASSIGN,
     ID_VLAN_CREATE, ID_VLAN_LIST, ID_WLAN_GUEST_ENABLE, ID_WLAN_LIST_SSID,
 };
+pub use classification::{DeviceClassification, DeviceClassifier, DeviceIdentityEvidence};
 pub use credentials::{CredentialSet, Secret};
 pub use device::{DeviceId, DeviceKind, DeviceMeta};
 pub use discovery::{DiscoveryProtocol, DiscoveryRequest, DiscoveryScope};

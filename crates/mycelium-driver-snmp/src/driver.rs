@@ -1,9 +1,11 @@
+use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use mycelium_core::{
-    host_target, CredentialSet, DeviceId, DeviceMeta, Driver, Inventory, MyceliumError, Result,
-    Secret, Target,
+    host_target, CredentialSet, DeviceClassifier, DeviceId, DeviceIdentityEvidence, DeviceMeta,
+    Driver, Inventory, MyceliumError, Result, Secret, Target,
 };
 
 use crate::client::SnmpHandle;
@@ -15,17 +17,24 @@ pub const DRIVER_NAME: &str = "snmp";
 /// class — vendor inferred from the response, never from config.
 pub struct SnmpDriver {
     timeout: Duration,
+    classifier: Option<Arc<dyn DeviceClassifier>>,
 }
 
 impl Default for SnmpDriver {
     fn default() -> Self {
         Self {
             timeout: Duration::from_secs(3),
+            classifier: None,
         }
     }
 }
 
 impl SnmpDriver {
+    pub fn with_classifier(mut self, classifier: Arc<dyn DeviceClassifier>) -> Self {
+        self.classifier = Some(classifier);
+        self
+    }
+
     /// Community resolution (fail loud if an env-named secret is unset):
     /// - username = read community (literal; public ones aren't secrets)
     /// - password env = read community if no username, and doubles as the
@@ -82,12 +91,30 @@ impl Driver for SnmpDriver {
         let handle = self.handle(target, creds)?;
         let host = handle.host.clone();
         let info = SnmpDevice::probe(&handle).await?;
-        let (kind, id, model) = classify(&info, &host);
+        let (mut kind, mut id, mut model) = classify(&info, &host);
+        let mut vendor = crate::device::enterprise_vendor_public(&info.sys_objectid);
+        if let Some(classifier) = &self.classifier {
+            let evidence = DeviceIdentityEvidence {
+                source: "snmp.system".into(),
+                address: host.clone(),
+                facts: BTreeMap::from([
+                    ("sys_descr".into(), info.sys_descr.clone()),
+                    ("sys_name".into(), info.sys_name.clone()),
+                    ("sys_object_id".into(), info.sys_objectid.clone()),
+                ]),
+            };
+            if let Some(classification) = classifier.classify(&evidence)? {
+                kind = classification.kind.unwrap_or(kind);
+                vendor = classification.vendor.unwrap_or(vendor);
+                model = classification.model.or(model);
+                id = classification.stable_id.unwrap_or(id);
+            }
+        }
         let meta = DeviceMeta {
             id: DeviceId::new(id),
             kind,
             driver: DRIVER_NAME.to_owned(),
-            vendor: Some(crate::device::enterprise_vendor_public(&info.sys_objectid)),
+            vendor: Some(vendor),
             model: model.filter(|_| !info.sys_descr.is_empty()),
             firmware: None,
             address: format!("{host}:{}", handle.port),

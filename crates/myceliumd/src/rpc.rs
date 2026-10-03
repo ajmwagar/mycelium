@@ -18,7 +18,8 @@ use mycelium_driver_redfish::RedfishDriver;
 use mycelium_driver_snmp::SnmpDriver;
 use mycelium_driver_unifi::UnifiControllerDriver;
 use mycelium_plugins_lua::{
-    AdvertisementRecognizer, Connect, Plugin, BUILTIN_RECOGNIZERS, UNIFI_AP_PLUGIN,
+    AdvertisementRecognizer, Connect, LuaDeviceClassifier, Plugin, BUILTIN_RECOGNIZERS,
+    SNMP_CLASSIFIER, UNIFI_AP_PLUGIN,
 };
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -173,7 +174,10 @@ impl Daemon {
             Arc::new(DarwinDriver::default()),
             Arc::new(LinuxDriver::default()),
             Arc::new(RedfishDriver::default()),
-            Arc::new(SnmpDriver::default()),
+            Arc::new(
+                SnmpDriver::default()
+                    .with_classifier(Arc::new(LuaDeviceClassifier::load(SNMP_CLASSIFIER)?)),
+            ),
             Arc::new(UnifiControllerDriver::default()),
         ];
         let unifi_ap = Arc::new(Plugin::load(UNIFI_AP_PLUGIN)?);

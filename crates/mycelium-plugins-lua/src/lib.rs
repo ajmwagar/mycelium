@@ -47,6 +47,17 @@
 //! `key_value`) enforce output, depth, and node bounds before Lua sees data.
 //! Control flow stays deterministic (tenet #7); the sandbox removes
 //! os/io/debug/require (defense in depth).
+//!
+//! Pure device classifiers use a separate, smaller table:
+//!
+//! ```lua
+//! classifier = {
+//!   name = "snmp-system",
+//!   classify = function(evidence) -- {source, address, facts}
+//!     return { kind = "switch", vendor = "NETGEAR" } -- or nil
+//!   end,
+//! }
+//! ```
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -55,9 +66,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use mlua::{serde::LuaSerdeExt, FromLua, IntoLua, Lua, Table, Value as LuaValue};
 use mycelium_core::{
-    CapResult, CapSpec, CredentialSet, Device, DeviceId, DeviceKind, DeviceMeta, DiscoveredDevice,
-    Driver, ExecContext, Inventory, MyceliumError, Params, Result, ServiceAdvertisement, Target,
-    Transport, Value, ID_IDENTIFY,
+    CapResult, CapSpec, CredentialSet, Device, DeviceClassification, DeviceClassifier, DeviceId,
+    DeviceIdentityEvidence, DeviceKind, DeviceMeta, DiscoveredDevice, Driver, ExecContext,
+    Inventory, MyceliumError, Params, Result, ServiceAdvertisement, Target, Transport, Value,
+    ID_IDENTIFY,
 };
 use serde::Deserialize;
 use tokio::sync::Mutex;
@@ -67,6 +79,7 @@ pub const HOMEKIT_RECOGNIZER: &str = include_str!("../recognizers/homekit.lua");
 pub const AIRPLAY_RECOGNIZER: &str = include_str!("../recognizers/airplay.lua");
 pub const PRINT_SCAN_RECOGNIZER: &str = include_str!("../recognizers/print_scan.lua");
 pub const UNIFI_AP_PLUGIN: &str = include_str!("../plugins/unifi_ap.lua");
+pub const SNMP_CLASSIFIER: &str = include_str!("../classifiers/snmp.lua");
 
 const MAX_COMMANDS: usize = 32;
 const MAX_ARGUMENTS: usize = 64;
@@ -333,6 +346,93 @@ fn validate_recognition(name: &str, device: &DiscoveredDevice) -> Result<()> {
         });
     }
     Ok(())
+}
+
+/// A pure evidence classifier. It shares the sandbox but has no connector,
+/// transport, filesystem, socket, clock, or access to credentials.
+pub struct LuaDeviceClassifier {
+    pub name: String,
+    source: Arc<str>,
+}
+
+impl LuaDeviceClassifier {
+    pub fn load(source: impl Into<Arc<str>>) -> Result<Self> {
+        let source = source.into();
+        let lua = instantiate(&source, "<classifier>")?;
+        let table = lua
+            .globals()
+            .get::<Table>("classifier")
+            .map_err(|error| err("<classifier>", &error))?;
+        let name = table
+            .get::<String>("name")
+            .map_err(|_| MyceliumError::Plugin {
+                plugin: "<classifier>".into(),
+                message: "`classifier.name` must be a string".into(),
+            })?;
+        if table.get::<mlua::Function>("classify").is_err() {
+            return Err(MyceliumError::Plugin {
+                plugin: name,
+                message: "`classifier.classify` must be a function".into(),
+            });
+        }
+        Ok(Self { name, source })
+    }
+}
+
+impl DeviceClassifier for LuaDeviceClassifier {
+    fn classify(&self, evidence: &DeviceIdentityEvidence) -> Result<Option<DeviceClassification>> {
+        if evidence.source.len() > 128
+            || evidence.address.len() > 256
+            || evidence.facts.len() > 64
+            || evidence
+                .facts
+                .iter()
+                .any(|(key, value)| key.len() > 128 || value.len() > 4096)
+        {
+            return Err(MyceliumError::Plugin {
+                plugin: self.name.clone(),
+                message: "classification evidence exceeds bounds".into(),
+            });
+        }
+        let lua = instantiate(&self.source, &self.name)?;
+        let table = lua
+            .globals()
+            .get::<Table>("classifier")
+            .map_err(|error| err(&self.name, &error))?;
+        let function: mlua::Function = table.get("classify").expect("validated at load");
+        let input = serde_json::to_value(evidence)
+            .map_err(|error| MyceliumError::Parse(error.to_string()))?;
+        let output: LuaValue = function
+            .call(JsonBridge(input))
+            .map_err(|error| err(&self.name, &error))?;
+        if matches!(output, LuaValue::Nil) {
+            return Ok(None);
+        }
+        let json: serde_json::Value = lua
+            .from_value(output)
+            .map_err(|error| err(&self.name, &error))?;
+        let classification: DeviceClassification =
+            serde_json::from_value(json).map_err(|error| MyceliumError::Plugin {
+                plugin: self.name.clone(),
+                message: format!("classify() returned invalid identity: {error}"),
+            })?;
+        for value in [
+            classification.vendor.as_deref(),
+            classification.model.as_deref(),
+            classification.stable_id.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if value.trim().is_empty() || value.len() > 256 {
+                return Err(MyceliumError::Plugin {
+                    plugin: self.name.clone(),
+                    message: "classification identity fields must be 1-256 bytes".into(),
+                });
+            }
+        }
+        Ok(Some(classification))
+    }
 }
 
 /// Opens transports for plugin devices. The daemon injects real
@@ -1230,4 +1330,31 @@ plugin = { name = "evil", kind = "other",
     fn params_internal(k: &str, v: &str) -> Params {
         Params::from_iter([(k.to_owned(), Value::Str(v.to_owned()))])
     }
+}
+#[test]
+fn snmp_classifier_refines_identity_without_transport_access() {
+    let classifier = LuaDeviceClassifier::load(SNMP_CLASSIFIER).unwrap();
+    let evidence = DeviceIdentityEvidence {
+        source: "snmp.system".into(),
+        address: "192.0.2.10".into(),
+        facts: BTreeMap::from([
+            ("sys_descr".into(), "GS728TP Smart Switch".into()),
+            ("sys_object_id".into(), "1.3.6.1.4.1.4526.100.7".into()),
+        ]),
+    };
+    let result = classifier.classify(&evidence).unwrap().unwrap();
+    assert_eq!(result.kind, Some(DeviceKind::Switch));
+    assert_eq!(result.vendor.as_deref(), Some("NETGEAR"));
+    assert_eq!(result.stable_id, None);
+}
+
+#[test]
+fn classifier_rejects_unbounded_evidence_before_lua() {
+    let classifier = LuaDeviceClassifier::load(SNMP_CLASSIFIER).unwrap();
+    let evidence = DeviceIdentityEvidence {
+        source: "snmp.system".into(),
+        address: "192.0.2.10".into(),
+        facts: BTreeMap::from([("sys_descr".into(), "x".repeat(4097))]),
+    };
+    assert!(classifier.classify(&evidence).is_err());
 }
