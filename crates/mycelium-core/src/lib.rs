@@ -41,7 +41,7 @@ pub use capabilities::{
     ID_VLAN_CREATE, ID_VLAN_LIST, ID_WLAN_GUEST_ENABLE, ID_WLAN_LIST_SSID,
 };
 pub use classification::{DeviceClassification, DeviceClassifier, DeviceIdentityEvidence};
-pub use credentials::{CredentialSet, Secret};
+pub use credentials::{CredentialRef, CredentialSet, Secret};
 pub use device::{DeviceId, DeviceKind, DeviceMeta};
 pub use discovery::{DiscoveryProtocol, DiscoveryRequest, DiscoveryScope};
 pub use driver::{Driver, Target};

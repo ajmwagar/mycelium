@@ -92,10 +92,10 @@ usage:
   mycelium skills install [NAME] [--target codex|agents|claude] [--path DIR] --write [--dry-run] [--json]
   mycelium skills sync [--target codex|agents|claude] [--path DIR] --write [--dry-run] [--json]
   mycelium drivers
-  mycelium add <host[:port]> [--name NAME] [--driver NAME] [--user U] [--password-env VAR] [--key PATH]
+  mycelium add <host[:port]> [--name NAME] [--driver NAME] [--user U] [--credential-ref REF | --password-env VAR | --key PATH]
   mycelium targets [--json]
   mycelium credentials map list [--json]
-  mycelium credentials map set NAME [--driver DRIVER] [--address IP]... [--cidr CIDR]... [--site SITE]... --user USER (--password-env ENV | --key PATH) --write
+  mycelium credentials map set NAME [--driver DRIVER] [--address IP]... [--cidr CIDR]... [--site SITE]... --user USER (--credential-ref REF | --password-env ENV | --key PATH) --write
   mycelium credentials map remove NAME --write
   mycelium describe <id> [--json]
   mycelium call <id> <capability> [--param k=v ...] [--write] [--dry-run]
@@ -219,6 +219,7 @@ struct Flags {
     driver: Option<String>,
     user: Option<String>,
     password_env: Option<String>,
+    credential_ref: Option<String>,
     key: Option<String>,
     params: Vec<(String, String)>,
     targets: Vec<String>,
@@ -261,6 +262,7 @@ fn parse_flags(args: &[String]) -> Flags {
         driver: None,
         user: None,
         password_env: None,
+        credential_ref: None,
         key: None,
         params: Vec::new(),
         targets: Vec::new(),
@@ -311,6 +313,10 @@ fn parse_flags(args: &[String]) -> Flags {
             "--password-env" => {
                 i += 1;
                 f.password_env = args.get(i).cloned();
+            }
+            "--credential-ref" => {
+                i += 1;
+                f.credential_ref = args.get(i).cloned();
             }
             "--key" => {
                 i += 1;
@@ -491,6 +497,11 @@ async fn run(cmd: &str, args: &[String]) -> Result<Vec<String>, ClientError> {
                     name: f.name,
                     driver: f.driver,
                     username: f.user,
+                    credential_ref: f
+                        .credential_ref
+                        .map(mycelium_core::CredentialRef::parse)
+                        .transpose()
+                        .map_err(|error| err_usage(&error))?,
                     password_env: f.password_env,
                     key_path: f.key,
                 })
@@ -2863,9 +2874,14 @@ async fn credential_map(args: &[String]) -> Result<Vec<String>, ClientError> {
                         .collect::<Vec<_>>()
                         .join(","),
                     rule["username"].as_str().unwrap_or("?"),
-                    rule["password_env"]
+                    rule["credential_ref"]
                         .as_str()
-                        .map(|name| format!("env:{name}"))
+                        .map(str::to_owned)
+                        .or_else(|| {
+                            rule["password_env"]
+                                .as_str()
+                                .map(|name| format!("env:{name}"))
+                        })
                         .or_else(|| rule["key_path"].as_str().map(|_| "key".into()))
                         .unwrap_or_else(|| "missing".into())
                 ));
@@ -2884,6 +2900,7 @@ async fn credential_map(args: &[String]) -> Result<Vec<String>, ClientError> {
             let mut username = None;
             let mut password_env = None;
             let mut key_path = None;
+            let mut credential_ref = None;
             let mut write = false;
             let mut index = 3;
             while index < args.len() {
@@ -2904,6 +2921,12 @@ async fn credential_map(args: &[String]) -> Result<Vec<String>, ClientError> {
                     "--user" => username = Some(value(index, "--user")?),
                     "--password-env" => password_env = Some(value(index, "--password-env")?),
                     "--key" => key_path = Some(value(index, "--key")?),
+                    "--credential-ref" => {
+                        credential_ref = Some(
+                            mycelium_core::CredentialRef::parse(value(index, "--credential-ref")?)
+                                .map_err(|error| err_usage(&error))?,
+                        )
+                    }
                     "--write" => {
                         write = true;
                         index += 1;
@@ -2924,6 +2947,7 @@ async fn credential_map(args: &[String]) -> Result<Vec<String>, ClientError> {
                 cidrs,
                 sites,
                 username: username.ok_or_else(|| err_usage("credential map needs --user"))?,
+                credential_ref,
                 password_env,
                 key_path,
             };

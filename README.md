@@ -135,14 +135,18 @@ Add read-only observation points, scan, and inspect the unified map:
 
 ```sh
 mycelium add pris --driver linux --user ajmwagar
-mycelium add 192.168.1.2 --driver snmp --password-env SNMP_COMMUNITY
+mycelium add 192.168.1.2 --driver snmp \
+  --credential-ref env://SNMP_COMMUNITY
 mycelium scan
 mycelium map
 ```
 
-Credentials are referenced by environment-variable name and are not persisted
-in inventory. Use a dedicated `MYCELIUM_HOME` when evaluating against a test
-network.
+Credentials use typed, non-secret references and are resolved by the local
+daemon only when it invokes a driver. Use `env://VARIABLE_NAME` for a secret in
+the daemon environment or `ssh-key:///absolute/path` for an SSH private key.
+Secret values are never persisted in inventory or gossiped. The legacy
+`--password-env` and `--key` flags remain readable during migration. Use a
+dedicated `MYCELIUM_HOME` when evaluating against a test network.
 
 For automatic managed-target discovery, configure credential selectors rather
 than a static device list. Addresses are derived from the converged topology;
@@ -156,20 +160,21 @@ mycelium credentials map set network-appliances \
   --driver edgeos \
   --cidr 192.168.0.0/16 \
   --user ubnt \
-  --password-env GATEWAY_PASS \
+  --credential-ref env://GATEWAY_PASS \
   --write
 
 # Reused RFC1918 addresses remain distinct by network vantage point.
 mycelium credentials map set lab-gateway \
   --driver edgeos --address 192.168.1.1 --site pris \
-  --user ubnt --password-env LAB_GATEWAY_PASS --write
+  --user ubnt --credential-ref env://LAB_GATEWAY_PASS --write
 
 mycelium scan
 mycelium targets
 ```
 
-The credential map persists selectors and environment-variable/key references,
-never secret values. A mapping authorizes an authentication attempt; driver
+The credential map persists selectors and typed credential references, never
+secret values. Unsupported providers and secret-bearing URI syntax fail
+loudly. A mapping authorizes an authentication attempt; driver
 recognition still determines what the endpoint is. Successful discoveries are
 persisted as managed targets, while failures appear in scan warnings instead of
 being silently classified. Service credentials belong in the owner-only

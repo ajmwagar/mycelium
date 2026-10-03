@@ -19,6 +19,8 @@ pub enum Request {
         driver: Option<String>,
         #[serde(default)]
         username: Option<String>,
+        #[serde(default)]
+        credential_ref: Option<mycelium_core::CredentialRef>,
         /// NAME of an env var holding the password. Literals are rejected
         /// at the CLI so secrets don't cross the socket or hit the disk.
         #[serde(default)]

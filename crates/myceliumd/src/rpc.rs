@@ -127,7 +127,11 @@ pub struct SavedDevice {
     #[serde(default)]
     pub name: Option<String>,
     pub username: Option<String>,
+    #[serde(default)]
+    pub credential_ref: Option<mycelium_core::CredentialRef>,
+    #[serde(default)]
     pub password_env: Option<String>,
+    #[serde(default)]
     pub key_path: Option<String>,
 }
 
@@ -349,7 +353,7 @@ impl Daemon {
             .driver(&s.meta.driver)
             .ok_or_else(|| MyceliumError::Validation(format!("no driver `{}`", s.meta.driver)))?;
         let target = Target::parse(&s.target)?;
-        let creds = creds_from(s);
+        let creds = creds_from(s)?;
         driver.attach(&target, &creds, &self.inventory).await
     }
 
@@ -662,7 +666,16 @@ impl Daemon {
                 {
                     targets.push(Target::host(&address_text).with_jump(Some(observer)));
                 }
-                let credentials = rule.credentials();
+                let credentials = match rule.credentials() {
+                    Ok(credentials) => credentials,
+                    Err(error) => {
+                        warnings.push(format!(
+                            "credential rule `{}` cannot resolve its reference: {error}",
+                            rule.name
+                        ));
+                        continue;
+                    }
+                };
                 'probe: for target in targets {
                     for driver in &drivers {
                         match driver.recognizes(&target, &credentials).await {
@@ -685,6 +698,7 @@ impl Daemon {
                                                 target: target.to_string(),
                                                 name: None,
                                                 username: Some(rule.username.clone()),
+                                                credential_ref: rule.credential_ref.clone(),
                                                 password_env: rule.password_env.clone(),
                                                 key_path: rule.key_path.clone(),
                                             },
@@ -834,15 +848,28 @@ impl Daemon {
                 name,
                 driver,
                 username,
+                credential_ref,
                 password_env,
                 key_path,
             } => {
                 let target_parsed = Target::parse(&target)?;
-                let creds = CredentialSet {
-                    username,
-                    password: password_env.clone().map(Secret::Env),
-                    key_path,
-                    sudo_password: None,
+                let sources = usize::from(credential_ref.is_some())
+                    + usize::from(password_env.is_some())
+                    + usize::from(key_path.is_some());
+                if sources > 1 {
+                    return Err(MyceliumError::Validation(
+                        "device add accepts only one credential source".into(),
+                    ));
+                }
+                let creds = if let Some(reference) = credential_ref.as_ref() {
+                    crate::credential_provider::resolve(reference, username)?
+                } else {
+                    CredentialSet {
+                        username,
+                        password: password_env.clone().map(Secret::Env),
+                        key_path,
+                        sudo_password: None,
+                    }
                 };
                 let chosen: Vec<Arc<dyn Driver>> = match &driver {
                     Some(name) => {
@@ -874,6 +901,7 @@ impl Daemon {
                                 target: target.clone(),
                                 name: name.clone(),
                                 username: creds.username.clone(),
+                                credential_ref: credential_ref.clone(),
                                 password_env: password_env.clone(),
                                 key_path: creds.key_path.clone(),
                             },
@@ -2926,13 +2954,16 @@ fn import_allocation_receipts(topology: &Topology, site: &str) -> Vec<Allocation
     receipts.into_values().collect()
 }
 
-fn creds_from(s: &SavedDevice) -> CredentialSet {
-    CredentialSet {
+fn creds_from(s: &SavedDevice) -> Result<CredentialSet> {
+    if let Some(reference) = &s.credential_ref {
+        return crate::credential_provider::resolve(reference, s.username.clone());
+    }
+    Ok(CredentialSet {
         username: s.username.clone(),
         password: s.password_env.as_ref().map(|v| Secret::Env(v.clone())),
         key_path: s.key_path.clone(),
         sudo_password: None,
-    }
+    })
 }
 
 fn node_matches(id: &str, node: &mycelium_core::TopoNode, selector: &str) -> bool {
@@ -3478,6 +3509,7 @@ mod tests {
                 target: "100.83.7.116@gateway".into(),
                 name: Some("compute".into()),
                 username: Some("operator".into()),
+                credential_ref: None,
                 password_env: Some("SECRET_PASSWORD".into()),
                 key_path: Some("~/.ssh/id_ed25519".into()),
             },
@@ -3531,6 +3563,7 @@ mod tests {
                 name: None,
                 driver: None,
                 username: Some("u".into()),
+                credential_ref: None,
                 password_env: None,
                 key_path: None,
             })
@@ -3593,6 +3626,7 @@ mod tests {
                 name: None,
                 driver: None,
                 username: None,
+                credential_ref: None,
                 password_env: None,
                 key_path: None,
             })
