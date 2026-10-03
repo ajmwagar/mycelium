@@ -3089,23 +3089,15 @@ async fn resolve_ssh(
         .as_str()
         .ok_or(err_usage("SSH plan has no device"))?;
     let device_certificate = myceliumd::home_dir().join(format!("ssh/{device}-cert.pub"));
-    let certificate = certificate
-        .or_else(|| {
-            std::env::var("MYCELIUM_SSH_CERTIFICATE")
-                .ok()
-                .map(expand_home)
-        })
-        .or_else(|| {
-            device_certificate
-                .is_file()
-                .then(|| device_certificate.to_string_lossy().into())
-        })
-        .unwrap_or_else(|| {
-            myceliumd::home_dir()
-                .join("ssh/user-cert.pub")
-                .to_string_lossy()
-                .into()
-        });
+    let personal_certificate = myceliumd::home_dir().join("ssh/user-cert.pub");
+    let certificate = select_ssh_certificate(
+        certificate,
+        std::env::var("MYCELIUM_SSH_CERTIFICATE")
+            .ok()
+            .map(expand_home),
+        &personal_certificate,
+        &device_certificate,
+    );
     require_readable("SSH identity", &identity)?;
     require_readable("Mycelium SSH certificate", &certificate)?;
     let host = plan["host"]
@@ -3123,6 +3115,23 @@ async fn resolve_ssh(
         identity,
         certificate,
     })
+}
+
+fn select_ssh_certificate(
+    explicit: Option<String>,
+    environment: Option<String>,
+    personal: &std::path::Path,
+    device: &std::path::Path,
+) -> String {
+    explicit
+        .or(environment)
+        .or_else(|| {
+            personal
+                .is_file()
+                .then(|| personal.to_string_lossy().into())
+        })
+        .or_else(|| device.is_file().then(|| device.to_string_lossy().into()))
+        .unwrap_or_else(|| personal.to_string_lossy().into())
 }
 
 #[derive(Debug, PartialEq)]
@@ -4742,6 +4751,26 @@ mod ssh_command_tests {
         assert!(argv.contains(&"CertificateFile=/cert".into()));
         assert!(argv.windows(2).any(|pair| pair == ["-J", "gateway"]));
         assert_eq!(argv.last().map(String::as_str), Some("operator@lab-node"));
+    }
+
+    #[test]
+    fn personal_certificate_precedes_legacy_device_certificate() {
+        let root =
+            std::env::temp_dir().join(format!("mycelium-cert-selection-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let personal = root.join("user-cert.pub");
+        let device = root.join("device-cert.pub");
+        std::fs::write(&personal, "personal").unwrap();
+        std::fs::write(&device, "expired legacy").unwrap();
+        assert_eq!(
+            select_ssh_certificate(None, None, &personal, &device),
+            personal.to_string_lossy()
+        );
+        assert_eq!(
+            select_ssh_certificate(Some("/explicit".into()), None, &personal, &device),
+            "/explicit"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

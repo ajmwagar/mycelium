@@ -495,9 +495,9 @@ management username; an explicit `--user` takes precedence over the profile.
 Mycelium never infers a shared `fpladmin` fallback.
 
 The daemon derives the destination, Unix user, port, and optional ProxyJump
-from inventory targets such as `host:2222@gateway`. The CLI prefers
-`$MYCELIUM_HOME/ssh/<device-id>-cert.pub`, then the shared
-`$MYCELIUM_HOME/ssh/user-cert.pub`. It uses only the selected identity and
+from inventory targets such as `host:2222@gateway`. The CLI prefers the current
+personal `$MYCELIUM_HOME/ssh/user-cert.pub`; a device-specific certificate is
+a legacy fallback only. It uses only the selected identity and
 certificate, so missing material fails loudly instead of silently falling back
 to unrelated agent keys. Override paths with `--key` and `--certificate`, or
 set `MYCELIUM_SSH_IDENTITY` and `MYCELIUM_SSH_CERTIFICATE`.
