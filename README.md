@@ -482,10 +482,17 @@ Once an enrolled host trusts the Mycelium SSH CA and the user has a current
 certificate at `$MYCELIUM_HOME/ssh/user-cert.pub`, normal access is one command:
 
 ```sh
+mycelium access ssh profile set --principal ajmwagar \
+  --unix-user ajmwagar --role fleet-admin --write
 mycelium ssh lab-node
 mycelium ssh lab-node -- uname -a
 mycelium exec lab-node -- systemctl is-active mycelium
 ```
+
+The persisted profile supplies the per-person Unix username for every
+inventory and peer target. It takes precedence over a device's bootstrap or
+management username; an explicit `--user` takes precedence over the profile.
+Mycelium never infers a shared `fpladmin` fallback.
 
 The daemon derives the destination, Unix user, port, and optional ProxyJump
 from inventory targets such as `host:2222@gateway`. The CLI prefers
@@ -552,6 +559,16 @@ mycelium access ssh host-bundle \
   --krl "$MYCELIUM_HOME/ssh/revoked.krl" \
   --allow mames=home-operator \
   --path "$MYCELIUM_HOME/ssh/host-bundle" --write
+```
+
+Instead of repeating `USER=ROLE`, an authority can derive personal accounts
+from active signed grants while selecting only the roles accepted by that host:
+
+```sh
+mycelium access ssh host-bundle --from-access --role fleet-admin \
+  --ca-public "$MYCELIUM_HOME/ssh/user_ca.pub" \
+  --krl "$MYCELIUM_HOME/ssh/revoked.krl" \
+  --path "$MYCELIUM_HOME/ssh/fleet-admin-bundle" --write
 ```
 
 Each `--allow USER=ROLE` is both an authorization projection and a local

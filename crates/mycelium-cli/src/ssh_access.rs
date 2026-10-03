@@ -24,22 +24,143 @@ struct HostBundleManifest {
     accounts: Vec<HostAccountIntent>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct SshClientProfile {
+    pub version: u32,
+    pub principal: String,
+    pub default_unix_user: String,
+    #[serde(default)]
+    pub unix_users: Vec<String>,
+    #[serde(default)]
+    pub roles: Vec<String>,
+}
+
 pub fn run(args: &[String], state: &Value) -> Result<Vec<String>, String> {
     match args.first().map(String::as_str) {
         Some("ca-init") => ca_init(args),
         Some("issue") => issue(args, state),
         Some("krl") => krl(args, state),
-        Some("host-bundle") => host_bundle(args),
+        Some("host-bundle") => host_bundle(args, state),
         Some("host-apply") => host_apply(args),
         Some("host-rollout") => host_rollout(args),
         Some("renewal-authorize") => renewal_authorize(args),
         Some("client-config") => client_config(args),
+        Some("profile") => profile(args),
         Some(action) => Err(format!("unknown access ssh action `{action}`")),
         None => Err(
             "access ssh needs ca-init, issue, krl, host-bundle, host-apply, host-rollout, or client-config"
                 .into(),
         ),
     }
+}
+
+fn profile_path() -> PathBuf {
+    myceliumd::home_dir().join("ssh/profile.json")
+}
+
+pub(crate) fn preferred_unix_user() -> Result<Option<String>, String> {
+    let path = profile_path();
+    match fs::read(&path) {
+        Ok(bytes) => {
+            let profile: SshClientProfile = serde_json::from_slice(&bytes)
+                .map_err(|error| format!("parse SSH profile {}: {error}", path.display()))?;
+            validate_profile(&profile)?;
+            Ok(Some(profile.default_unix_user))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("read SSH profile {}: {error}", path.display())),
+    }
+}
+
+fn profile(args: &[String]) -> Result<Vec<String>, String> {
+    match args.get(1).map(String::as_str) {
+        Some("show") => {
+            let path = profile_path();
+            let bytes = fs::read(&path)
+                .map_err(|error| format!("read SSH profile {}: {error}", path.display()))?;
+            let profile: SshClientProfile = serde_json::from_slice(&bytes)
+                .map_err(|error| format!("parse SSH profile {}: {error}", path.display()))?;
+            validate_profile(&profile)?;
+            Ok(vec![
+                serde_json::to_string_pretty(&profile).map_err(|e| e.to_string())?
+            ])
+        }
+        Some("set") => {
+            require_write(args)?;
+            let principal = required(args, "--principal")?.to_owned();
+            let default_unix_user = required(args, "--unix-user")?.to_owned();
+            let mut unix_users = repeated(args, "--allow-user")
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            if !unix_users.contains(&default_unix_user) {
+                unix_users.push(default_unix_user.clone());
+            }
+            unix_users.sort();
+            unix_users.dedup();
+            let mut roles = repeated(args, "--role")
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            roles.sort();
+            roles.dedup();
+            let profile = SshClientProfile {
+                version: 1,
+                principal,
+                default_unix_user,
+                unix_users,
+                roles,
+            };
+            validate_profile(&profile)?;
+            let path = profile_path();
+            fs::create_dir_all(path.parent().expect("profile has parent"))
+                .map_err(|error| format!("create SSH profile directory: {error}"))?;
+            let staging = path.with_extension("json.staging");
+            fs::write(
+                &staging,
+                serde_json::to_vec_pretty(&profile).map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| format!("write staged SSH profile: {error}"))?;
+            fs::rename(&staging, &path)
+                .map_err(|error| format!("install SSH profile {}: {error}", path.display()))?;
+            Ok(vec![format!(
+                "SSH profile {} now defaults to {}",
+                profile.principal, profile.default_unix_user
+            )])
+        }
+        _ => Err(
+            "access ssh profile needs `show` or `set --principal ID --unix-user USER --write`"
+                .into(),
+        ),
+    }
+}
+
+fn validate_profile(profile: &SshClientProfile) -> Result<(), String> {
+    if profile.version != 1 {
+        return Err(format!(
+            "unsupported SSH profile version {}",
+            profile.version
+        ));
+    }
+    config_value_text("SSH principal", &profile.principal)?;
+    config_atom_value("default Unix user", &profile.default_unix_user)?;
+    if profile.default_unix_user == "root"
+        || !profile.unix_users.contains(&profile.default_unix_user)
+        || profile.unix_users.len() > 16
+        || profile.roles.len() > 32
+    {
+        return Err("SSH profile has an unsafe or inconsistent default Unix user".into());
+    }
+    for user in &profile.unix_users {
+        config_atom_value("Unix user", user)?;
+        if user == "root" {
+            return Err("SSH profile cannot select root".into());
+        }
+    }
+    for role in &profile.roles {
+        config_atom_value("role", role)?;
+    }
+    Ok(())
 }
 
 fn renewal_authorize(args: &[String]) -> Result<Vec<String>, String> {
@@ -440,7 +561,7 @@ fn client_config(args: &[String]) -> Result<Vec<String>, String> {
     )])
 }
 
-fn host_bundle(args: &[String]) -> Result<Vec<String>, String> {
+fn host_bundle(args: &[String], state: &Value) -> Result<Vec<String>, String> {
     require_write(args)?;
     let ca_public = required(args, "--ca-public")?;
     let krl = required(args, "--krl")?;
@@ -458,7 +579,7 @@ fn host_bundle(args: &[String]) -> Result<Vec<String>, String> {
     }
     fs::create_dir_all(&staging)
         .map_err(|e| format!("create staging directory {}: {e}", staging.display()))?;
-    let role_mappings = role_mappings(args)?;
+    let role_mappings = role_mappings(args, state)?;
     let result = (|| {
         let principals = staging.join("principals");
         fs::create_dir_all(&principals).map_err(|e| format!("create principals directory: {e}"))?;
@@ -517,7 +638,10 @@ fn host_bundle(args: &[String]) -> Result<Vec<String>, String> {
     )])
 }
 
-fn role_mappings(args: &[String]) -> Result<BTreeMap<String, BTreeSet<String>>, String> {
+fn role_mappings(
+    args: &[String],
+    state: &Value,
+) -> Result<BTreeMap<String, BTreeSet<String>>, String> {
     let mut mappings = BTreeMap::<String, BTreeSet<String>>::new();
     for assignment in repeated(args, "--allow") {
         let (user, role) = assignment
@@ -532,6 +656,47 @@ fn role_mappings(args: &[String]) -> Result<BTreeMap<String, BTreeSet<String>>, 
             .entry(user.to_owned())
             .or_default()
             .insert(role.to_owned());
+    }
+    if args.iter().any(|argument| argument == "--from-access") {
+        let selected_roles = repeated(args, "--role")
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        if selected_roles.is_empty() {
+            return Err("host-bundle --from-access needs at least one --role".into());
+        }
+        for entry in state["grants"].as_array().into_iter().flatten() {
+            if entry["active"].as_bool() != Some(true) {
+                continue;
+            }
+            let statement: AccessStatement =
+                serde_json::from_value(entry["record"]["statement"].clone())
+                    .map_err(|error| format!("decode active access grant: {error}"))?;
+            let AccessStatement::Grant {
+                roles, unix_users, ..
+            } = statement
+            else {
+                continue;
+            };
+            for role in roles
+                .into_iter()
+                .filter(|role| selected_roles.contains(role.as_str()))
+            {
+                config_atom_value("role", &role)?;
+                for user in &unix_users {
+                    config_atom_value("Unix user", user)?;
+                    if user == "root" {
+                        return Err("refusing to derive SSH access for root".into());
+                    }
+                    mappings
+                        .entry(user.clone())
+                        .or_default()
+                        .insert(role.clone());
+                }
+            }
+        }
+    }
+    if mappings.is_empty() {
+        return Err("SSH host bundle needs at least one resolved USER=ROLE mapping".into());
     }
     Ok(mappings)
 }
@@ -1065,30 +1230,38 @@ mod tests {
         fs::write(&ca, "ssh-ed25519 AAAA test").unwrap();
         fs::write(&krl, "krl").unwrap();
         let denied = root.join("denied");
-        host_bundle(&[
-            "--ca-public".into(),
-            ca.to_string_lossy().into_owned(),
-            "--krl".into(),
-            krl.to_string_lossy().into_owned(),
-            "--path".into(),
-            denied.to_string_lossy().into_owned(),
-            "--write".into(),
-        ])
-        .unwrap();
-        assert_eq!(fs::read_dir(denied.join("principals")).unwrap().count(), 0);
+        let empty_state = serde_json::json!({"grants": []});
+        let error = host_bundle(
+            &[
+                "--ca-public".into(),
+                ca.to_string_lossy().into_owned(),
+                "--krl".into(),
+                krl.to_string_lossy().into_owned(),
+                "--path".into(),
+                denied.to_string_lossy().into_owned(),
+                "--write".into(),
+            ],
+            &empty_state,
+        )
+        .unwrap_err();
+        assert!(error.contains("at least one resolved"));
+        assert!(!denied.exists());
 
         let allowed = root.join("allowed");
-        host_bundle(&[
-            "--ca-public".into(),
-            ca.to_string_lossy().into_owned(),
-            "--krl".into(),
-            krl.to_string_lossy().into_owned(),
-            "--allow".into(),
-            "mames=home-operator".into(),
-            "--path".into(),
-            allowed.to_string_lossy().into_owned(),
-            "--write".into(),
-        ])
+        host_bundle(
+            &[
+                "--ca-public".into(),
+                ca.to_string_lossy().into_owned(),
+                "--krl".into(),
+                krl.to_string_lossy().into_owned(),
+                "--allow".into(),
+                "mames=home-operator".into(),
+                "--path".into(),
+                allowed.to_string_lossy().into_owned(),
+                "--write".into(),
+            ],
+            &empty_state,
+        )
         .unwrap();
         assert_eq!(
             fs::read_to_string(allowed.join("principals/mames")).unwrap(),
@@ -1105,6 +1278,48 @@ mod tests {
             }]
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn active_grants_derive_personal_accounts_for_selected_roles() {
+        let state = serde_json::json!({
+            "grants": [
+                {"active": true, "record": {"statement": {
+                    "kind": "grant", "grant_id": "avery", "principal": "ajmwagar",
+                    "serial": 1, "roles": ["fleet-admin"], "unix_users": ["ajmwagar"],
+                    "not_before": 1, "not_after": 9999999999u64
+                }}},
+                {"active": true, "record": {"statement": {
+                    "kind": "grant", "grant_id": "james", "principal": "mames",
+                    "serial": 2, "roles": ["home-operator"], "unix_users": ["mames"],
+                    "not_before": 1, "not_after": 9999999999u64
+                }}}
+            ]
+        });
+        let args = vec![
+            "--from-access".into(),
+            "--role".into(),
+            "home-operator".into(),
+        ];
+        assert_eq!(
+            role_mappings(&args, &state).unwrap(),
+            BTreeMap::from([("mames".into(), BTreeSet::from(["home-operator".into()]))])
+        );
+    }
+
+    #[test]
+    fn ssh_profile_requires_a_personal_non_root_default() {
+        let valid = SshClientProfile {
+            version: 1,
+            principal: "ajmwagar".into(),
+            default_unix_user: "ajmwagar".into(),
+            unix_users: vec!["ajmwagar".into(), "fpladmin".into()],
+            roles: vec!["fleet-admin".into()],
+        };
+        validate_profile(&valid).unwrap();
+        let mut invalid = valid;
+        invalid.default_unix_user = "root".into();
+        assert!(validate_profile(&invalid).is_err());
     }
 
     #[test]

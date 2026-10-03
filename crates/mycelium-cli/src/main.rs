@@ -146,11 +146,13 @@ usage:
   mycelium access ssh ca-init --path PRIVATE-KEY --write [--json]
   mycelium access ssh issue --grant ID --public-key PATH --ca PRIVATE-KEY --path CERT --ttl 8h --write [--json]
   mycelium access ssh krl --ca-public PATH --path KRL --write [--json]
-  mycelium access ssh host-bundle --ca-public PATH --krl PATH [--allow USER=ROLE]... --path DIR --write [--json]
+  mycelium access ssh host-bundle --ca-public PATH --krl PATH (--allow USER=ROLE... | --from-access --role ROLE...) --path DIR --write [--json]
   mycelium access ssh client-config --host ALIAS --hostname HOST --user USER --identity PATH --certificate PATH --path FILE --write [--json]
   mycelium access ssh host-apply --bundle DIR --write
   mycelium access ssh host-rollout --bundle DIR --target SSH-HOST... [--remote-bin PATH] --write
   mycelium access ssh renewal-authorize --node NODE-ID --unix-user USER --role ROLE [--credential-ttl 7d] --write
+  mycelium access ssh profile show
+  mycelium access ssh profile set --principal ID --unix-user USER [--allow-user USER]... [--role ROLE]... --write
   mycelium access oidc verify --issuer URL --audience ID --token-env VAR [--json]
   mycelium access oidc ssh-issue --issuer URL --audience ID --token-env VAR --public-key PATH --ca PRIVATE-KEY --path CERT [--grant ID] [--ttl 8h] --write [--json]
   mycelium access oidc gateway --listen 127.0.0.1:8787 --issuer URL --audience ID --client-id ID --client-secret-env VAR --callback-url HTTPS-URL --ca PRIVATE-KEY [--invite-store PATH] --write
@@ -3068,6 +3070,10 @@ async fn resolve_ssh(
     certificate: Option<String>,
     port: Option<u16>,
 ) -> Result<ResolvedSsh, ClientError> {
+    let user = match user {
+        Some(user) => Some(user),
+        None => crate::ssh_access::preferred_unix_user().map_err(|error| err_usage(&error))?,
+    };
     let mut client = connect().await?;
     let plan = client
         .call(&Request::SshPlan {
