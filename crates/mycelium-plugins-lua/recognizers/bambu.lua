@@ -6,13 +6,7 @@ recognizer = {
       return nil
     end
 
-    local headers = {}
-    for _, item in ipairs(advertisement.txt or {}) do
-      local split = string.find(item, "=", 1, true)
-      if split then
-        headers[string.sub(item, 1, split - 1)] = string.sub(item, split + 1)
-      end
-    end
+    local headers = advertisement.txt_map or {}
 
     local serial = advertisement.instance
     if serial == nil or serial == "" then

@@ -51,6 +51,19 @@ use mycelium_core::{
 use tokio::sync::Mutex;
 
 pub const BAMBU_RECOGNIZER: &str = include_str!("../recognizers/bambu.lua");
+pub const HOMEKIT_RECOGNIZER: &str = include_str!("../recognizers/homekit.lua");
+pub const AIRPLAY_RECOGNIZER: &str = include_str!("../recognizers/airplay.lua");
+pub const PRINT_SCAN_RECOGNIZER: &str = include_str!("../recognizers/print_scan.lua");
+
+/// Built-ins are data interpreted through the same bounded interface as
+/// operator-installed recognizers. The tuple label makes startup diagnostics
+/// useful even when a script cannot be loaded far enough to expose its name.
+pub const BUILTIN_RECOGNIZERS: &[(&str, &str)] = &[
+    ("bambu-lan", BAMBU_RECOGNIZER),
+    ("homekit", HOMEKIT_RECOGNIZER),
+    ("airplay", AIRPLAY_RECOGNIZER),
+    ("print-scan", PRINT_SCAN_RECOGNIZER),
+];
 
 /// JSON<->Lua bridge: serde_json::Value is *the* wire format at this seam,
 /// so plugin authors see plain objects, never Rust enum tag noise.
@@ -222,8 +235,17 @@ impl AdvertisementRecognizer {
             .get::<Table>("recognizer")
             .map_err(|error| err(&self.name, &error))?;
         let function: mlua::Function = table.get("recognize").expect("validated at load");
-        let input = serde_json::to_value(advertisement)
+        let mut input = serde_json::to_value(advertisement)
             .map_err(|error| MyceliumError::Parse(error.to_string()))?;
+        if let Some(object) = input.as_object_mut() {
+            let txt = advertisement
+                .txt
+                .iter()
+                .filter_map(|item| item.split_once('='))
+                .map(|(key, value)| (key.to_owned(), serde_json::Value::String(value.to_owned())))
+                .collect();
+            object.insert("txt_map".into(), serde_json::Value::Object(txt));
+        }
         let output: LuaValue = function
             .call(JsonBridge(input))
             .map_err(|error| err(&self.name, &error))?;
@@ -590,6 +612,102 @@ mod tests {
         }))
         .unwrap();
         assert!(recognizer.recognize(&advertisement).unwrap().is_none());
+    }
+
+    #[test]
+    fn homekit_recognizer_identifies_hue_bridge() {
+        let recognizer = AdvertisementRecognizer::load(HOMEKIT_RECOGNIZER).unwrap();
+        let advertisement: ServiceAdvertisement = serde_json::from_value(serde_json::json!({
+            "instance": "Philips Hue HomeKit",
+            "service_type": "_hap._tcp",
+            "domain": "local",
+            "target": "ecb5fa134f06.local",
+            "port": 8080,
+            "txt": ["ci=2", "id=DB:9B:5B:AA:3A:F4", "md=BSB002", "pv=1.1", "sf=0"],
+            "first_seen": 40,
+            "last_seen": 42
+        }))
+        .unwrap();
+        let device = recognizer.recognize(&advertisement).unwrap().unwrap();
+        assert_eq!(device.stable_id, "homekit:db:9b:5b:aa:3a:f4");
+        assert_eq!(device.kind, "automation.bridge");
+        assert_eq!(device.vendor.as_deref(), Some("Philips Hue"));
+        assert_eq!(device.model.as_deref(), Some("BSB002"));
+        assert_eq!(device.services[0].port, 8080);
+    }
+
+    #[test]
+    fn airplay_recognizer_identifies_amazon_receiver() {
+        let recognizer = AdvertisementRecognizer::load(AIRPLAY_RECOGNIZER).unwrap();
+        let advertisement: ServiceAdvertisement = serde_json::from_value(serde_json::json!({
+            "instance": "Avery's 2nd TV",
+            "service_type": "_airplay._tcp",
+            "domain": "local",
+            "target": "Android.local",
+            "port": 7000,
+            "txt": [
+                "deviceid=4C:39:F0:11:96:92", "manufacturer=Amazon",
+                "model=AFTTIFF43", "fv=p20.7.01085.5741"
+            ],
+            "first_seen": 40,
+            "last_seen": 42
+        }))
+        .unwrap();
+        let device = recognizer.recognize(&advertisement).unwrap().unwrap();
+        assert_eq!(device.stable_id, "airplay:4c:39:f0:11:96:92");
+        assert_eq!(device.vendor.as_deref(), Some("Amazon"));
+        assert_eq!(device.model.as_deref(), Some("AFTTIFF43"));
+        assert_eq!(device.services[0].name, "airplay");
+    }
+
+    #[test]
+    fn print_scan_recognizer_unifies_printer_and_scanner_identity() {
+        let recognizer = AdvertisementRecognizer::load(PRINT_SCAN_RECOGNIZER).unwrap();
+        let advertisement = |service_type: &str, port| {
+            serde_json::from_value::<ServiceAdvertisement>(serde_json::json!({
+                "instance": "HP DeskJet 4200 series [32FCEA]",
+                "service_type": service_type,
+                "domain": "local",
+                "target": "HP6C0B5E32FCEA.local",
+                "port": port,
+                "txt": [
+                    "UUID=e7e33cd5-2eda-436b-b643-7f08eedd6597",
+                    "usb_MFG=HP", "usb_MDL=DeskJet 4200 series"
+                ],
+                "first_seen": 40,
+                "last_seen": 42
+            }))
+            .unwrap()
+        };
+        let printer = recognizer
+            .recognize(&advertisement("_ipp._tcp", 631))
+            .unwrap()
+            .unwrap();
+        let scanner = recognizer
+            .recognize(&advertisement("_uscan._tcp", 8080))
+            .unwrap()
+            .unwrap();
+        assert_eq!(printer.stable_id, scanner.stable_id);
+        assert_eq!(printer.vendor.as_deref(), Some("HP"));
+        assert_eq!(printer.services[0].name, "ipp");
+        assert_eq!(scanner.services[0].name, "escl");
+    }
+
+    #[test]
+    fn specific_recognizers_ignore_unrelated_advertisements() {
+        let advertisement: ServiceAdvertisement = serde_json::from_value(serde_json::json!({
+            "instance": "host",
+            "service_type": "_ssh._tcp",
+            "domain": "local",
+            "port": 22,
+            "first_seen": 40,
+            "last_seen": 42
+        }))
+        .unwrap();
+        for (_, source) in BUILTIN_RECOGNIZERS.iter().skip(1) {
+            let recognizer = AdvertisementRecognizer::load(*source).unwrap();
+            assert!(recognizer.recognize(&advertisement).unwrap().is_none());
+        }
     }
 
     #[tokio::test]

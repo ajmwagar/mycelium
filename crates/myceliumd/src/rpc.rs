@@ -17,7 +17,7 @@ use mycelium_driver_linux::LinuxDriver;
 use mycelium_driver_redfish::RedfishDriver;
 use mycelium_driver_snmp::SnmpDriver;
 use mycelium_driver_unifi::{UnifiControllerDriver, UnifiDriver};
-use mycelium_plugins_lua::{AdvertisementRecognizer, Connect, Plugin, BAMBU_RECOGNIZER};
+use mycelium_plugins_lua::{AdvertisementRecognizer, Connect, Plugin, BUILTIN_RECOGNIZERS};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
@@ -184,7 +184,17 @@ impl Daemon {
             Arc::new(UnifiDriver::default()),
             Arc::new(UnifiControllerDriver::default()),
         ];
-        let mut recognizers = vec![Arc::new(AdvertisementRecognizer::load(BAMBU_RECOGNIZER)?)];
+        let mut recognizers = BUILTIN_RECOGNIZERS
+            .iter()
+            .map(|(name, source)| {
+                AdvertisementRecognizer::load(*source)
+                    .map(Arc::new)
+                    .map_err(|error| MyceliumError::Plugin {
+                        plugin: (*name).into(),
+                        message: error.to_string(),
+                    })
+            })
+            .collect::<Result<Vec<_>>>()?;
         let recognizer_dir = crate::recognizers_dir();
         if recognizer_dir.is_dir() {
             let mut entries = std::fs::read_dir(&recognizer_dir)
@@ -3235,9 +3245,10 @@ mod tests {
         Daemon {
             inventory: Inventory::new(),
             drivers: vec![Arc::new(FakeDriver)],
-            recognizers: vec![Arc::new(
-                AdvertisementRecognizer::load(BAMBU_RECOGNIZER).unwrap(),
-            )],
+            recognizers: BUILTIN_RECOGNIZERS
+                .iter()
+                .map(|(_, source)| Arc::new(AdvertisementRecognizer::load(*source).unwrap()))
+                .collect(),
             topology: Mutex::new(Topology::empty()),
             topology_feed: Mutex::new(
                 crate::topology_feed::TopologyFeed::load(std::env::temp_dir().join(format!(
