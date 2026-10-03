@@ -183,6 +183,8 @@ platform, including Darwin where launchd has no `EnvironmentFile` directive.
 - Integrate existing systems instead of replacing or reimplementing them.
 - Derive topology and configuration from observed source data whenever possible.
 - Keep workflows deterministic; Lua plugins run through bounded host APIs.
+- Treat Lua as a vendor-dialect boundary, not a second orchestration runtime;
+  see [the Lua plugin boundary audit](docs/lua-plugin-audit.md).
 - Require explicit authorization for mutations and preserve a human-readable plan.
 - Treat overlapping private address space as site-scoped, not globally unique.
 
