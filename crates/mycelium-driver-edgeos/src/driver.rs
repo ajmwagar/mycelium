@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use mycelium_core::{
-    CredentialSet, DeviceId, DeviceKind, DeviceMeta, Driver, Inventory, MyceliumError, Result,
-    Target,
+    host_target, stable_slug, CredentialSet, DeviceId, DeviceKind, DeviceMeta, Driver, Inventory,
+    MyceliumError, Result, Target,
 };
 
 use crate::device::{EdgeOsDevice, DRIVER_NAME};
@@ -26,44 +26,12 @@ impl EdgeOsDriver {
         Self { connect_timeout }
     }
 
-    fn port_of(target: &Target) -> u16 {
-        match target {
-            Target::Host { port: Some(p), .. } => *p,
-            _ => crate::DEFAULT_PORT,
-        }
-    }
-
-    fn jump_of(target: &Target) -> Option<String> {
-        match target {
-            Target::Host { jump, .. } => jump.clone(),
-            Target::Subnet { .. } => None,
-        }
-    }
-
-    fn host_of(target: &Target) -> Result<&str> {
-        match target {
-            Target::Host { host, .. } => Ok(host),
-            Target::Subnet { .. } => Err(MyceliumError::Validation(
-                "edgeos v0 probes single hosts; subnet scan is a daemon-side fan-out".into(),
-            )),
-        }
-    }
-
     /// Device id slug: model-tail + address, sanitized, e.g. `edgerouter-10x-10-0-7-1`.
     fn slug(model: Option<&str>, host: &str) -> DeviceId {
         let tail = model
-            .map(|m| {
-                m.split_whitespace()
-                    .last()
-                    .unwrap_or(m)
-                    .to_lowercase()
-                    .replace(|c: char| !(c.is_ascii_alphanumeric()), "-")
-            })
+            .map(|m| stable_slug(m.split_whitespace().last().unwrap_or(m)))
             .unwrap_or_else(|| "vyos".into());
-        let host_part = host
-            .replace(|c: char| !(c.is_ascii_alphanumeric()), "-")
-            .trim_matches('-')
-            .to_owned();
+        let host_part = stable_slug(host);
         DeviceId::new(format!("{tail}-{host_part}"))
     }
 }
@@ -75,18 +43,26 @@ impl Driver for EdgeOsDriver {
     }
 
     async fn recognizes(&self, target: &Target, creds: &CredentialSet) -> Result<bool> {
-        let host = Self::host_of(target)?;
-        let jump = Self::jump_of(target);
-        let session = match SshSession::connect(host, Self::port_of(target), creds, self.connect_timeout, jump.as_deref()).await {
-            Ok(s) => s,
-            // Unreachable/refused => not this class. But bad credentials is
-            // the user's error, not a negative observation: fail loud.
-            Err(MyceliumError::Auth(_)) => return Err(MyceliumError::Auth(format!("{host}: {}", creds.username().unwrap_or("?")))),
-            Err(e) => {
-                eprintln!("edgeos: recognize {host} failed: {e}");
-                return Ok(false);
-            }
-        };
+        let endpoint = host_target(target, crate::DEFAULT_PORT, "edgeos probe")?;
+        let host = endpoint.host;
+        let session =
+            match SshSession::connect_target(target, creds, self.connect_timeout, "edgeos probe")
+                .await
+            {
+                Ok(s) => s,
+                // Unreachable/refused => not this class. But bad credentials is
+                // the user's error, not a negative observation: fail loud.
+                Err(MyceliumError::Auth(_)) => {
+                    return Err(MyceliumError::Auth(format!(
+                        "{host}: {}",
+                        creds.username().unwrap_or("?")
+                    )))
+                }
+                Err(e) => {
+                    eprintln!("edgeos: recognize {host} failed: {e}");
+                    return Ok(false);
+                }
+            };
         match session.cli("show version").await {
             Ok(out) if out.success() => {
                 let text = out.stdout;
@@ -96,7 +72,10 @@ impl Driver for EdgeOsDriver {
                     || text.contains("EdgeRunner")
                     || text.contains("Ubiquiti");
                 if !hit {
-                    eprintln!("edgeos: {host} banner matched no known marker:\n{}", &text[..text.len().min(400)]);
+                    eprintln!(
+                        "edgeos: {host} banner matched no known marker:\n{}",
+                        &text[..text.len().min(400)]
+                    );
                 }
                 Ok(hit)
             }
@@ -115,11 +94,17 @@ impl Driver for EdgeOsDriver {
         }
     }
 
-    async fn attach(&self, target: &Target, creds: &CredentialSet, inventory: &Inventory) -> Result<DeviceId> {
-        let host = Self::host_of(target)?.to_owned();
-        let jump = Self::jump_of(target);
+    async fn attach(
+        &self,
+        target: &Target,
+        creds: &CredentialSet,
+        inventory: &Inventory,
+    ) -> Result<DeviceId> {
+        let endpoint = host_target(target, crate::DEFAULT_PORT, "edgeos attachment")?;
+        let host = endpoint.host.to_owned();
         let session =
-            SshSession::connect(&host, Self::port_of(target), creds, self.connect_timeout, jump.as_deref()).await?;
+            SshSession::connect_target(target, creds, self.connect_timeout, "edgeos attachment")
+                .await?;
         let (identity, config) = EdgeOsDevice::identify(&session).await?;
         let model = identity.model.clone().or_else(|| config.hostname.clone());
         let kind = model.as_deref().map(classify).unwrap_or(DeviceKind::Router);

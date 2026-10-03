@@ -18,7 +18,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use mycelium_core::{CredentialSet, ExecOutcome, MyceliumError, Result, Secret};
+use mycelium_core::{
+    host_target, CredentialSet, ExecOutcome, MyceliumError, Result, Secret, Target,
+};
 use russh::client::{self, Handle};
 use russh::{ChannelMsg, Disconnect, Preferred};
 use tokio::process::Command;
@@ -81,6 +83,16 @@ fn auth_err(msg: impl Into<String>) -> MyceliumError {
 }
 
 impl SshSession {
+    pub async fn connect_target(
+        target: &Target,
+        creds: &CredentialSet,
+        timeout: Duration,
+        purpose: &str,
+    ) -> Result<Self> {
+        let endpoint = host_target(target, 22, purpose)?;
+        Self::connect(endpoint.host, endpoint.port, creds, timeout, endpoint.jump).await
+    }
+
     pub async fn connect(
         host: &str,
         port: u16,

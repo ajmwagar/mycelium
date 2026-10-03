@@ -21,6 +21,7 @@ pub mod error;
 pub mod exec;
 pub mod inspection;
 pub mod inventory;
+pub mod primitives;
 pub mod reconcile;
 pub mod spec;
 pub mod topology;
@@ -49,6 +50,9 @@ pub use inspection::{
     InspectionPlacement, InspectionPlan, ObservationMethod, INSPECTION_SCHEMA_VERSION,
 };
 pub use inventory::{result_from_outcome, CapabilityInfo, Device, Inventory, InvokeResult};
+pub use primitives::{
+    host_target, optional_str, parse_cidr, required_str, stable_slug, HostTarget,
+};
 pub use reconcile::{
     canonical_digest, verification_matches, ActionPlan, ActionReceipt, ActionRisk, ExecutionMode,
     ExecutionReceipt, ExecutionState, PlanBlocker, PlannedAction, StateChangePlan,

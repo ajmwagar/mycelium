@@ -4,10 +4,10 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use mycelium_core::{
-    CapResult, CapSpec, CredentialSet, Device, DeviceId, DeviceKind, DeviceMeta, Driver,
-    ExecContext, Inventory, LinkState, MyceliumError, Observation, Origin, Params, PortRef, Result,
-    Segment, SegmentKind, ServiceRecord, ServiceState, Target, Value, ID_IDENTIFY,
-    ID_NET_FORWARD_ENSURE, ID_NET_VIP_ENSURE, ID_SYSTEM_HEALTH,
+    host_target, required_str, stable_slug, CapResult, CapSpec, CredentialSet, Device, DeviceId,
+    DeviceKind, DeviceMeta, Driver, ExecContext, Inventory, LinkState, MyceliumError, Observation,
+    Origin, Params, PortRef, Result, Segment, SegmentKind, ServiceRecord, ServiceState, Target,
+    Value, ID_IDENTIFY, ID_NET_FORWARD_ENSURE, ID_NET_VIP_ENSURE, ID_SYSTEM_HEALTH,
 };
 use mycelium_driver_edgeos::SshSession;
 use mycelium_network_types::{Ipv4Prefix, PortForward, TransportProtocol};
@@ -62,15 +62,6 @@ pub struct LinuxDevice {
     session: SshSession,
     meta: DeviceMeta,
     site: String,
-}
-
-fn host(target: &Target) -> Result<(&str, u16, Option<&str>)> {
-    match target {
-        Target::Host { host, port, jump } => Ok((host, port.unwrap_or(22), jump.as_deref())),
-        Target::Subnet { .. } => Err(MyceliumError::Validation(
-            "linux observer needs one SSH host".into(),
-        )),
-    }
 }
 
 async fn identity(session: &SshSession) -> Result<(String, String)> {
@@ -145,10 +136,7 @@ fn forwarding_rule(params: &Params) -> Result<PortForward> {
 }
 
 fn string_param<'a>(params: &'a Params, name: &str) -> Result<&'a str> {
-    params
-        .get(name)
-        .and_then(Value::as_str)
-        .ok_or_else(|| MyceliumError::Validation(format!("param `{name}` must be a string")))
+    required_str(params, name)
 }
 
 fn ipv4_param(params: &Params, name: &str) -> Result<[u8; 4]> {
@@ -191,8 +179,8 @@ impl Driver for LinuxDriver {
     }
 
     async fn recognizes(&self, target: &Target, creds: &CredentialSet) -> Result<bool> {
-        let (host, port, jump) = host(target)?;
-        let session = SshSession::connect(host, port, creds, self.timeout, jump).await?;
+        let session =
+            SshSession::connect_target(target, creds, self.timeout, "linux observer").await?;
         Ok(identity(&session).await.is_ok())
     }
 
@@ -202,12 +190,11 @@ impl Driver for LinuxDriver {
         creds: &CredentialSet,
         inventory: &Inventory,
     ) -> Result<DeviceId> {
-        let (host, port, jump) = host(target)?;
-        let session = SshSession::connect(host, port, creds, self.timeout, jump).await?;
+        let endpoint = host_target(target, 22, "linux observer")?;
+        let session =
+            SshSession::connect_target(target, creds, self.timeout, "linux observer").await?;
         let (hostname, uname) = identity(&session).await?;
-        let slug = hostname
-            .to_lowercase()
-            .replace(|c: char| !c.is_ascii_alphanumeric(), "-");
+        let slug = stable_slug(&hostname);
         let meta = DeviceMeta {
             id: DeviceId::new(format!("linux-{slug}")),
             kind: DeviceKind::Other,
@@ -215,7 +202,7 @@ impl Driver for LinuxDriver {
             vendor: Some("Linux".into()),
             model: Some(uname),
             firmware: None,
-            address: host.to_owned(),
+            address: endpoint.host.to_owned(),
         };
         let id = meta.id.clone();
         inventory.add(Arc::new(LinuxDevice {

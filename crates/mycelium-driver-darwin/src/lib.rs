@@ -8,9 +8,10 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use mycelium_core::{
-    CapResult, CapSpec, CredentialSet, Device, DeviceId, DeviceKind, DeviceMeta, Driver,
-    ExecContext, Inventory, LinkState, MyceliumError, Observation, Origin, Params, PortRef, Result,
-    Segment, SegmentKind, ServiceRecord, ServiceState, Target, Value, ID_IDENTIFY,
+    host_target, stable_slug, CapResult, CapSpec, CredentialSet, Device, DeviceId, DeviceKind,
+    DeviceMeta, Driver, ExecContext, Inventory, LinkState, MyceliumError, Observation, Origin,
+    Params, PortRef, Result, Segment, SegmentKind, ServiceRecord, ServiceState, Target, Value,
+    ID_IDENTIFY,
 };
 use mycelium_dnssd::parse_dns_sd_zone;
 use mycelium_driver_edgeos::SshSession;
@@ -38,15 +39,6 @@ pub struct DarwinDevice {
     session: SshSession,
     meta: DeviceMeta,
     site: String,
-}
-
-fn host(target: &Target) -> Result<(&str, u16, Option<&str>)> {
-    match target {
-        Target::Host { host, port, jump } => Ok((host, port.unwrap_or(22), jump.as_deref())),
-        Target::Subnet { .. } => Err(MyceliumError::Validation(
-            "darwin observer needs one SSH host".into(),
-        )),
-    }
 }
 
 async fn identity(session: &SshSession) -> Result<(String, String)> {
@@ -83,8 +75,8 @@ impl Driver for DarwinDriver {
     }
 
     async fn recognizes(&self, target: &Target, creds: &CredentialSet) -> Result<bool> {
-        let (host, port, jump) = host(target)?;
-        let session = SshSession::connect(host, port, creds, self.timeout, jump).await?;
+        let session =
+            SshSession::connect_target(target, creds, self.timeout, "darwin observer").await?;
         Ok(identity(&session).await.is_ok())
     }
 
@@ -94,12 +86,11 @@ impl Driver for DarwinDriver {
         creds: &CredentialSet,
         inventory: &Inventory,
     ) -> Result<DeviceId> {
-        let (host, port, jump) = host(target)?;
-        let session = SshSession::connect(host, port, creds, self.timeout, jump).await?;
+        let endpoint = host_target(target, 22, "darwin observer")?;
+        let session =
+            SshSession::connect_target(target, creds, self.timeout, "darwin observer").await?;
         let (hostname, model) = identity(&session).await?;
-        let slug = hostname
-            .to_lowercase()
-            .replace(|c: char| !c.is_ascii_alphanumeric(), "-");
+        let slug = stable_slug(&hostname);
         let meta = DeviceMeta {
             id: DeviceId::new(format!("darwin-{slug}")),
             kind: DeviceKind::Other,
@@ -107,7 +98,7 @@ impl Driver for DarwinDriver {
             vendor: Some("Apple".into()),
             model: Some(model),
             firmware: None,
-            address: host.to_owned(),
+            address: endpoint.host.to_owned(),
         };
         let id = meta.id.clone();
         inventory.add(Arc::new(DarwinDevice {

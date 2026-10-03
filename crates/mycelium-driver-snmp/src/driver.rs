@@ -2,7 +2,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use mycelium_core::{
-    CredentialSet, DeviceId, DeviceMeta, Driver, Inventory, MyceliumError, Result, Secret, Target,
+    host_target, CredentialSet, DeviceId, DeviceMeta, Driver, Inventory, MyceliumError, Result,
+    Secret, Target,
 };
 
 use crate::client::SnmpHandle;
@@ -25,29 +26,12 @@ impl Default for SnmpDriver {
 }
 
 impl SnmpDriver {
-    fn host_of(target: &Target) -> Result<String> {
-        match target {
-            Target::Host { host, .. } => Ok(host.clone()),
-            Target::Subnet { .. } => Err(MyceliumError::Validation(
-                "snmp v0 probes single hosts".into(),
-            )),
-        }
-    }
-
-    fn port_of(target: &Target) -> u16 {
-        match target {
-            Target::Host { port: Some(p), .. } => *p,
-            _ => DEFAULT_SNMP_PORT,
-        }
-    }
-
     /// Community resolution (fail loud if an env-named secret is unset):
     /// - username = read community (literal; public ones aren't secrets)
     /// - password env = read community if no username, and doubles as the
     ///   write community (snmp.set needs it; switches rarely split them)
     fn handle(&self, target: &Target, creds: &CredentialSet) -> Result<SnmpHandle> {
-        let host = Self::host_of(target)?;
-        let port = Self::port_of(target);
+        let endpoint = host_target(target, DEFAULT_SNMP_PORT, "SNMP probe")?;
         let resolved_password = creds
             .password
             .as_ref()
@@ -66,7 +50,7 @@ impl SnmpDriver {
             (None, Some(pw)) => (pw.clone(), Some(pw)),
             (None, None) => ("public".to_owned(), None),
         };
-        let handle = SnmpHandle::new(host, port, read).with_timeout(self.timeout);
+        let handle = SnmpHandle::new(endpoint.host, endpoint.port, read).with_timeout(self.timeout);
         Ok(match write {
             Some(community) => handle.with_write_community(community),
             None => handle,

@@ -153,20 +153,11 @@ struct SshConnect;
 #[async_trait]
 impl Connect for SshConnect {
     async fn connect(&self, target: &Target, creds: &CredentialSet) -> Result<Arc<dyn Transport>> {
-        let (host, port, jump) = match target {
-            Target::Host { host, port, jump } => (host.clone(), port.unwrap_or(22), jump.clone()),
-            Target::Subnet { .. } => {
-                return Err(MyceliumError::Validation(
-                    "plugins connect to single hosts".into(),
-                ))
-            }
-        };
-        let session = SshSession::connect(
-            &host,
-            port,
+        let session = SshSession::connect_target(
+            target,
             creds,
             std::time::Duration::from_secs(8),
-            jump.as_deref(),
+            "plugin SSH connection",
         )
         .await?;
         Ok(Arc::new(session))
@@ -2660,25 +2651,8 @@ fn validate_network_name(name: &str) -> Result<()> {
 }
 
 fn parse_cidr(value: &str) -> Result<(std::net::IpAddr, u8)> {
-    let (address, prefix) = value
-        .split_once('/')
-        .ok_or_else(|| MyceliumError::Validation("subnet must be CIDR notation".into()))?;
-    let address = address
-        .parse::<std::net::IpAddr>()
-        .map_err(|_| MyceliumError::Validation(format!("invalid subnet `{value}`")))?;
-    let prefix = prefix
-        .parse::<u8>()
-        .map_err(|_| MyceliumError::Validation(format!("invalid subnet `{value}`")))?;
-    let valid = match address {
-        std::net::IpAddr::V4(_) => prefix <= 32,
-        std::net::IpAddr::V6(_) => prefix <= 128,
-    };
-    if !valid {
-        return Err(MyceliumError::Validation(format!(
-            "invalid subnet `{value}`"
-        )));
-    }
-    Ok((address, prefix))
+    mycelium_core::parse_cidr(value)
+        .ok_or_else(|| MyceliumError::Validation(format!("invalid subnet `{value}`")))
 }
 
 fn network_drift_report(

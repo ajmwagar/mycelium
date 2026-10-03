@@ -4,10 +4,10 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use mycelium_core::{
-    ActionRisk, CapResult, CapSpec, CredentialSet, Device, DeviceId, DeviceKind, DeviceMeta,
-    Driver, ExecContext, Inventory, MacAddress, MyceliumError, Observation, Origin, ParamType,
-    Params, PortRef, Result, Secret, ServiceRecord, ServiceState, Target, Value, ID_IDENTIFY,
-    ID_WLAN_GUEST_ENABLE, ID_WLAN_LIST_SSID,
+    stable_slug, ActionRisk, CapResult, CapSpec, CredentialSet, Device, DeviceId, DeviceKind,
+    DeviceMeta, Driver, ExecContext, Inventory, MacAddress, MyceliumError, Observation, Origin,
+    ParamType, Params, PortRef, Result, Secret, ServiceRecord, ServiceState, Target, Value,
+    ID_IDENTIFY, ID_WLAN_GUEST_ENABLE, ID_WLAN_LIST_SSID,
 };
 use reqwest::header::{COOKIE, SET_COOKIE};
 use serde_json::{json, Map as JsonMap};
@@ -15,14 +15,6 @@ use serde_json::{json, Map as JsonMap};
 pub const CONTROLLER_DRIVER_NAME: &str = "unifi-controller";
 const ID_LIST_APS: &str = "unifi.list-aps";
 const ID_LIST_CLIENTS: &str = "unifi.list-clients";
-
-fn slug(value: &str) -> String {
-    value
-        .to_ascii_lowercase()
-        .replace(|character: char| !character.is_ascii_alphanumeric(), "-")
-        .trim_matches('-')
-        .to_owned()
-}
 
 pub struct UnifiControllerDriver {
     timeout: Duration,
@@ -224,7 +216,7 @@ impl Driver for UnifiControllerDriver {
             .and_then(|value| value.as_str())
             .map(str::to_owned);
         let meta = DeviceMeta {
-            id: DeviceId::new(format!("unifi-controller-{}", slug(host))),
+            id: DeviceId::new(format!("unifi-controller-{}", stable_slug(host))),
             kind: DeviceKind::Other,
             driver: CONTROLLER_DRIVER_NAME.into(),
             vendor: Some("Ubiquiti".into()),

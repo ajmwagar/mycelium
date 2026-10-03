@@ -1,6 +1,6 @@
 use std::net::IpAddr;
 
-use mycelium_core::{ipv4_in_cidr, CredentialSet, MyceliumError, Secret};
+use mycelium_core::{ipv4_in_cidr, parse_cidr, CredentialSet, MyceliumError, Secret};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,7 +42,8 @@ impl CredentialRule {
             ));
         }
         for cidr in &self.cidrs {
-            let (network, _) = parse_cidr(cidr)?;
+            let (network, _) = parse_cidr(cidr)
+                .ok_or_else(|| MyceliumError::Validation(format!("invalid CIDR `{cidr}`")))?;
             if !network.is_ipv4() {
                 return Err(MyceliumError::Validation(
                     "credential-map CIDRs currently require IPv4".into(),
@@ -61,7 +62,7 @@ impl CredentialRule {
         self.addresses.contains(&address)
             || self.cidrs.iter().any(|cidr| {
                 parse_cidr(cidr)
-                    .is_ok_and(|(network, prefix)| ipv4_in_cidr(address, network, prefix))
+                    .is_some_and(|(network, prefix)| ipv4_in_cidr(address, network, prefix))
             })
     }
 
@@ -77,23 +78,6 @@ impl CredentialRule {
             sudo_password: None,
         }
     }
-}
-
-fn parse_cidr(value: &str) -> Result<(IpAddr, u8), MyceliumError> {
-    let (network, prefix) = value
-        .split_once('/')
-        .ok_or_else(|| MyceliumError::Validation(format!("invalid CIDR `{value}`")))?;
-    let network = network
-        .parse::<IpAddr>()
-        .map_err(|_| MyceliumError::Validation(format!("invalid CIDR `{value}`")))?;
-    let prefix = prefix
-        .parse::<u8>()
-        .map_err(|_| MyceliumError::Validation(format!("invalid CIDR `{value}`")))?;
-    let maximum = if network.is_ipv4() { 32 } else { 128 };
-    if prefix > maximum {
-        return Err(MyceliumError::Validation(format!("invalid CIDR `{value}`")));
-    }
-    Ok((network, prefix))
 }
 
 #[cfg(test)]
