@@ -17,7 +17,7 @@ use mycelium_driver_linux::LinuxDriver;
 use mycelium_driver_redfish::RedfishDriver;
 use mycelium_driver_snmp::SnmpDriver;
 use mycelium_driver_unifi::{UnifiControllerDriver, UnifiDriver};
-use mycelium_plugins_lua::{Connect, Plugin};
+use mycelium_plugins_lua::{AdvertisementRecognizer, Connect, Plugin, BAMBU_RECOGNIZER};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
@@ -131,6 +131,7 @@ pub struct SavedDevice {
 pub struct Daemon {
     pub inventory: Inventory,
     drivers: Vec<Arc<dyn Driver>>,
+    recognizers: Vec<Arc<AdvertisementRecognizer>>,
     pub topology: Mutex<Topology>,
     topology_feed: Mutex<crate::topology_feed::TopologyFeed>,
     saved: Mutex<BTreeMap<DeviceId, SavedDevice>>,
@@ -183,6 +184,36 @@ impl Daemon {
             Arc::new(UnifiDriver::default()),
             Arc::new(UnifiControllerDriver::default()),
         ];
+        let mut recognizers = vec![Arc::new(AdvertisementRecognizer::load(BAMBU_RECOGNIZER)?)];
+        let recognizer_dir = crate::recognizers_dir();
+        if recognizer_dir.is_dir() {
+            let mut entries = std::fs::read_dir(&recognizer_dir)
+                .map_err(MyceliumError::Io)?
+                .filter_map(|entry| entry.ok())
+                .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "lua"))
+                .collect::<Vec<_>>();
+            entries.sort_by_key(|entry| entry.path());
+            for entry in entries {
+                let source = std::fs::read_to_string(entry.path()).map_err(MyceliumError::Io)?;
+                let recognizer =
+                    Arc::new(AdvertisementRecognizer::load(source).map_err(|error| {
+                        MyceliumError::Plugin {
+                            plugin: entry.file_name().to_string_lossy().into_owned(),
+                            message: error.to_string(),
+                        }
+                    })?);
+                if recognizers
+                    .iter()
+                    .any(|existing| existing.name == recognizer.name)
+                {
+                    return Err(MyceliumError::Validation(format!(
+                        "duplicate advertisement recognizer {}",
+                        recognizer.name
+                    )));
+                }
+                recognizers.push(recognizer);
+            }
+        }
         let pdir = crate::plugins_dir();
         if pdir.is_dir() {
             let mut entries: Vec<_> = std::fs::read_dir(&pdir)
@@ -275,6 +306,7 @@ impl Daemon {
         let me = Self {
             inventory: Inventory::new(),
             drivers,
+            recognizers,
             topology: Mutex::new(topology),
             topology_feed: Mutex::new(topology_feed),
             saved: Mutex::new(saved_map),
@@ -455,6 +487,37 @@ impl Daemon {
 
     async fn converged_resources(&self) -> fpl_resource_observation::ResourceCatalog {
         crate::resources::project(self.mesh.hardware_snapshots().await)
+    }
+
+    fn recognize_advertisements(
+        &self,
+        observations: &[Observation],
+    ) -> (Vec<Observation>, Vec<String>) {
+        let mut recognized = Vec::new();
+        let mut warnings = Vec::new();
+        for observation in observations {
+            let Observation::ServiceAdvertisement {
+                advertisement,
+                origin,
+            } = observation
+            else {
+                continue;
+            };
+            for recognizer in &self.recognizers {
+                match recognizer.recognize(advertisement) {
+                    Ok(Some(device)) => recognized.push(Observation::DiscoveredDevice {
+                        device,
+                        origin: origin.clone(),
+                    }),
+                    Ok(None) => {}
+                    Err(error) => warnings.push(format!(
+                        "advertisement recognizer {}: {error}",
+                        recognizer.name
+                    )),
+                }
+            }
+        }
+        (recognized, warnings)
     }
 
     async fn discover_managed_targets(&self) -> (Vec<String>, Vec<String>) {
@@ -1046,6 +1109,10 @@ impl Daemon {
                         )),
                     }
                 }
+                let (recognized, recognition_warnings) =
+                    self.recognize_advertisements(&observations);
+                observations.extend(recognized);
+                warnings.extend(recognition_warnings);
                 let report = {
                     let mut topo = self.topology.lock().await;
                     topo.observe_all(observations)
@@ -3168,6 +3235,9 @@ mod tests {
         Daemon {
             inventory: Inventory::new(),
             drivers: vec![Arc::new(FakeDriver)],
+            recognizers: vec![Arc::new(
+                AdvertisementRecognizer::load(BAMBU_RECOGNIZER).unwrap(),
+            )],
             topology: Mutex::new(Topology::empty()),
             topology_feed: Mutex::new(
                 crate::topology_feed::TopologyFeed::load(std::env::temp_dir().join(format!(

@@ -25,7 +25,7 @@ Applied plans have canonical identities and durable per-action receipts. See
 | Area | Current support |
 | --- | --- |
 | Discovery | SNMP, mDNS/DNS-SD, SSDP/UPnP, Linux, Darwin, and Tailscale observations |
-| Topology | Multi-site/LAN inventory, physical switch-port attachment, services, routes, and link transport |
+| Topology | Multi-site/LAN inventory, physical switch-port attachment, services, routes, link transport, and bounded advertisement recognition |
 | Managed targets | NETGEAR FastPath, EdgeOS, UniFi AP/controller, Redfish/iLO, Linux, and Darwin drivers |
 | Resources | Provider-neutral GPU and storage profiles with expiring host attachments |
 | Desired state | Stable logical networks, imported allocations, drift reports, VLAN and forwarding primitives |

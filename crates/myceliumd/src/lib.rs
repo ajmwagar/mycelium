@@ -12,6 +12,7 @@
 //! - `devices.json`    saved device configs, reconnected at boot
 //! - `topology.json`   last merged topology (facts, re-derivable via scan)
 //! - `plugins/*.lua`   Lua plugin drivers, validated at boot
+//! - `recognizers/*.lua` pure advertisement recognizers, validated at boot
 //!
 //! Secrets never persist: `CredentialSet` round-trips `Secret::Env`, so
 //! `devices.json` stores variable names, not values.
@@ -100,6 +101,10 @@ pub fn topology_feed_path() -> PathBuf {
 
 pub fn discovery_path() -> PathBuf {
     home_dir().join("discovery.json")
+}
+
+pub fn recognizers_dir() -> PathBuf {
+    home_dir().join("recognizers")
 }
 
 pub fn allocations_path() -> PathBuf {

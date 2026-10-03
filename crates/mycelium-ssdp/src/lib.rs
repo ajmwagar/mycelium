@@ -94,6 +94,9 @@ fn parse_response(response: &str, observed_at: u64) -> Option<ServiceAdvertiseme
 }
 
 fn parse_http_endpoint(location: &str) -> Option<(IpAddr, Option<u16>)> {
+    if let Ok(address) = location.parse() {
+        return Some((address, None));
+    }
     let authority = location
         .strip_prefix("http://")
         .or_else(|| location.strip_prefix("https://"))?
@@ -153,5 +156,25 @@ mod tests {
         let input = "__MYCELIUM_SSDP_PROBE__\ten1\t192.168.10.84\nHTTP/1.1 200 OK\r\nLOCATION: http://192.168.10.97:8008/root.xml\r\nST: upnp:rootdevice\r\nUSN: uuid:fire-tv\r\n\r\n";
         let record = parse_probes(input, 42).pop().unwrap();
         assert_eq!(record.interface.as_deref(), Some("en1"));
+    }
+
+    #[test]
+    fn parses_bambu_notify_with_bare_ip_location() {
+        let input = concat!(
+            "NOTIFY * HTTP/1.1\r\n",
+            "Host: 239.255.255.250:1990\r\n",
+            "Location: 10.0.0.3\r\n",
+            "NT: urn:bambulab-com:device:3dprinter:1\r\n",
+            "NTS: ssdp:alive\r\n",
+            "USN: 22E8AJ5A0400044\r\n",
+            "Cache-Control: max-age=1800\r\n",
+            "DevModel.bambu.com: N7\r\n",
+            "DevName.bambu.com: P2S - Thing 2\r\n\r\n",
+        );
+        let record = parse_responses(input, 42).pop().unwrap();
+        assert_eq!(record.instance, "22E8AJ5A0400044");
+        assert_eq!(record.target.as_deref(), Some("10.0.0.3"));
+        assert!(record.addresses.contains(&"10.0.0.3".parse().unwrap()));
+        assert!(record.txt.contains("devmodel.bambu.com=N7"));
     }
 }

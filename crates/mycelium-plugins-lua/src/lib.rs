@@ -44,10 +44,13 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use mlua::{serde::LuaSerdeExt, FromLua, IntoLua, Lua, Table, Value as LuaValue};
 use mycelium_core::{
-    CapResult, CapSpec, CredentialSet, Device, DeviceId, DeviceKind, DeviceMeta, Driver,
-    ExecContext, Inventory, MyceliumError, Params, Result, Target, Transport, Value, ID_IDENTIFY,
+    CapResult, CapSpec, CredentialSet, Device, DeviceId, DeviceKind, DeviceMeta, DiscoveredDevice,
+    Driver, ExecContext, Inventory, MyceliumError, Params, Result, ServiceAdvertisement, Target,
+    Transport, Value, ID_IDENTIFY,
 };
 use tokio::sync::Mutex;
+
+pub const BAMBU_RECOGNIZER: &str = include_str!("../recognizers/bambu.lua");
 
 /// JSON<->Lua bridge: serde_json::Value is *the* wire format at this seam,
 /// so plugin authors see plain objects, never Rust enum tag noise.
@@ -177,6 +180,92 @@ impl Plugin {
         }
         Ok(map)
     }
+}
+
+/// A pure advertisement-to-device recognizer. It shares the Lua sandbox with
+/// drivers but has no connector, transport, filesystem, socket, or clock.
+pub struct AdvertisementRecognizer {
+    pub name: String,
+    source: Arc<str>,
+}
+
+impl AdvertisementRecognizer {
+    pub fn load(source: impl Into<Arc<str>>) -> Result<Self> {
+        let source = source.into();
+        let lua = instantiate(&source, "<recognizer>")?;
+        let table = lua
+            .globals()
+            .get::<Table>("recognizer")
+            .map_err(|error| err("<recognizer>", &error))?;
+        let name = table
+            .get::<String>("name")
+            .map_err(|_| MyceliumError::Plugin {
+                plugin: "<recognizer>".into(),
+                message: "`recognizer.name` must be a string".into(),
+            })?;
+        if table.get::<mlua::Function>("recognize").is_err() {
+            return Err(MyceliumError::Plugin {
+                plugin: name,
+                message: "`recognizer.recognize` must be a function".into(),
+            });
+        }
+        Ok(Self { name, source })
+    }
+
+    pub fn recognize(
+        &self,
+        advertisement: &ServiceAdvertisement,
+    ) -> Result<Option<DiscoveredDevice>> {
+        let lua = instantiate(&self.source, &self.name)?;
+        let table = lua
+            .globals()
+            .get::<Table>("recognizer")
+            .map_err(|error| err(&self.name, &error))?;
+        let function: mlua::Function = table.get("recognize").expect("validated at load");
+        let input = serde_json::to_value(advertisement)
+            .map_err(|error| MyceliumError::Parse(error.to_string()))?;
+        let output: LuaValue = function
+            .call(JsonBridge(input))
+            .map_err(|error| err(&self.name, &error))?;
+        if matches!(output, LuaValue::Nil) {
+            return Ok(None);
+        }
+        let json: serde_json::Value = lua
+            .from_value(output)
+            .map_err(|error| err(&self.name, &error))?;
+        let mut device: DiscoveredDevice =
+            serde_json::from_value(json).map_err(|error| MyceliumError::Plugin {
+                plugin: self.name.clone(),
+                message: format!("recognize() returned an invalid discovered device: {error}"),
+            })?;
+        validate_recognition(&self.name, &device)?;
+        device.observed_at = advertisement.last_seen;
+        if device.addresses.is_empty() {
+            device.addresses.clone_from(&advertisement.addresses);
+        }
+        Ok(Some(device))
+    }
+}
+
+fn validate_recognition(name: &str, device: &DiscoveredDevice) -> Result<()> {
+    if device.stable_id.trim().is_empty()
+        || device.stable_id.len() > 256
+        || device.name.len() > 256
+        || device.kind.trim().is_empty()
+        || device.kind.len() > 128
+        || device.attributes.len() > 64
+        || device.services.len() > 32
+        || device
+            .services
+            .iter()
+            .any(|service| service.name.trim().is_empty() || service.port == 0)
+    {
+        return Err(MyceliumError::Plugin {
+            plugin: name.into(),
+            message: "recognition exceeds identity, attribute, or service bounds".into(),
+        });
+    }
+    Ok(())
 }
 
 /// Opens transports for plugin devices. The daemon injects real
@@ -459,6 +548,48 @@ mod tests {
         let transport = Arc::new(RecordingTransport::new());
         let plugin = Arc::new(Plugin::load(GUEST).unwrap());
         (plugin, transport)
+    }
+
+    #[test]
+    fn bambu_recognizer_projects_stable_identity_without_authority() {
+        let recognizer = AdvertisementRecognizer::load(BAMBU_RECOGNIZER).unwrap();
+        let advertisement: ServiceAdvertisement = serde_json::from_value(serde_json::json!({
+            "instance": "22E8AJ5A0400044",
+            "service_type": "urn:bambulab-com:device:3dprinter:1",
+            "domain": "ssdp",
+            "addresses": ["10.0.0.3"],
+            "txt": [
+                "devmodel.bambu.com=N7",
+                "devname.bambu.com=P2S - Thing 2",
+                "devconnect.bambu.com=lan",
+                "devseclink.bambu.com=secure",
+                "devversion.bambu.com=01.00.05.00"
+            ],
+            "first_seen": 40,
+            "last_seen": 42
+        }))
+        .unwrap();
+        let device = recognizer.recognize(&advertisement).unwrap().unwrap();
+        assert_eq!(device.stable_id, "bambu:22E8AJ5A0400044");
+        assert_eq!(device.name, "P2S - Thing 2");
+        assert_eq!(device.model.as_deref(), Some("N7"));
+        assert_eq!(device.observed_at, 42);
+        assert!(device.addresses.contains(&"10.0.0.3".parse().unwrap()));
+        assert_eq!(device.services.len(), 3);
+    }
+
+    #[test]
+    fn bambu_recognizer_ignores_unrelated_ssdp() {
+        let recognizer = AdvertisementRecognizer::load(BAMBU_RECOGNIZER).unwrap();
+        let advertisement: ServiceAdvertisement = serde_json::from_value(serde_json::json!({
+            "instance": "uuid:television",
+            "service_type": "upnp:rootdevice",
+            "domain": "ssdp",
+            "first_seen": 40,
+            "last_seen": 42
+        }))
+        .unwrap();
+        assert!(recognizer.recognize(&advertisement).unwrap().is_none());
     }
 
     #[tokio::test]

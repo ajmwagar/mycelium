@@ -23,6 +23,8 @@ pub const DRIVER_NAME: &str = "linux";
 const OBSERVE_COMMAND: &str = "printf '__MYCELIUM_LINKS__\\n'; ip -o link show; printf '__MYCELIUM_LINK_META__\\n'; for p in /sys/class/net/*; do n=${p##*/}; if [ \"$n\" = lo ]; then m=loopback; elif [ -d \"$p/wireless\" ]; then m=wifi; elif [ -e \"$p/device\" ]; then m=ethernet; else m=virtual; fi; printf '%s\\t%s\\t%s\\t%s\\n' \"$n\" \"$m\" \"$(cat \"$p/speed\" 2>/dev/null || true)\" \"$(cat \"$p/duplex\" 2>/dev/null || true)\"; done; printf '__MYCELIUM_ADDRS__\\n'; ip -o -4 addr show scope global; printf '__MYCELIUM_NEIGH__\\n'; ip neigh show; printf '__MYCELIUM_ROUTES__\\n'; ip -4 route show proto kernel scope link; printf '__MYCELIUM_SERVICES__\\n'; ss -H -lntup; printf '__MYCELIUM_TAILSCALE__\\n'; tailscale status --json 2>/dev/null || true; printf '\\n__MYCELIUM_TAILSCALE_PREFS__\\n'; tailscale debug prefs 2>/dev/null || true; printf '\\n__MYCELIUM_MDNS__\\n'; command -v avahi-browse >/dev/null 2>&1 && avahi-browse --all --resolve --parsable --terminate 2>/dev/null || true; printf '\\n__MYCELIUM_SSDP__\\n'; if command -v nc >/dev/null 2>&1; then ip -o -4 route show proto kernel scope link | awk '{ dev=\"\"; src=\"\"; for (i=1; i<=NF; i++) { if ($i == \"dev\") dev=$(i+1); if ($i == \"src\") src=$(i+1) } if (dev != \"\" && src != \"\") print dev, src }' | sort -u | while read -r iface addr; do case \"$iface\" in lo|docker*|br-*|veth*|tailscale*|sh-*|sv*) continue ;; esac; printf '__MYCELIUM_SSDP_PROBE__\\t%s\\t%s\\n' \"$iface\" \"$addr\"; printf 'M-SEARCH * HTTP/1.1\\r\\nHOST: 239.255.255.250:1900\\r\\nMAN: \"ssdp:discover\"\\r\\nMX: 2\\r\\nST: ssdp:all\\r\\n\\r\\n' | nc -4 -u -s \"$addr\" -w 3 239.255.255.250 1900 2>/dev/null || true; done; fi";
 const HEALTH_COMMAND: &str = "printf '__UPTIME__\\n'; cat /proc/uptime; printf '__LOAD__\\n'; cat /proc/loadavg; printf '__MEMORY__\\n'; awk '/^(MemTotal|MemAvailable|SwapTotal|SwapFree):/ {print $1, $2}' /proc/meminfo; printf '__DISK__\\n'; df -P -B1 / | tail -n 1; printf '__PRESSURE__\\n'; for p in cpu memory io; do [ -r /proc/pressure/$p ] && { printf '%s ' \"$p\"; tr '\\n' ' ' </proc/pressure/$p; printf '\\n'; }; done; printf '__SOCKETS__\\n'; ss -s; printf '__SSH__\\n'; ss -Htan 2>/dev/null | awk '$4 ~ /:22$/ {count[$1]++} END {for (state in count) print state, count[state]}'; printf '__PROCESSES__\\n'; ps -eo pid=,ppid=,stat=,pcpu=,pmem=,comm= --sort=-pcpu | head -n 10";
 
+const PASSIVE_ADVERTISEMENTS_COMMAND: &str = "if command -v nc >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then printf '__MYCELIUM_SSDP_PROBE__\\tbroadcast\\t0.0.0.0\\n'; timeout 4 nc -4 -u -k -l -p 2021 2>/dev/null || true; fi";
+
 fn parse_health(text: &str) -> Result<Value> {
     const SECTIONS: [&str; 8] = [
         "UPTIME", "LOAD", "MEMORY", "DISK", "PRESSURE", "SOCKETS", "SSH", "PROCESSES",
@@ -358,7 +360,8 @@ impl Device for LinuxDevice {
     }
 
     async fn observe(&self) -> Result<(Vec<Observation>, Vec<String>)> {
-        let raw = self.session.exec(OBSERVE_COMMAND).await?;
+        let command = format!("{OBSERVE_COMMAND}; {PASSIVE_ADVERTISEMENTS_COMMAND}");
+        let raw = self.session.exec(&command).await?;
         if !raw.success() {
             return Err(MyceliumError::Device {
                 exit_code: raw.exit_code,

@@ -211,6 +211,39 @@ pub struct ServiceAdvertisement {
     pub origins: BTreeSet<String>,
 }
 
+/// Provider-neutral device facts recognized from an advertisement. This is
+/// identity evidence, not an authorization grant or a managed-device handle.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiscoveredDevice {
+    pub stable_id: String,
+    pub name: String,
+    pub kind: String,
+    /// Set by the host from the source advertisement, not by recognizer code.
+    #[serde(default)]
+    pub observed_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vendor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub firmware: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serial: Option<String>,
+    #[serde(default)]
+    pub addresses: BTreeSet<IpAddr>,
+    #[serde(default)]
+    pub attributes: BTreeMap<String, String>,
+    #[serde(default)]
+    pub services: Vec<DiscoveredService>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiscoveredService {
+    pub name: String,
+    pub transport: String,
+    pub port: u16,
+}
+
 impl ServiceAdvertisement {
     pub fn key(&self) -> String {
         format!(
@@ -322,6 +355,12 @@ pub enum Observation {
         advertisement: ServiceAdvertisement,
         origin: Origin,
     },
+    /// Stable identity and descriptive facts projected by a bounded
+    /// recognizer from a raw network advertisement.
+    DiscoveredDevice {
+        device: DiscoveredDevice,
+        origin: Origin,
+    },
     OverlayPeer {
         ip: IpAddr,
         hostname: String,
@@ -377,6 +416,10 @@ pub struct TopoNode {
     pub services: BTreeMap<String, ServiceRecord>,
     #[serde(default)]
     pub annotation: NodeAnnotation,
+    /// Descriptive discovery facts. Keys are namespaced by convention and
+    /// never confer management or access authority.
+    #[serde(default)]
+    pub facts: BTreeMap<String, String>,
     #[serde(default)]
     pub overlays: BTreeMap<String, OverlayPeerRecord>,
 }
@@ -623,6 +666,7 @@ impl Topology {
                         sites: BTreeSet::new(),
                         services: BTreeMap::new(),
                         annotation: NodeAnnotation::default(),
+                        facts: BTreeMap::new(),
                         overlays: BTreeMap::new(),
                     }
                 });
@@ -779,6 +823,89 @@ impl Topology {
                         self.advertisements.insert(key, advertisement);
                     }
                 }
+            }
+            Observation::DiscoveredDevice { device, origin } => {
+                let aliases = self
+                    .nodes
+                    .iter()
+                    .filter(|(id, node)| {
+                        id.as_str() != device.stable_id
+                            && !node.device
+                            && device
+                                .addresses
+                                .iter()
+                                .any(|address| node.ips.contains_key(address))
+                    })
+                    .map(|(id, _)| id.clone())
+                    .collect::<Vec<_>>();
+                for alias in aliases {
+                    if let Some(source) = self.nodes.remove(&alias) {
+                        let target = self.nodes.entry(device.stable_id.clone()).or_default();
+                        target.id = device.stable_id.clone();
+                        merge_node(target, source);
+                    }
+                }
+                let node = self
+                    .nodes
+                    .entry(device.stable_id.clone())
+                    .or_insert_with(|| {
+                        report.new_nodes += 1;
+                        TopoNode {
+                            id: device.stable_id.clone(),
+                            ..TopoNode::default()
+                        }
+                    });
+                let source = origin_key(&origin);
+                node.origins.insert(source.clone());
+                if let Some(site) = &origin.site {
+                    node.sites.insert(site.clone());
+                }
+                if !device.name.trim().is_empty() {
+                    node.hostnames.insert(device.name.to_lowercase());
+                    node.annotation.name = Some(device.name.clone());
+                }
+                node.annotation.kind = Some(device.kind.clone());
+                for (key, value) in device.attributes {
+                    node.facts.insert(key, value);
+                }
+                for (key, value) in [
+                    ("vendor", device.vendor),
+                    ("model", device.model),
+                    ("firmware", device.firmware),
+                    ("serial", device.serial),
+                ] {
+                    if let Some(value) = value {
+                        node.facts.insert(key.into(), value);
+                    }
+                }
+                for address in device.addresses {
+                    node.ips
+                        .entry(address)
+                        .or_insert_with(|| IpRecord {
+                            addr: address,
+                            prefix: None,
+                            vlan: None,
+                            origins: BTreeSet::new(),
+                        })
+                        .origins
+                        .insert(source.clone());
+                }
+                for discovered in device.services {
+                    let service = ServiceRecord {
+                        name: discovered.name,
+                        transport: discovered.transport,
+                        port: discovered.port,
+                        product: None,
+                        state: ServiceState::Up,
+                        observed_at: device.observed_at,
+                        origin: origin.clone(),
+                    };
+                    node.services.insert(
+                        format!("{}:{}/{}", service.transport, service.port, service.name),
+                        service,
+                    );
+                }
+                report.updated_nodes += 1;
             }
             Observation::OverlayPeer {
                 ip,
@@ -1032,6 +1159,7 @@ impl Topology {
                 sites: BTreeSet::new(),
                 services: BTreeMap::new(),
                 annotation: NodeAnnotation::default(),
+                facts: BTreeMap::new(),
                 overlays: BTreeMap::new(),
             });
         node.device = true;
@@ -1098,6 +1226,7 @@ fn observation_origin(o: &Observation) -> Origin {
         | Observation::Lease { origin, .. } => origin.clone(),
         Observation::Service { service, .. } => service.origin.clone(),
         Observation::ServiceAdvertisement { origin, .. } => origin.clone(),
+        Observation::DiscoveredDevice { origin, .. } => origin.clone(),
         Observation::OverlayPeer { record, .. } | Observation::OverlaySelf { record, .. } => {
             record.origin.clone()
         }
@@ -1148,6 +1277,7 @@ fn merge_node(target: &mut TopoNode, source: TopoNode) {
     if target.annotation.kind.is_none() {
         target.annotation.kind = source.annotation.kind;
     }
+    target.facts.extend(source.facts);
 }
 
 fn scoped_id(site: Option<&str>, id: &str) -> String {
@@ -1627,5 +1757,43 @@ mod tests {
             .conflicts
             .iter()
             .any(|conflict| matches!(conflict, Conflict::SameIpDiffMac { .. })));
+    }
+
+    #[test]
+    fn discovered_serial_identity_survives_address_movement() {
+        let observed = |address: &str| Observation::DiscoveredDevice {
+            device: DiscoveredDevice {
+                stable_id: "bambu:SERIAL1".into(),
+                name: "Printer".into(),
+                kind: "printer.3d".into(),
+                vendor: Some("Bambu Lab".into()),
+                model: Some("N7".into()),
+                firmware: Some("1.0".into()),
+                serial: Some("SERIAL1".into()),
+                observed_at: 42,
+                addresses: BTreeSet::from([ip(address)]),
+                attributes: BTreeMap::new(),
+                services: vec![DiscoveredService {
+                    name: "bambu-mqtt-tls".into(),
+                    transport: "tcp".into(),
+                    port: 8883,
+                }],
+            },
+            origin: Origin::new("spark", "bambu-lan").at_site("lab"),
+        };
+        let mut topology = Topology::empty();
+        topology.observe_all([observed("10.0.0.3")]);
+        topology.observe_all([observed("10.0.0.33")]);
+
+        assert_eq!(topology.nodes.len(), 1);
+        let node = &topology.nodes["bambu:SERIAL1"];
+        assert_eq!(node.annotation.kind.as_deref(), Some("printer.3d"));
+        assert_eq!(
+            node.facts.get("serial").map(String::as_str),
+            Some("SERIAL1")
+        );
+        assert!(node.ips.contains_key(&ip("10.0.0.3")));
+        assert!(node.ips.contains_key(&ip("10.0.0.33")));
+        assert!(node.services.contains_key("tcp:8883/bambu-mqtt-tls"));
     }
 }
