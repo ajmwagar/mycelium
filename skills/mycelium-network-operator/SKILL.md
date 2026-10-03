@@ -32,5 +32,9 @@ For host policy, derive personal account mappings from signed active grants:
 which hosts accept a person; the grant's `unix_users` selects their local
 account. Apply through the validated host-bundle workflow and verify a
 certificate-only `mycelium ssh` connection before retiring bootstrap access.
+For continuous convergence on Linux, configure `access ssh host-policy set`,
+inspect `host-policy reconcile --dry-run`, and install its timer. The local
+accepted-role list is host intent; people, Unix users, grants, and revocations
+come only from the signature-verified gossiped access view.
 
 When a capability is absent, report the missing driver contract. Do not claim a VLAN, DHCP pool, route, or WLAN change succeeded without its declared read-only postcondition.

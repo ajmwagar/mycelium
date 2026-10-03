@@ -35,6 +35,13 @@ pub(crate) struct SshClientProfile {
     pub roles: Vec<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct SshHostPolicy {
+    version: u32,
+    accepted_roles: Vec<String>,
+    ca_public: PathBuf,
+}
+
 pub fn run(args: &[String], state: &Value) -> Result<Vec<String>, String> {
     match args.first().map(String::as_str) {
         Some("ca-init") => ca_init(args),
@@ -46,12 +53,273 @@ pub fn run(args: &[String], state: &Value) -> Result<Vec<String>, String> {
         Some("renewal-authorize") => renewal_authorize(args),
         Some("client-config") => client_config(args),
         Some("profile") => profile(args),
+        Some("host-policy") => host_policy(args, state),
         Some(action) => Err(format!("unknown access ssh action `{action}`")),
         None => Err(
             "access ssh needs ca-init, issue, krl, host-bundle, host-apply, host-rollout, or client-config"
                 .into(),
         ),
     }
+}
+
+fn host_policy_path() -> PathBuf {
+    myceliumd::home_dir().join("ssh/host-policy.json")
+}
+
+fn host_policy(args: &[String], state: &Value) -> Result<Vec<String>, String> {
+    match args.get(1).map(String::as_str) {
+        Some("set") => host_policy_set(args),
+        Some("status") => {
+            let policy = load_host_policy()?;
+            let mappings = mappings_for_roles(&policy.accepted_roles, state)?;
+            Ok(vec![serde_json::to_string_pretty(&serde_json::json!({
+                "policy": policy,
+                "access_view_ready": access_view_has_evidence(state),
+                "resolved_accounts": mappings,
+            }))
+            .map_err(|error| error.to_string())?])
+        }
+        Some("reconcile") => host_policy_reconcile(args, state),
+        Some("install-timer") => host_policy_install_timer(args),
+        _ => Err("access ssh host-policy needs set, status, reconcile, or install-timer".into()),
+    }
+}
+
+fn host_policy_set(args: &[String]) -> Result<Vec<String>, String> {
+    require_write(args)?;
+    let mut accepted_roles = repeated(args, "--role")
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    accepted_roles.sort();
+    accepted_roles.dedup();
+    let policy = SshHostPolicy {
+        version: 1,
+        accepted_roles,
+        ca_public: PathBuf::from(required(args, "--ca-public")?),
+    };
+    validate_host_policy(&policy)?;
+    let path = host_policy_path();
+    fs::create_dir_all(path.parent().expect("host policy has parent"))
+        .map_err(|error| format!("create host-policy directory: {error}"))?;
+    let staging = path.with_extension("json.staging");
+    fs::write(
+        &staging,
+        serde_json::to_vec_pretty(&policy).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| format!("write staged host policy: {error}"))?;
+    fs::rename(&staging, &path)
+        .map_err(|error| format!("install host policy {}: {error}", path.display()))?;
+    Ok(vec![format!(
+        "host accepts gossiped SSH roles [{}]",
+        policy.accepted_roles.join(", ")
+    )])
+}
+
+fn load_host_policy() -> Result<SshHostPolicy, String> {
+    let path = host_policy_path();
+    let policy: SshHostPolicy = serde_json::from_slice(
+        &fs::read(&path)
+            .map_err(|error| format!("read host policy {}: {error}", path.display()))?,
+    )
+    .map_err(|error| format!("parse host policy {}: {error}", path.display()))?;
+    validate_host_policy(&policy)?;
+    Ok(policy)
+}
+
+fn validate_host_policy(policy: &SshHostPolicy) -> Result<(), String> {
+    if policy.version != 1 || policy.accepted_roles.is_empty() || policy.accepted_roles.len() > 32 {
+        return Err("SSH host policy needs version 1 and 1-32 accepted roles".into());
+    }
+    for role in &policy.accepted_roles {
+        config_atom_value("role", role)?;
+    }
+    if !policy.ca_public.is_absolute() || !policy.ca_public.is_file() {
+        return Err(format!(
+            "SSH host policy CA public key is unavailable: {}",
+            policy.ca_public.display()
+        ));
+    }
+    Ok(())
+}
+
+fn mappings_for_roles(
+    roles: &[String],
+    state: &Value,
+) -> Result<BTreeMap<String, BTreeSet<String>>, String> {
+    let mut args = vec!["--from-access".to_owned(), "--allow-empty".to_owned()];
+    for role in roles {
+        args.extend(["--role".to_owned(), role.clone()]);
+    }
+    role_mappings(&args, state)
+}
+
+fn access_view_has_evidence(state: &Value) -> bool {
+    ["grants", "revocations"].into_iter().any(|field| {
+        state[field]
+            .as_array()
+            .is_some_and(|records| !records.is_empty())
+    })
+}
+
+fn host_policy_reconcile(args: &[String], state: &Value) -> Result<Vec<String>, String> {
+    let policy = load_host_policy()?;
+    if !access_view_has_evidence(state) {
+        return Err(
+            "no gossiped access records have converged; refusing to replace SSH policy".into(),
+        );
+    }
+    let mappings = mappings_for_roles(&policy.accepted_roles, state)?;
+    if args.iter().any(|argument| argument == "--dry-run") {
+        return Ok(vec![serde_json::to_string_pretty(&serde_json::json!({
+            "dry_run": true,
+            "accepted_roles": policy.accepted_roles,
+            "resolved_accounts": mappings,
+        }))
+        .map_err(|error| error.to_string())?]);
+    }
+    require_write(args)?;
+    require_root("SSH host-policy reconciliation")?;
+    let root = myceliumd::home_dir().join(format!(
+        "ssh/reconcile-staging-{}-{}",
+        std::process::id(),
+        now()?
+    ));
+    let bundle = root.join("bundle");
+    let krl_path = root.join("revoked.krl");
+    fs::create_dir_all(&root).map_err(|error| format!("create reconcile staging: {error}"))?;
+    let result = (|| {
+        krl(
+            &[
+                "--ca-public".to_owned(),
+                policy.ca_public.to_string_lossy().into_owned(),
+                "--path".to_owned(),
+                krl_path.to_string_lossy().into_owned(),
+                "--write".to_owned(),
+            ],
+            state,
+        )?;
+        let mut bundle_args = vec![
+            "--ca-public".to_owned(),
+            policy.ca_public.to_string_lossy().into_owned(),
+            "--krl".to_owned(),
+            krl_path.to_string_lossy().into_owned(),
+            "--path".to_owned(),
+            bundle.to_string_lossy().into_owned(),
+            "--write".to_owned(),
+            "--allow-empty".to_owned(),
+        ];
+        for (user, roles) in &mappings {
+            for role in roles {
+                bundle_args.extend(["--allow".into(), format!("{user}={role}")]);
+            }
+        }
+        host_bundle(&bundle_args, state)?;
+        if host_bundle_matches_installed(&bundle)? {
+            return Ok(vec!["SSH host policy already converged".into()]);
+        }
+        host_apply(&[
+            "--bundle".into(),
+            bundle.to_string_lossy().into_owned(),
+            "--write".into(),
+        ])
+    })();
+    let _ = fs::remove_dir_all(&root);
+    result
+}
+
+fn require_root(action: &str) -> Result<(), String> {
+    let output = Command::new("id")
+        .arg("-u")
+        .output()
+        .map_err(|error| format!("determine effective user: {error}"))?;
+    if output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "0" {
+        Ok(())
+    } else {
+        Err(format!("{action} needs root"))
+    }
+}
+
+fn host_bundle_matches_installed(bundle: &Path) -> Result<bool, String> {
+    let installed = Path::new("/etc/ssh");
+    for (desired, current) in [
+        (
+            bundle.join("user_ca.pub"),
+            installed.join("mycelium/user_ca.pub"),
+        ),
+        (
+            bundle.join("revoked.krl"),
+            installed.join("mycelium/revoked.krl"),
+        ),
+        (
+            bundle.join("60-mycelium-access.conf"),
+            installed.join("sshd_config.d/60-mycelium-access.conf"),
+        ),
+    ] {
+        if fs::read(desired).ok() != fs::read(current).ok() {
+            return Ok(false);
+        }
+    }
+    let manifest = load_host_manifest(bundle)?;
+    for account in &manifest.accounts {
+        if !Command::new("id")
+            .args(["-u", &account.name])
+            .status()
+            .map_err(|error| format!("look up account {}: {error}", account.name))?
+            .success()
+            || fs::read(bundle.join("principals").join(&account.name)).ok()
+                != fs::read(installed.join("mycelium/principals").join(&account.name)).ok()
+        {
+            return Ok(false);
+        }
+    }
+    let expected = manifest
+        .accounts
+        .iter()
+        .map(|account| account.name.as_str())
+        .collect::<BTreeSet<_>>();
+    let current = fs::read_dir(installed.join("mycelium/principals"))
+        .map(|entries| {
+            entries
+                .filter_map(|entry| entry.ok())
+                .filter_map(|entry| entry.file_name().into_string().ok())
+                .collect::<BTreeSet<_>>()
+        })
+        .unwrap_or_default();
+    Ok(current.iter().map(String::as_str).collect::<BTreeSet<_>>() == expected)
+}
+
+fn host_policy_install_timer(args: &[String]) -> Result<Vec<String>, String> {
+    require_write(args)?;
+    require_root("SSH host-policy timer installation")?;
+    if !cfg!(target_os = "linux") {
+        return Err(
+            "automatic SSH host-policy reconciliation currently supports Linux only".into(),
+        );
+    }
+    load_host_policy()?;
+    let binary = std::env::current_exe().map_err(|error| format!("locate Mycelium: {error}"))?;
+    let home = myceliumd::home_dir();
+    for path in [&binary, &home] {
+        config_value_text("systemd path", &path.to_string_lossy())?;
+    }
+    let unit = format!(
+        "[Unit]\nDescription=Reconcile Mycelium SSH access policy\nAfter=network-online.target\n\n[Service]\nType=oneshot\nEnvironment=MYCELIUM_HOME={}\nEnvironment=MYCELIUM_NO_AUTOSTART=1\nExecStart={} access ssh host-policy reconcile --write\n",
+        home.display(), binary.display()
+    );
+    let timer = "[Unit]\nDescription=Periodically reconcile Mycelium SSH access policy\n\n[Timer]\nOnBootSec=2m\nOnUnitActiveSec=2m\nRandomizedDelaySec=30s\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n";
+    fs::write("/etc/systemd/system/mycelium-ssh-policy.service", unit)
+        .map_err(|error| format!("write SSH policy service: {error}"))?;
+    fs::write("/etc/systemd/system/mycelium-ssh-policy.timer", timer)
+        .map_err(|error| format!("write SSH policy timer: {error}"))?;
+    command("systemctl", &["daemon-reload"])?;
+    command(
+        "systemctl",
+        &["enable", "--now", "mycelium-ssh-policy.timer"],
+    )?;
+    Ok(vec![
+        "installed two-minute gossiped SSH policy reconciliation timer".into(),
+    ])
 }
 
 fn profile_path() -> PathBuf {
@@ -695,7 +963,7 @@ fn role_mappings(
             }
         }
     }
-    if mappings.is_empty() {
+    if mappings.is_empty() && !args.iter().any(|argument| argument == "--allow-empty") {
         return Err("SSH host bundle needs at least one resolved USER=ROLE mapping".into());
     }
     Ok(mappings)
@@ -1305,6 +1573,33 @@ mod tests {
             role_mappings(&args, &state).unwrap(),
             BTreeMap::from([("mames".into(), BTreeSet::from(["home-operator".into()]))])
         );
+    }
+
+    #[test]
+    fn host_policy_distinguishes_unconverged_from_intentionally_empty_access() {
+        let empty = serde_json::json!({"grants": [], "revocations": []});
+        assert!(!access_view_has_evidence(&empty));
+
+        let revoked = serde_json::json!({
+            "grants": [{
+                "active": false,
+                "record": {"statement": {
+                    "kind": "grant", "grant_id": "james", "principal": "mames",
+                    "serial": 2, "roles": ["home-operator"], "unix_users": ["mames"],
+                    "not_before": 1, "not_after": 9999999999u64
+                }},
+                "revoked_by": ["revoke-james"]
+            }],
+            "revocations": [{"record": {"statement": {
+                "kind": "revoke", "revocation_id": "revoke-james",
+                "grant_ids": ["james"], "principals": [], "serials": [],
+                "not_before": 1
+            }}}]
+        });
+        assert!(access_view_has_evidence(&revoked));
+        assert!(mappings_for_roles(&["home-operator".into()], &revoked)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

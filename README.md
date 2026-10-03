@@ -571,6 +571,22 @@ mycelium access ssh host-bundle --from-access --role fleet-admin \
   --path "$MYCELIUM_HOME/ssh/fleet-admin-bundle" --write
 ```
 
+Each Linux host can persist the roles it accepts and reconcile them from the
+same signed grants after gossip convergence:
+
+```sh
+sudo -E mycelium access ssh host-policy set \
+  --role home-operator --role network-admin \
+  --ca-public "$MYCELIUM_HOME/ssh/user_ca.pub" --write
+sudo -E mycelium access ssh host-policy reconcile --dry-run
+sudo -E mycelium access ssh host-policy install-timer --write
+```
+
+The timer runs every two minutes with a small herd-avoidance delay. It does not
+autostart a daemon as root. It consumes the existing user's converged,
+signature-verified access view, derives the KRL and personal account mappings,
+and reloads `sshd` only when the effective bundle changes.
+
 Each `--allow USER=ROLE` is both an authorization projection and a local
 account requirement. On Linux, `host-apply` creates a missing unprivileged
 account with a home directory, `/bin/bash`, a locked password, and no

@@ -153,6 +153,10 @@ usage:
   mycelium access ssh renewal-authorize --node NODE-ID --unix-user USER --role ROLE [--credential-ttl 7d] --write
   mycelium access ssh profile show
   mycelium access ssh profile set --principal ID --unix-user USER [--allow-user USER]... [--role ROLE]... --write
+  mycelium access ssh host-policy set --role ROLE... --ca-public PATH --write
+  mycelium access ssh host-policy status
+  mycelium access ssh host-policy reconcile (--dry-run | --write)
+  mycelium access ssh host-policy install-timer --write
   mycelium access oidc verify --issuer URL --audience ID --token-env VAR [--json]
   mycelium access oidc ssh-issue --issuer URL --audience ID --token-env VAR --public-key PATH --ca PRIVATE-KEY --path CERT [--grant ID] [--ttl 8h] --write [--json]
   mycelium access oidc gateway --listen 127.0.0.1:8787 --issuer URL --audience ID --client-id ID --client-secret-env VAR --callback-url HTTPS-URL --ca PRIVATE-KEY [--invite-store PATH] --write
