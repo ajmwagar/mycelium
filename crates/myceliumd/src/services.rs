@@ -103,18 +103,40 @@ fn evidence(service: &ServiceRecord) -> String {
 
 fn recognize(service: &ServiceRecord) -> Option<(String, Confidence)> {
     let evidence = evidence(service);
-    for kind in ["isochrone", "unibus", "mcp", "dcp", "adb"] {
-        if evidence
-            .split(|character: char| !character.is_ascii_alphanumeric())
-            .any(|token| token == kind)
-        {
+    let tokens = evidence
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .collect::<BTreeSet<_>>();
+    for (kind, aliases) in [
+        ("isochrone", &["isochrone"][..]),
+        ("unibus", &["unibus"][..]),
+        ("mcp", &["mcp"][..]),
+        ("dcp", &["dcp"][..]),
+        ("postgresql", &["postgres", "postgresql"][..]),
+        ("mysql", &["mysql", "mariadb"][..]),
+        ("sql-server", &["mssql", "sqlserver"][..]),
+        ("redis", &["redis"][..]),
+    ] {
+        if aliases.iter().any(|alias| tokens.contains(alias)) {
             return Some((kind.into(), Confidence::Strong));
         }
     }
-    // TCP/5555 is Android Debug Bridge's standard network endpoint. This is
-    // deliberately only derived confidence: another service can use the port.
-    (service.transport.eq_ignore_ascii_case("tcp") && service.port == 5555)
-        .then(|| ("adb".into(), Confidence::Derived))
+    if !service.transport.eq_ignore_ascii_case("tcp") {
+        return None;
+    }
+    if tokens.contains("adb") {
+        return Some(("adb".into(), Confidence::Strong));
+    }
+    // Standard ports are deliberately only derived confidence: another
+    // service can use them, and explicit service evidence always wins above.
+    match service.port {
+        5555 => Some(("adb".into(), Confidence::Derived)),
+        5432 => Some(("postgresql".into(), Confidence::Derived)),
+        3306 => Some(("mysql".into(), Confidence::Derived)),
+        1433 => Some(("sql-server".into(), Confidence::Derived)),
+        6379 | 6380 => Some(("redis".into(), Confidence::Derived)),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -143,6 +165,9 @@ mod tests {
             ("isochrone", Some("H.264"), 9443, "isochrone"),
             ("dcp", None, 9000, "dcp"),
             ("adb", None, 5555, "adb"),
+            ("postgres", None, 5433, "postgresql"),
+            ("unknown", Some("MariaDB server"), 3307, "mysql"),
+            ("redis", None, 6381, "redis"),
         ] {
             assert_eq!(
                 recognize(&service(name, product, port)).unwrap().0,
@@ -155,7 +180,14 @@ mod tests {
     fn adb_port_is_derived_and_unrelated_ports_are_ignored() {
         let (_, confidence) = recognize(&service("unknown", None, 5555)).unwrap();
         assert_eq!(confidence, Confidence::Derived);
+        assert_eq!(
+            recognize(&service("unknown", None, 6379)).unwrap(),
+            ("redis".into(), Confidence::Derived)
+        );
         assert!(recognize(&service("ssh", Some("OpenSSH"), 22)).is_none());
+        let mut udp_adb = service("adb", Some("adb"), 5353);
+        udp_adb.transport = "udp".into();
+        assert!(recognize(&udp_adb).is_none());
     }
 
     #[test]

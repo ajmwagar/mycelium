@@ -898,8 +898,9 @@ the provider-neutral `fpl-resource-observation` contract; Mycelium is one
 optional producer, and discovery never grants authority.
 
 Services are a separate projection of lightweight topology evidence. Mycelium
-currently recognizes explicit MCP, DCP, Unibus, Isochrone, and ADB service or
-product names; TCP port 5555 is treated only as derived-confidence ADB evidence.
+currently recognizes explicit MCP, DCP, Unibus, Isochrone, ADB, PostgreSQL,
+MySQL/MariaDB, SQL Server, and Redis service or product names. Standard TCP
+ports are treated only as derived-confidence evidence.
 Recognition performs no additional network I/O. Endpoints, protocols, formats,
 freshness, and provenance use the same provider-neutral observation envelope,
 while each protocol retains its own session behavior and authorization.
