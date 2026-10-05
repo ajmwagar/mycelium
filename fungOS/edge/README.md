@@ -80,10 +80,47 @@ The native fixture is Rust, not a substitute implementation of Unibus or Canvas:
 - The updated Mycelium daemon itself was installed through signed self-update.
 
 This proves the package transaction in the running persistent-root QEMU guest.
-Real Unibus/Canvas artifacts and their application-specific readiness contracts
-are the next integration step; neither application was installed by this test.
+That fixture did not install Unibus or Canvas; the subsequent native integration
+below is a separate test.
 This slice is Linux/systemd only. It does not yet provide a power-loss recovery
 journal, atomic multi-package rollout, or macOS launchd activation.
+
+## Native Canvas integration evidence, 2026-10-05
+
+The persistent amd64 QEMU guest now runs real Unibus, `canvas-linux` and Canvas.
+Canvas Linux owns Wayland/KMS directly, with Canvas on its `wayland-5` socket.
+The Xorg experiment is disabled; neither Xorg nor Weston runs in the session.
+
+- Built the compositor on Agora with `--no-default-features --features compositor`;
+  type checking passed, 36 tests passed and one live-session test was ignored.
+- Built the executable using `cargo zigbuild` for
+  `x86_64-unknown-linux-gnu.2.36`, not the build host's newer glibc.
+- Published and installed `canvas-linux` through signed Mycelium package
+  activation: digest `d3ad57a350f1704b3fa713c8da8a8140f234d1aa796c6beb83c5b174a6c13592`.
+  This was manual unbound activation; it is not an automatic compositor-health
+  certification. Application display verification was performed separately.
+- The compositor reported DRM output on `/dev/dri/card0` at 1280x800. A QEMU VNC
+  screenshot contained the Canvas clock, and the home-pi TV receiver contained
+  a fresh matching clock frame over the existing Unibus stream.
+- Rebooted the guest: Mycelium, Unibus, Canvas compositor and Canvas all returned
+  active; Canvas's structured inspect returned `outcome.status: ok`. Peer
+  certificate and machine-id digests were unchanged.
+- Restored the original peer configuration and manual application policy,
+  and removed the temporary package-signing private key from the guest.
+
+The build used an isolated Canvas source snapshot because the main checkout
+lacks the deployed native compositor. A missing `SocialFeed` renderer arm was
+made explicitly unsupported, matching the existing pending-renderer behavior.
+This source must be reconciled into the owning Canvas repository before a
+production Fab release; fungOS does not vendor or own the compositor source.
+The clock was a diagnostic command, not a configured default after reboot.
+
+Both amd64 rootfs variants were built and their SHA-256 files verified on Agora:
+display edge about 468 MiB, headless edge about 185 MiB (uncompressed tarballs).
+These contain Debian runtime dependencies, not signed first-party executables,
+identity, enrollment tokens or board boot firmware. The running QEMU experiment
+uses the earlier persistent base plus signed application installation; it is not
+yet a boot test of each newly built profile tarball.
 
 ## Boot security is a separate profile
 
