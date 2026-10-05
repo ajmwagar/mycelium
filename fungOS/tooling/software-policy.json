@@ -4,7 +4,7 @@
   "rules": [
     {
       "name": "explicit-oci-conversion-tooling",
-      "selector": { "all": [ "platform.linux", "arch.x86_64", "role.shroudoci" ] },
+      "selector": { "all": [ "platform.linux", "role.shroudoci" ] },
       "packages": [ { "name": "shroudoci", "channel": "fungos-tooling-test" } ]
     }
   ]

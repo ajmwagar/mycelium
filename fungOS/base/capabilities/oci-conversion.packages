@@ -2,4 +2,5 @@
 cpio
 skopeo
 squashfs-tools
+sudo
 umoci

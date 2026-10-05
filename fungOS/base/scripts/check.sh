@@ -49,7 +49,7 @@ if printf '%s\n' "$cloud" | grep -E '^(libgbm1|libwayland-server0|mesa-vulkan-dr
 fi
 edge=$("$base_dir/scripts/resolve-packages.sh" "$base_dir/profiles/edge.capabilities")
 tooling=$("$base_dir/scripts/resolve-packages.sh" "$base_dir/profiles/edge.capabilities" "$base_dir/../tooling/shroudoci.capabilities")
-for required in cpio skopeo squashfs-tools umoci; do
+for required in cpio skopeo squashfs-tools sudo umoci; do
   printf '%s\n' "$tooling" | grep -Fx "$required" >/dev/null || {
     echo "tooling missing converter dependency: $required" >&2; exit 1;
   }

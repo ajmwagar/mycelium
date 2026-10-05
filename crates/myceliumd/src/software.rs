@@ -883,7 +883,7 @@ mod tests {
     }
 
     #[test]
-    fn tooling_policy_is_explicit_amd64_and_manual() {
+    fn tooling_policy_is_explicit_linux_and_manual() {
         let policy: SoftwarePolicy = serde_json::from_str(include_str!(
             "../../../fungOS/tooling/software-policy.json"
         ))
@@ -896,9 +896,9 @@ mod tests {
             peer("mac", Platform::Darwin, "x86_64", &["role.shroudoci"]),
         ])
         .unwrap();
-        assert_eq!(assignments.len(), 1);
-        assert_eq!(assignments[0].package, "shroudoci");
-        assert_eq!(assignments[0].updates, UpdatePolicy::Manual);
+        assert_eq!(assignments.len(), 2);
+        assert!(assignments.iter().all(|assignment| assignment.package == "shroudoci"
+            && assignment.updates == UpdatePolicy::Manual));
     }
 
     #[test]
