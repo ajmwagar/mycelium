@@ -41,8 +41,8 @@ the applied file remains byte-identical to the reviewed plan.
 6. Boot OVMF/Q35 with KVM, 2 GiB RAM, the qcow2 disk, `genesis-tap`, MAC
    `52:54:00:12:34:56`, serial output, and network-first boot order.
 7. Success requires `NBP file downloaded successfully`, the Genesis HTTP boot
-   URL, `fungOS initramfs entering systemd`, and `FUNGOS_QEMU_BOOT_OK` in the
-   serial log.
+   URL, `fungOS initramfs entering systemd`, `FUNGOS_QEMU_NETWORK_OK` with a
+   global address, and `FUNGOS_QEMU_BOOT_OK` in the serial log.
 8. Construct a `ProxyDhcpObservation` from the applied bytes and run
    `genesis-dnsmasq verify`; all postconditions must pass.
 

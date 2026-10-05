@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+
+address=$(/usr/sbin/ip -o address show up scope global | /usr/bin/awk 'NR == 1 { print $4 }')
+[ -n "$address" ] || {
+  echo "fungOS QEMU birth has no global address" >&2
+  /usr/sbin/ip -brief address >&2
+  exit 1
+}
+
+echo "FUNGOS_QEMU_NETWORK_OK address=$address"
+echo "FUNGOS_QEMU_BOOT_OK"
+/usr/sbin/ip -brief address

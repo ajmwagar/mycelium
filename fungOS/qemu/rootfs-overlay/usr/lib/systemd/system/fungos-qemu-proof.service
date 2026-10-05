@@ -1,10 +1,11 @@
 [Unit]
 Description=Confirm the first isolated fungOS boot
-After=network.target
+Wants=network-online.target
+After=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/bin/sh -c 'echo FUNGOS_QEMU_BOOT_OK; /usr/sbin/ip -brief address'
+ExecStart=/usr/libexec/fungos-qemu-proof
 StandardOutput=journal+console
 StandardError=journal+console
 RemainAfterExit=yes

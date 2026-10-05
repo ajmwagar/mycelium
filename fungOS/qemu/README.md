@@ -12,7 +12,9 @@ serves the iPXE scripts, kernel, and initramfs over HTTP.
 
 `rootfs-overlay/init` is PID 1 only long enough to mount the kernel filesystems
 and exec the base image's systemd. The proof service emits
-`FUNGOS_QEMU_BOOT_OK` to the serial console after `network-online.target`.
+`FUNGOS_QEMU_NETWORK_OK address=...` and `FUNGOS_QEMU_BOOT_OK` only after
+`network-online.target` and a global address. A boot without userspace network
+convergence fails loudly.
 The initramfs builder adds the host's statically linked BusyBox only as the
 early `/init` interpreter; it is not installed into the fungOS base image.
 
