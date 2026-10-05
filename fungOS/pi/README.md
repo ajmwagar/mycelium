@@ -1,0 +1,144 @@
+# fungOS on Raspberry Pi 3B+
+
+This first SD-card target assembles the existing **arm64 headless-edge** Debian
+rootfs, the official Pi 64-bit kernel and matching modules, and a statically
+linked Mycelium CLI. It is a wired-Ethernet learning image, not a replacement for
+radioman-pi yet. No existing machine or SD card is modified by the builder.
+
+The first image is owner-personalized: `ajmwagar` uses the explicitly supplied
+operator **public** key and can sudo without a password. Root SSH, password SSH,
+and keyboard-interactive login are disabled. Possession of that private key
+therefore confers administrative access to this image; protect it accordingly.
+No shared password, private key, SSH host key, machine ID, mTLS identity, authority
+key, or pairing claim is included. SSH host keys and machine identity are generated
+by the existing base first-boot units. This is not an automatically trusted peer.
+
+## Build on Agora (not the Pi)
+
+Use a fresh output filename. The Linux host needs sudo, `dosfstools`, `e2fsprogs`,
+`util-linux`, `kmod`, `xz-utils`, `openssh-client`, `binutils`, and an AArch64 QEMU
+binfmt interpreter registered with the `F` flag. The build uses the rootfs's signed,
+pinned Debian snapshot to add sudo. Matching kernel modules are copied from the
+same pinned official firmware archive as the kernel, never from a different host.
+
+```sh
+sudo env MYCELIUM_SOURCE_REVISION=VERIFIED_SOURCE_COMMIT \
+  MYCELIUM_LOCKFILE_SHA256=VERIFIED_BUILD_LOCKFILE_SHA256 \
+  sh fungOS/pi/scripts/build.sh \
+  /absolute/path/fungos-headless-edge-arm64.tar ROOTFS_SHA256 \
+  /absolute/path/aarch64-unknown-linux-musl/mycelium MYCELIUM_SHA256 \
+  /absolute/path/operator.pub \
+  /absolute/path/fungos-headless-edge-pi3bplus.img
+```
+
+The builder verifies all input digests, static AArch64 ELF compatibility, one valid
+operator key, CLI claim-file/system-service support, and sudo policy syntax.
+It produces `.img.xz`, `.img.xz.sha256`, and `.img.manifest`. The manifest records
+the public-key fingerprint, firmware source pin, kernel version, and input hashes.
+Failed staging and partial image files are retained for diagnosis, not reused.
+The output is 2 GiB, with a 256 MiB FAT32 boot partition and an ext4 root partition.
+Remaining capacity on larger cards is intentionally not consumed automatically.
+
+For a read-only filesystem/layout/security inspection, decompress a copy to a
+regular file and run `sudo sh fungOS/pi/scripts/inspect.sh /absolute/path/copy.img`.
+It never accepts a block device. Do not interpret this as a physical boot test.
+
+The first current-CLI build used source commit
+`a4ad21dffbc37c308e244f54e98e8a75d9a2e7bb` in an isolated Agora snapshot.
+Its committed Cargo.lock did not satisfy Cargo's locked-resolution gate, so the
+lock was regenerated **offline in that snapshot only**, not in the checkout.
+Build-lock SHA-256:
+`3ad4cee47e0342af99326619adb0320f1ddebba3c979e2f110ea9418ee3a1a56`.
+This is recorded experimental build provenance, not a production release claim.
+
+The initial owner-personalized build is
+`fungos-headless-edge-pi3bplus-owner.img.xz` (about 101 MiB compressed, 2 GiB raw).
+Its SHA-256 is
+`7de69417da720730fd2dc094486ebaea1f4f5622dc10074854e7a85ebba1cb71`.
+Read-only FAT/ext4 filesystem checks, boot-file/module checks, blank-identity
+checks, operator-key permissions, sudo validation, and AArch64 CLI smoke tests
+passed on Agora. **No Raspberry Pi hardware boot has been observed yet.**
+
+## Flash and first boot
+
+1. Verify the compressed image SHA-256 against its sidecar.
+2. Use Raspberry Pi Imager's **Use custom** image option and select the `.img.xz`.
+   Select the spare 3B+ card carefully. Writing erases that card; do not select
+   radioman-pi's card or another disk. Do not enable Imager account/password
+   customization: this Debian image owns its bootstrap account.
+3. Put the card in the Pi 3B+, connect Ethernet, and use a suitable power supply.
+4. Look up its address in DHCP/Mycelium discovery. The initial hostname is
+   `fungos-pi`; no mDNS hostname promise is made.
+5. Connect with the operator key:
+
+   ```sh
+   ssh -i ~/.ssh/id_ed25519 ajmwagar@PI_LAN_IP
+   sudo systemctl --failed
+   uname -r
+   ip -br address
+   sudo journalctl -b -u ssh -u systemd-networkd --no-pager
+   ```
+
+Verify the SSH host fingerprint via a locally attached console on first use:
+`sudo ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`. Do not silently bypass
+host-key checking. The UART console is available for recovery, but no password
+login is enabled; if bootstrap access fails, repair the spare SD offline.
+
+## Join the existing mesh securely
+
+Issue a fresh **peer** claim on the authority with the correct site, role, TTL,
+and reachable rendezvous. Transfer it through this authenticated SSH connection,
+as an owner-only file, and use the existing CLI—not a Pi-specific enrollment
+protocol:
+
+```sh
+scp /private/path/pi.claim ajmwagar@PI_LAN_IP:/home/ajmwagar/pi.claim
+ssh ajmwagar@PI_LAN_IP
+chmod 600 "$HOME/pi.claim"
+sudo install -m 600 "$HOME/pi.claim" /root/pi.claim
+sudo mycelium setup --claim-file /root/pi.claim \
+  --path /var/lib/mycelium --system-service
+rm "$HOME/pi.claim"
+sudo env MYCELIUM_HOME=/var/lib/mycelium MYCELIUM_NO_AUTOSTART=1 \
+  mycelium daemon status
+sudo systemctl status mycelium --no-pager
+```
+
+`setup` consumes `/root/pi.claim` only after successful enrollment. The original
+owner copy should be removed after success. A failed claim remains for diagnosis;
+an expired claim must be reissued, not accepted with reduced checks. The existing
+first-contact adapter hook remains the boundary for a future physical-media or
+authenticated network-boot claim; this image does not install a dummy adapter or
+mark unprovisioned enrollment successful.
+
+## Scope and next gates
+
+- Hardware boot is **unverified until the real 3B+ boots**. An image inspection or
+  QEMU userspace smoke test is not Pi hardware validation.
+- This image includes Mycelium CLI, not a cloned enrolled daemon. Unibus binaries,
+  grants, and Canvas are not yet installed by this Pi adapter. The rootfs's
+  headless-edge profile supplies their runtime dependencies; signed package
+  activation is the next gate after real enrollment and hardware validation.
+- HDMI Canvas/KMS needs the separate edge target and Pi-specific compositor/GPU
+  tests. No Xorg or Weston is introduced here.
+- No Wi-Fi credential, Wi-Fi/Bluetooth firmware setup, automatic filesystem
+  expansion, LUKS/Tang/Clevis, STIG compliance, or Pi kernel auto-update is claimed.
+  The pinned 2025 Debian snapshot is a reproducible experiment baseline, **not a
+  currently patched production OS**; refresh/security assessment is a release gate.
+- Back up radioman-pi's card, configuration, identities and data before considering
+  a migration. Never duplicate an enrolled identity between the old and new card.
+
+## Source and license boundary
+
+The adapter is first-party MIT/Apache-2.0 code. The assembled distribution also
+contains third-party code with its own licenses: Linux is GPL-2.0, Debian packages
+retain copyright notices, and Pi boot blobs use `LICENCE.broadcom` (redistribution
+terms, not the first-party license). Both kernel and boot-blob license files are
+on the FAT partition. Kernel source corresponding to the binary is Raspberry Pi's
+Linux fork; production redistribution must preserve its GPL source obligations.
+
+Official references:
+
+- [Pi firmware archive and licensing](https://github.com/raspberrypi/firmware/blob/master/README.md)
+- [Pi boot configuration](https://www.raspberrypi.com/documentation/computers/config_txt.html)
+- [Pi kernel targets and sources](https://www.raspberrypi.com/documentation/computers/linux_kernel.html)

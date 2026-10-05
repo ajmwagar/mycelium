@@ -1,0 +1,6 @@
+# Pi 3B+ only: 64-bit Linux, wired networking, optional HDMI console.
+arm_64bit=1
+kernel=kernel8.img
+enable_uart=1
+gpu_mem=16
+disable_splash=1

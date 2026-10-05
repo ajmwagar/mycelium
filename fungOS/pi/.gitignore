@@ -1,0 +1,7 @@
+out/
+.work/
+*.img
+*.img.xz
+*.img.xz.sha256
+*.img.manifest
+*.claim
