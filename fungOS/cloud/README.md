@@ -49,3 +49,25 @@ and ingress with a documented rollback. Do not destroy/reimage existing
 Beachhead or Bob nodes as a bootstrap shortcut. Live cutover requires current
 inventory, verified backups, workload drains and explicit replacement capacity.
 Local QEMU workload proof precedes cloud image import and production cutover.
+
+## Initial staging evidence
+
+On 2026-10-05, Agora built and inspected the amd64 cloud runtime rootfs:
+`/home/ajmwagar/.cache/fungos-cloud.80lMDp/out/fungos-cloud-amd64.tar`
+(approximately 192 MiB), SHA-256
+`dc6696019fe8243104fa25837e9607b816c2ec227a1f3aba5af4a2acdf4a25c3`.
+Required base files and native workload executables passed checks in the
+assembled rootfs; machine-id is blank. This inherits the experimental pinned
+Debian snapshot from January 2025, not a currently patched production release.
+Refreshing and assessing the baseline is required before public release or
+production migration. There are no enrolled identities or application secrets.
+
+The existing Agora Shroud artifact was signed for the isolated
+`fungos-cloud-test` channel and activated in the current fungOS guest:
+`7ed370adcf8884214529756084b81a2e2be794cb9edc76bcda713f97764347a0`.
+Its loader smoke test and `--check-config` with an empty owned config directory
+passed. Metadata arrived through gossip; bytes were manually seeded. This is
+host-artifact staging, not a new source build, daemon readiness, or microVM
+execution proof. The existing guest exposes `svm` but lacks `/dev/kvm` and the
+cloud runtime packages; neither a Shroud daemon nor Fabd was started. The five
+existing edge services remain active, and Agora's existing Shroud is untouched.
