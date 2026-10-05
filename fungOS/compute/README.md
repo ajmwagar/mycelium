@@ -48,9 +48,26 @@ remain active. No CUDA device is attached and no model load was attempted.
 Current UMIE source was copied to an isolated Agora build snapshot; `cargo check
 -p umie-serve --locked` passed and its server tests passed (14 passed, one
 hardware/model-specific test ignored). The GNU glibc 2.36 release cross-build
-failed in OpenSSL header expansion. No new UMIE artifact was published or
-activated; resolve that toolchain/runtime compatibility before calling this
-signed-package delivery complete. Host UMIE binaries are not silently substituted.
+now succeeds with UMIE's opt-in `onnx-dynamic` feature, architecture-specific
+OpenSSL headers and explicit `UMIE_CUDA_LIB_DIR`. The downloaded static ONNX
+archive needs glibc 2.38; it cannot be made compatible by selecting an older Zig
+target. See UMIE's `docs/linux-cross-build.md` for the reproducible build runbook.
+ONNX embeddings require a separately provisioned compatible runtime; the default
+UMIE build is unchanged. Host UMIE binaries are not silently substituted.
+
+The new executable requires at most glibc 2.35 and dynamically links cuBLAS 12
+(plus libc/libm/the loader), without a GNU C++ runtime dependency. Dynamic-mode
+tests passed: five embedding tests and fourteen server tests, with two
+hardware/model-specific tests ignored. This is not GPU/model readiness evidence.
+
+QEMU loader smoke succeeded with the candidate at `/tmp/umie-cross-build-test`
+and private CUDA 12.4 cuBLAS libraries under
+`/opt/fungos-compute/cuda-loader-test`; `ldd` resolves every dependency and the
+executable returns its normal usage response. These libraries are experiment
+dependencies, not part of the public base image. Candidate SHA-256:
+`fe3c524204956751dc9f1a075de55cf217d1af19689b98eba2cc3b251221fbdd`.
+Signed publication has not been confirmed: the Neo daemon's publish RPC did
+not return. The candidate is not an activated Mycelium-managed release yet.
 
 The compute policy test confirms GPU presence alone selects neither package,
 and explicit UMIE/Shroud roles retain manual updates. Shroud host adoption and
