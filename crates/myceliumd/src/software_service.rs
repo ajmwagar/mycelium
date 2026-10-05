@@ -437,6 +437,9 @@ fn http_json_exchange(
                     .send()
                     .await?
                     .error_for_status()?;
+                if !response.status().is_success() {
+                    return Err("HTTP health reply must be successful without redirects".into());
+                }
                 let mut bytes = Vec::new();
                 while let Some(chunk) = response.chunk().await? {
                     if bytes.len() + chunk.len() > 256 * 1024 {
@@ -609,6 +612,41 @@ mod tests {
     }
 
     #[test]
+    fn http_health_bounds_silent_and_oversized_responses() {
+        for oversized in [false, true] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0; 8192];
+                stream.read(&mut request).unwrap();
+                if oversized {
+                    let body = vec![b' '; 256 * 1024 + 1];
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(&body);
+                } else {
+                    std::thread::sleep(Duration::from_millis(200));
+                }
+            });
+            let started = Instant::now();
+            assert!(http_json_exchange(
+                address,
+                "/infer".into(),
+                serde_json::json!({}),
+                BTreeMap::from([("/answer".into(), serde_json::json!("on"))]),
+                if oversized { 1000 } else { 50 }
+            )
+            .is_err());
+            assert!(started.elapsed() < Duration::from_secs(2));
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
     fn http_health_does_not_follow_redirect_or_accept_http_failure() {
         for status in [
             "302 Found\r\nLocation: http://192.0.2.1/",
@@ -622,7 +660,7 @@ mod tests {
                 stream.read(&mut request).unwrap();
                 write!(
                     stream,
-                    "HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    "HTTP/1.1 {status}\r\nContent-Length: 15\r\nConnection: close\r\n\r\n{{\"answer\":\"on\"}}"
                 )
                 .unwrap();
             });
