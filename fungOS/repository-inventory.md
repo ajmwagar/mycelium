@@ -29,7 +29,7 @@ that a private repository is unlicensed.
 | Inference gateway | [`FuturePresentLabs/bifrost`](https://github.com/FuturePresentLabs/bifrost) | Private | Not declared at repository root | Its vendored FPL SDK declares BUSL-1.1, which does not establish Bifrost's license. |
 | Heterogeneous inference engine | [`FuturePresentLabs/umie`](https://github.com/FuturePresentLabs/umie) | Private | Apache-2.0 | License already matches the reusable-substrate strategy; visibility is the remaining publication decision. |
 | Compute scheduling and routing | [`FuturePresentLabs/yggdrasil`](https://github.com/FuturePresentLabs/yggdrasil) | Private | MIT | License already matches the reusable-substrate strategy; visibility is the remaining publication decision. |
-| MicroVM workload runtime | [`FuturePresentLabs/shroud`](https://github.com/FuturePresentLabs/shroud) | Private | Mixed: GPL-3.0-or-later core, MIT deploy client | GitHub reports `Other`. Component boundaries need to remain explicit. |
+| MicroVM workload runtime | [`FuturePresentLabs/shroud`](https://github.com/FuturePresentLabs/shroud) | Private | GPL-3.0-or-later repository default; MIT deploy client | The root license is GPL-3.0-or-later, `shroud-deploy` and `shroud-vpc` declare it explicitly, and `shroud-deploy-client` has its own MIT license. Other workspace crates omit package-level declarations and should be treated as covered by the root license unless clarified. |
 | Older/alternate Shroud repository | [`ajmwagar/shroud`](https://github.com/ajmwagar/shroud) | Private | Other/mixed | Duplicate name and overlapping description; establish the canonical upstream before fungOS references Shroud. |
 | Canvas compositor and Dock product | [`FuturePresentLabs/dock`](https://github.com/FuturePresentLabs/dock) | Private | Proprietary | Canvas currently exists as crates inside Dock and inherits its proprietary workspace license. Extract public Canvas contracts or crates before calling Canvas an open primitive. |
 | Voice/assistant application | [`FuturePresentLabs/JARVIS`](https://github.com/FuturePresentLabs/JARVIS) | Private | Mixed/unclear | `jarvis-dsp` declares MIT OR Apache-2.0; no repository-wide declaration was found. Product application, not required substrate. |
@@ -68,7 +68,8 @@ branding repositories create more confusion than discoverability.
    proprietary license. Public contracts can be extracted without forcing the
    entire product open.
 4. **Resolve the two Shroud repositories.** Pick one canonical implementation and
-   document whether GPL core plus MIT client remains the intended split.
+   document whether a GPL repository with a separately MIT-licensed deployment
+   client remains the intended split. Add explicit license metadata to every crate.
 5. **Add missing root license files.** DCP is public and locally declares a dual
    license but GitHub cannot detect it. `agent-skills` needs an explicit repository
    policy. Private repositories marked "not declared" need a decision before any
