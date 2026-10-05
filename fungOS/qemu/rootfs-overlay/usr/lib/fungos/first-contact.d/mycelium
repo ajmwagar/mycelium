@@ -7,9 +7,7 @@ grep -qx 'PROFILE=fungos-qemu' "$environment" || {
   exit 1
 }
 
-# The claim has already been copied into tmpfs. Drop the read-only transport
-# before redemption so the guest no longer depends on attached secret media.
-umount /run/fungos-claim
+# The envelope service staged the claim in tmpfs and unmounted its transport.
 
 exec /usr/local/bin/mycelium setup \
   --claim-file /run/fungos-first-contact/claim \

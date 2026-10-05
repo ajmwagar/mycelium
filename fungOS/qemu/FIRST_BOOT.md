@@ -57,7 +57,46 @@ FUNGOS_QEMU_BOOT_OK
 This supersedes the earlier network caveat. A profile without a global
 userspace address now fails rather than producing a successful proof marker.
 
-## Cleanup result
+## One-time peer enrollment evidence
+
+The enrollment experiment subsequently booted with a static x86_64 musl
+Mycelium binary and an owner-only, read-only VirtIO claim envelope. A native
+Agora glibc binary was rejected by the Debian guest; the static binary was
+verified inside the Debian root before rebuilding the initramfs.
+
+The retained diagnostic initramfs digest is
+`8ce9ae7dd707f4ca60303ad5bb9887329938273c8d34549c5e4aeeadf56021da`.
+It includes a temporary diagnostic public SSH key and is not the default
+artifact in `first-boot.request.json`.
+
+The guest emitted:
+
+```text
+FUNGOS_QEMU_NETWORK_OK address=192.0.2.114/24
+FUNGOS_QEMU_BOOT_OK
+installed peer identity under /var/lib/mycelium
+started peer service from /etc/systemd/system/mycelium.service
+claimed peer invitation 77b6188e7b8f292d as fungos-qemu-01 with roles []
+```
+
+Both first-contact and Mycelium services were active. The staged claim was
+absent after successful redemption, the node private key was mode 0600, and
+the enrolled daemon returned 14 peer records when queried with
+`MYCELIUM_HOME=/var/lib/mycelium`.
+
+An initial cleanup implementation unmounted the envelope only inside the
+first-contact service's private mount namespace. The corrected staging script
+copies both claim and environment into tmpfs and unmounts in the mounting
+service itself. Executing that script in the live guest verified
+`ENVELOPE_STAGE_UNMOUNT_OK`; this correction has not yet had a fresh complete
+PXE boot.
+
+Enrollment identity is not the hostname: the certificate identifies
+`fungos-qemu-01`, but the base image still inherited the build host's hostname.
+Persistent root installation, hostname reconciliation, and signed system-service
+self-update activation remain unproven. No production update was published.
+
+## Initial boot cleanup result
 
 The QEMU process, both isolated dnsmasq processes, `genesisd`, `genesis-tap`,
 and `genesis0` were stopped or removed after evidence capture. The disposable
