@@ -34,7 +34,7 @@ done
 
 headless=$("$base_dir/scripts/resolve-packages.sh" "$base_dir/profiles/headless-edge.capabilities")
 cloud=$("$base_dir/scripts/resolve-packages.sh" "$base_dir/profiles/cloud.capabilities")
-for required in cpio dnsmasq-base e2fsprogs iptables procps sudo; do
+for required in cpio curl dnsmasq-base dnsmasq-utils e2fsprogs iptables procps sudo; do
   printf '%s\n' "$cloud" | grep -Fx "$required" >/dev/null || {
     echo "cloud missing workload runtime: $required" >&2; exit 1;
   }

@@ -1,0 +1,20 @@
+kind = "MicroVM"
+
+[metadata]
+name = "fungos-smoke"
+
+[spec]
+image = "prepared://fungos-smoke"
+
+[spec.resources]
+cpu = 1
+memoryMiB = 128
+
+[spec.networking]
+
+[spec.lifecycle]
+autostart = false
+deleteOnExit = false
+
+[spec.health]
+enabled = false
