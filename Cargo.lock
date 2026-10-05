@@ -880,6 +880,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fpl-boot-contract"
+version = "0.1.0"
+dependencies = [
+ "mycelium-network-types",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "fpl-resource-observation"
 version = "0.1.0"
 dependencies = [
@@ -1645,6 +1655,7 @@ name = "mycelium-core"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "fpl-boot-contract",
  "fpl-resource-observation",
  "indexmap",
  "mycelium-network-types",

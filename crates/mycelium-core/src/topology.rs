@@ -16,45 +16,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::net::IpAddr;
 
-pub use mycelium_network_types::{LinkDuplex, LinkMedium};
+pub use mycelium_network_types::{LinkDuplex, LinkMedium, MacAddress};
 use serde::{Deserialize, Serialize};
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct MacAddress(pub [u8; 6]);
-
-impl Serialize for MacAddress {
-    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
-        s.serialize_str(&self.to_string())
-    }
-}
-
-impl<'de> Deserialize<'de> for MacAddress {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
-        let s = String::deserialize(d)?;
-        MacAddress::parse(&s).ok_or_else(|| serde::de::Error::custom(format!("bad mac `{s}`")))
-    }
-}
-
-impl MacAddress {
-    pub fn parse(s: &str) -> Option<Self> {
-        let parts: Vec<&str> = s.split([':', '-']).collect();
-        if parts.len() != 6 {
-            return None;
-        }
-        let mut octets = [0u8; 6];
-        for (i, p) in parts.iter().enumerate() {
-            octets[i] = u8::from_str_radix(p, 16).ok()?;
-        }
-        Some(MacAddress(octets))
-    }
-}
-
-impl fmt::Display for MacAddress {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let [a, b, c, d, e, g] = self.0;
-        write!(f, "{a:02x}:{b:02x}:{c:02x}:{d:02x}:{e:02x}:{g:02x}")
-    }
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]

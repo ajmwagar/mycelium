@@ -1,0 +1,12 @@
+[package]
+name = "fpl-boot-contract"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Provider-neutral machine birth intent, profile, and receipt contracts"
+
+[dependencies]
+mycelium-network-types = { path = "../mycelium-network-types", features = ["serde"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true

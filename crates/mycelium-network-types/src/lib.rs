@@ -7,6 +7,64 @@
 //! maps, JSON, vendor commands, and reconciliation policy belong above this
 //! crate. All wire-visible enums have explicit representations.
 
+use core::fmt;
+
+/// Canonical link-layer identity shared by host, boot, and firmware contracts.
+///
+/// Its serde representation is the conventional lowercase colon-delimited
+/// string rather than an implementation-specific byte array.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct MacAddress(pub [u8; 6]);
+
+impl MacAddress {
+    pub fn parse(value: &str) -> Option<Self> {
+        let mut octets = [0_u8; 6];
+        let mut parts = value.split([':', '-']);
+        for octet in &mut octets {
+            *octet = u8::from_str_radix(parts.next()?, 16).ok()?;
+        }
+        if parts.next().is_some() {
+            return None;
+        }
+        Some(Self(octets))
+    }
+}
+
+impl fmt::Display for MacAddress {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let [a, b, c, d, e, f] = self.0;
+        write!(formatter, "{a:02x}:{b:02x}:{c:02x}:{d:02x}:{e:02x}:{f:02x}")
+    }
+}
+
+#[cfg(feature = "serde")]
+impl serde::Serialize for MacAddress {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for MacAddress {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct MacVisitor;
+
+        impl serde::de::Visitor<'_> for MacVisitor {
+            type Value = MacAddress;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a six-octet colon- or hyphen-delimited MAC address")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                MacAddress::parse(value).ok_or_else(|| E::custom(format_args!("bad mac `{value}`")))
+            }
+        }
+
+        deserializer.deserialize_str(MacVisitor)
+    }
+}
+
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
