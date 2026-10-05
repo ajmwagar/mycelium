@@ -44,7 +44,10 @@ later than in-place adoption and a verified VM experiment.
 ## Current experiment state
 
 The QEMU UMIE unit is installed but disabled; Unibus and Canvas's Unibus adapter
-remain active. No CUDA device is attached and no model load was attempted.
+remain active. A [temporary GPU handoff](qemu/GPU-HANDOFF.md) successfully loaded
+Laya and served three real GPU-backed decision requests alongside the edge
+services. The GPU has since been returned to Agora; the guest is back to its
+original no-GPU configuration. No automatic GPU allocation policy was introduced.
 Current UMIE source was copied to an isolated Agora build snapshot; `cargo check
 -p umie-serve --locked` passed and its server tests passed (14 passed, one
 hardware/model-specific test ignored). The GNU glibc 2.36 release cross-build
@@ -71,7 +74,8 @@ the authority-signed manifest through gossip. `releases seed` verified the
 uploaded candidate against that manifest, and `software activate umie` installed
 version 0.1.0 with the same digest under the managed `current` link. This was
 manual byte seeding, not evidence of automatic artifact fetching. The disabled
-UMIE service was not started; GPU, driver and model readiness are still pending.
+UMIE service was subsequently started and verified during the temporary handoff,
+then stopped before host recovery. It remains disabled after the experiment.
 
 The publication incident exposed an unresponsive local daemon, exhausted Neo
 disk space, and a startup ordering bug: saved-device reconnection ran before RPC
