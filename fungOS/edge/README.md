@@ -115,8 +115,14 @@ This source must be reconciled into the owning Canvas repository before a
 production Fab release; fungOS does not vendor or own the compositor source.
 The clock was a diagnostic command, not a configured default after reboot.
 
-Both amd64 rootfs variants were built and their SHA-256 files verified on Agora:
-display edge about 468 MiB, headless edge about 185 MiB (uncompressed tarballs).
+All four rootfs variants were built, inspected and their SHA-256 files verified
+on Agora (uncompressed tarballs):
+
+| Profile | amd64 | arm64 |
+| --- | ---: | ---: |
+| edge | 468 MiB | 483 MiB |
+| headless-edge | 185 MiB | 215 MiB |
+
 These contain Debian runtime dependencies, not signed first-party executables,
 identity, enrollment tokens or board boot firmware. The running QEMU experiment
 uses the earlier persistent base plus signed application installation; it is not
