@@ -65,3 +65,16 @@ real GPU update rollback. The native readiness units and bounded HTTP predicate
 have passed unit/configuration tests; those live GPU acceptance tests remain
 separate. Existing updater rollback tests exercise failed service recovery with
 recorded lifecycle fixtures, not a substitute for this hardware experiment.
+
+The guest subsequently activated signed Mycelium `0.1.11` on the isolated
+`fungos-qemu-test` channel and rebooted successfully with all five edge units
+active and no failed units. Installed SHA-256:
+`0b3d47fbaf32a39714c2bd7ae5a91e72cbf239d9068411ec80e7f7b501098b1a`.
+The manifest arrived through gossip; bytes were manually seeded after automatic
+download had not completed. This proves verified activation and reboot
+persistence, not automatic artifact fetching. The build used the prior validated
+experimental lockfile (`3ad4cee47e0342af99326619adb0320f1ddebba3c979e2f110ea9418ee3a1a56`)
+in an isolated Agora snapshot; the dirty workspace lockfile was not changed.
+UMIE remains disabled pending the next GPU handoff. A newly observed host
+`umie-taiga.service` is outside the original recorded drain list and was left
+running pending operator coordination.
