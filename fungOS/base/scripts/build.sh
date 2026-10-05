@@ -7,8 +7,8 @@ base_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 
 arch=${1:-}
 profile=${2:-base}
-case "$arch" in amd64|arm64) ;; *) echo "usage: $0 {amd64|arm64} [base|edge|headless-edge]" >&2; exit 2;; esac
-case "$profile" in base|edge|headless-edge) ;; *) echo "unsupported profile: $profile" >&2; exit 2;; esac
+case "$arch" in amd64|arm64) ;; *) echo "usage: $0 {amd64|arm64} [base|edge|headless-edge|cloud]" >&2; exit 2;; esac
+case "$profile" in base|edge|headless-edge|cloud) ;; *) echo "unsupported profile: $profile" >&2; exit 2;; esac
 
 command -v mmdebstrap >/dev/null || { echo "mmdebstrap is required" >&2; exit 1; }
 debian_keyring=/usr/share/keyrings/debian-archive-keyring.gpg

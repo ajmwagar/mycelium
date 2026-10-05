@@ -63,6 +63,21 @@ policy may select:
 GPU presence can derive accelerator eligibility, but it cannot derive trust or
 the Shroud role. Discovery proves availability; signed policy grants placement.
 
+## Cloud
+
+`fungOS-cloud` extends base with native workload runtime dependencies for Shroud
+and an optional separate Fab build controller. It does not inherit edge display
+or messaging packages and does not require a GPU. See the [cloud substrate
+boundary](cloud/README.md) for signed applications, KVM preflight and migration.
+
+```sh
+fungOS/base/scripts/build.sh amd64 cloud
+```
+
+This currently assembles a runtime rootfs, not a bootable DigitalOcean image.
+Beachhead and Bob remain owned by shared-infra's existing IaC resources; a
+cloud profile is not permission to destroy or reimage them.
+
 ## Delivery boundary
 
 Fab or another build provider produces immutable artifacts. Mycelium verifies,

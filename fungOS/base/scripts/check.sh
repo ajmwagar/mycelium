@@ -33,6 +33,20 @@ for required in ca-certificates systemd systemd-sysv iproute2 kmod systemd-resol
 done
 
 headless=$("$base_dir/scripts/resolve-packages.sh" "$base_dir/profiles/headless-edge.capabilities")
+cloud=$("$base_dir/scripts/resolve-packages.sh" "$base_dir/profiles/cloud.capabilities")
+for required in cpio dnsmasq-base e2fsprogs iptables procps sudo; do
+  printf '%s\n' "$cloud" | grep -Fx "$required" >/dev/null || {
+    echo "cloud missing workload runtime: $required" >&2; exit 1;
+  }
+done
+for package in $packages; do
+  printf '%s\n' "$cloud" | grep -Fx "$package" >/dev/null || {
+    echo "cloud failed to inherit base package: $package" >&2; exit 1;
+  }
+done
+if printf '%s\n' "$cloud" | grep -E '^(libgbm1|libwayland-server0|mesa-vulkan-drivers|weston|xserver-xorg-core)$' >/dev/null; then
+  echo "cloud includes display dependencies" >&2; exit 1
+fi
 edge=$("$base_dir/scripts/resolve-packages.sh" "$base_dir/profiles/edge.capabilities")
 for forbidden in weston xserver-xorg-core sway; do
   if printf '%s\n' "$edge" "$headless" | grep -Fx "$forbidden" >/dev/null; then

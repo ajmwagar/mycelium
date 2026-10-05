@@ -1,0 +1,20 @@
+[Unit]
+Description=fungOS Shroud workload substrate
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+StateDirectory=shroud
+StateDirectoryMode=0700
+UMask=0077
+# Workload role assignment is explicit; do not silently emulate missing KVM.
+ExecStartPre=/usr/bin/test -c /dev/kvm
+ExecStartPre=/usr/bin/test -c /dev/net/tun
+ExecStart=/var/lib/mycelium/software/shroud/current/shroud --config-dir /etc/shroud/vms --runtime-dir /var/lib/shroud --snapshot-dir /var/lib/shroud/snapshots --firecracker-bin /var/lib/mycelium/software/firecracker/current/firecracker --kernel-image /var/lib/shroud/kernels/vmlinux --no-autostart
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
