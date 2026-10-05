@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "defaults": { "updates": { "mode": "manual" } },
+  "rules": [
+    {
+      "name": "compute-inference",
+      "selector": { "all": [ "platform.linux", "role.umie" ] },
+      "packages": [ { "name": "umie", "channel": "fungos-compute-test" } ]
+    },
+    {
+      "name": "workload-substrate",
+      "selector": { "all": [ "platform.linux", "role.shroud" ] },
+      "packages": [ { "name": "shroud", "channel": "fungos-compute-test" } ]
+    }
+  ]
+}

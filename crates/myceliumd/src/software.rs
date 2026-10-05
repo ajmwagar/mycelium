@@ -853,6 +853,36 @@ mod tests {
     }
 
     #[test]
+    fn compute_policy_requires_explicit_roles_and_keeps_updates_manual() {
+        let policy: SoftwarePolicy =
+            serde_json::from_str(include_str!("../../../fungOS/compute/software-policy.json"))
+                .unwrap();
+        policy.validate().unwrap();
+        assert!(
+            plan(
+                &policy,
+                &[peer("gpu", Platform::Linux, "x86_64", &["resource.gpu"])]
+            )
+            .unwrap()
+            .is_empty()
+        );
+        let assignments = plan(
+            &policy,
+            &[peer(
+                "worker",
+                Platform::Linux,
+                "x86_64",
+                &["role.umie", "role.shroud"],
+            )],
+        )
+        .unwrap();
+        assert_eq!(assignments.len(), 2);
+        assert!(assignments.iter().all(|item| item.updates == UpdatePolicy::Manual));
+        assert!(assignments.iter().any(|item| item.package == "umie"));
+        assert!(assignments.iter().any(|item| item.package == "shroud"));
+    }
+
+    #[test]
     fn documented_policy_resolves_package_specific_updates() {
         let policy: SoftwarePolicy =
             serde_json::from_str(include_str!("../../../docs/examples/software-policy.json"))

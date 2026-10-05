@@ -1,0 +1,20 @@
+[Unit]
+Description=fungOS optional UMIE CUDA inference experiment
+After=network-online.target
+Wants=network-online.target
+# Staging is not proof that a passthrough device/driver is available.
+ConditionPathExists=/dev/nvidia0
+
+[Service]
+EnvironmentFile=/etc/fungos-compute/umie.env
+ExecStart=/var/lib/mycelium/software/umie/current/umie ${UMIE_MODEL_DIR} 127.0.0.1:8096
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
