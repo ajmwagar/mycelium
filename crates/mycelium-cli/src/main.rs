@@ -2502,6 +2502,7 @@ async fn activate_update(
 #[derive(Clone, Copy)]
 enum Supervisor {
     Systemd,
+    SystemdSystem,
     Launchd,
 }
 
@@ -2510,6 +2511,9 @@ impl Supervisor {
         let status = match self {
             Self::Systemd => std::process::Command::new("systemctl")
                 .args(["--user", "stop", "mycelium"])
+                .status(),
+            Self::SystemdSystem => std::process::Command::new("systemctl")
+                .args(["stop", "mycelium"])
                 .status(),
             Self::Launchd => std::process::Command::new("launchctl")
                 .args(["bootout", &format!("gui/{}/dev.fpl.mycelium", uid()?)])
@@ -2527,6 +2531,9 @@ impl Supervisor {
         let status = match self {
             Self::Systemd => std::process::Command::new("systemctl")
                 .args(["--user", "start", "mycelium"])
+                .status(),
+            Self::SystemdSystem => std::process::Command::new("systemctl")
+                .args(["start", "mycelium"])
                 .status(),
             Self::Launchd => std::process::Command::new("launchctl")
                 .args([
@@ -2568,6 +2575,18 @@ fn active_supervisor() -> Option<Supervisor> {
         if loaded {
             return Some(Supervisor::Systemd);
         }
+        // fungOS enrollment installs a system unit, not a login-session unit.
+        // Only select it when it manages this installation's executable.
+        let binary = myceliumd::home_dir().join("bin/mycelium");
+        let system_unit = std::process::Command::new("systemctl")
+            .args(["show", "mycelium", "--property=ExecStart", "--value"])
+            .output();
+        if system_unit.is_ok_and(|output| {
+            output.status.success()
+                && system_unit_matches_binary(&String::from_utf8_lossy(&output.stdout), &binary)
+        }) {
+            return Some(Supervisor::SystemdSystem);
+        }
     }
     let uid = uid().ok()?;
     if cfg!(target_os = "macos")
@@ -2579,6 +2598,16 @@ fn active_supervisor() -> Option<Supervisor> {
         return Some(Supervisor::Launchd);
     }
     None
+}
+
+fn system_unit_matches_binary(exec_start: &str, binary: &std::path::Path) -> bool {
+    let Some(binary) = binary.to_str() else {
+        return false;
+    };
+    exec_start.split(';').any(|field| {
+        field.trim().trim_start_matches('{').trim().strip_prefix("path=")
+            .is_some_and(|path| path.trim() == binary)
+    })
 }
 
 fn uid() -> Result<String, ClientError> {
@@ -4828,6 +4857,20 @@ fn render_tunnel_plan(plan: &serde_json::Value) -> Vec<String> {
 #[cfg(test)]
 mod ssh_command_tests {
     use super::*;
+
+    #[test]
+    fn system_update_supervisor_matches_only_its_installation() {
+        let binary = std::path::Path::new("/var/lib/mycelium/bin/mycelium");
+        assert!(system_unit_matches_binary(
+            "{ path=/var/lib/mycelium/bin/mycelium ; argv[]=/var/lib/mycelium/bin/mycelium _serve ; }",
+            binary,
+        ));
+        assert!(!system_unit_matches_binary(
+            "{ path=/other/bin/mycelium ; argv[]=/var/lib/mycelium/bin/mycelium _serve ; }",
+            binary,
+        ));
+        assert!(!system_unit_matches_binary("", binary));
+    }
 
     #[test]
     fn automatic_update_durations_are_explicit_and_bounded() {

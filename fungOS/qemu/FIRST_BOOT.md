@@ -96,6 +96,14 @@ Enrollment identity is not the hostname: the certificate identifies
 Persistent root installation, hostname reconciliation, and signed system-service
 self-update activation remain unproven. No production update was published.
 
+The CLI now recognizes a system Mycelium supervisor only when its `ExecStart`
+path matches the current installation. Compilation and the installation-match
+unit test pass; a signed activation and rollback test inside QEMU is still
+required. The disposable enrollment VM, isolated services and bridge were
+stopped, and its claim envelope was deleted after verification. The retained
+serial-log digest is
+`2739cbaee6cf755396d907763add5d3390926165ab5ec38bdbd9cc329737aea6`.
+
 ## Initial boot cleanup result
 
 The QEMU process, both isolated dnsmasq processes, `genesisd`, `genesis-tap`,
