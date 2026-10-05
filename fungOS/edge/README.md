@@ -128,6 +128,44 @@ identity, enrollment tokens or board boot firmware. The running QEMU experiment
 uses the earlier persistent base plus signed application installation; it is not
 yet a boot test of each newly built profile tarball.
 
+## Automatic applications and Unibus integration, 2026-10-05
+
+Installed [automatic policy](qemu/software-policy.automatic.json) in the running
+QEMU guest. The shared `mycelium-update.timer` is enabled; its native oneshot
+runs package reconciliation. Automatic activation advanced Canvas to `0.1.5`
+and Unibus router to `0.1.1`; both persisted `verified_service: true` with no
+error and returned `current`. These test versions republish the existing healthy
+bytes, not new upstream application changes. The earlier broken-application
+test established rollback; no new broken release was distributed to the fleet.
+
+Releases were signed on Neo using the existing fleet release authority, not
+a private signing key installed in the guest. The guest trusts its public key
+and receives signed manifests through peer gossip. Its additional seed uses
+Neo's certificate-valid address; a LAN address not present in the certificate
+was correctly rejected. Agora's installed CLI predates package support, so it
+remains a fallback seed, not the sole update source. Signatures and byte hashes
+remain mandatory. Automatic policy is scoped to this guest and test channel.
+
+The [Canvas Unibus adapter](qemu/canvas-edge.service) was installed through
+signed manual activation and registered as `fungos-canvas` with the local router
+at `127.0.0.1:18790`, advertising `fungos-qemu-screen`. Its initial artifact was
+copied to the content-addressed cache before activation; this is not evidence
+of automatic artifact fetching for that adapter. The adapter is not in the
+automatic policy until it exposes a bounded application-owned readiness check.
+The actor list is empty: registration does not grant remote command authority.
+This local adapter does not establish cross-site Unibus routing.
+
+Adding the adapter exposed a cold-boot directory race: it could create Canvas's
+control directory with permissions Canvas correctly rejected. Both units now
+use `UMask=0077`, and Canvas normalizes its owned runtime directories to `0700`
+before launching, matching the home-pi setup. The final reboot returned all five
+services active, retained the installed versions and enabled update timer, and
+Canvas inspect succeeded without a directory-repair diagnostic first.
+
+The compositor remains manually managed until output/renderer readiness exists.
+Do not infer compositor health from the Canvas app's inspect response alone.
+Boot-ready Pi firmware/kernel images remain a separate next slice.
+
 ## Boot security is a separate profile
 
 Genesis owns installation; system cryptsetup and Clevis own encrypted-root unlock;

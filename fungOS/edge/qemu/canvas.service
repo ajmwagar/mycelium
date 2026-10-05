@@ -4,6 +4,8 @@ After=canvas-compositor.service
 Requires=canvas-compositor.service
 
 [Service]
+UMask=0077
+ExecStartPre=/usr/bin/install -d -m 0700 /run/fungos-canvas/dock /run/fungos-canvas/dock/canvas
 ExecStart=/var/lib/mycelium/software/canvas/current/canvas
 Environment=WAYLAND_DISPLAY=/run/fungos-compositor/wayland-5
 Environment=WINIT_UNIX_BACKEND=wayland

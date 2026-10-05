@@ -1,0 +1,15 @@
+[Unit]
+Description=fungOS Canvas Unibus adapter
+After=canvas.service unibus-router.service
+Requires=canvas.service unibus-router.service
+
+[Service]
+UMask=0077
+ExecStart=/var/lib/mycelium/software/canvas-edge/current/canvas-edge /etc/fungos-edge/canvas-edge.json
+Environment=XDG_RUNTIME_DIR=/run/fungos-canvas
+Environment=HOME=/var/lib/fungos-edge
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
