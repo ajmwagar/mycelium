@@ -7,7 +7,11 @@ pub async fn run(args: &[String]) -> Result<Vec<String>, String> {
         let home = value(args, "--path")
             .map(expand_home)
             .unwrap_or_else(myceliumd::home_dir);
-        return crate::enroll::repair_peer_service(&home, value(args, "--site"));
+        return crate::enroll::repair_peer_service(
+            &home,
+            value(args, "--site"),
+            args.iter().any(|argument| argument == "--system-service"),
+        );
     }
     let claim_path = value(args, "--claim-file").map(expand_home);
     if value(args, "--claim").is_some() && claim_path.is_some() {
@@ -35,6 +39,7 @@ pub async fn run(args: &[String]) -> Result<Vec<String>, String> {
         let result = setup_peer(
             embedded.as_ref().expect("checked above"),
             value(args, "--path").map(expand_home),
+            args.iter().any(|argument| argument == "--system-service"),
         )
         .await;
         remove_consumed_claim(&result, claim_path.as_deref())?;
@@ -149,6 +154,7 @@ fn remove_consumed_claim<T>(result: &Result<T, String>, path: Option<&Path>) -> 
 async fn setup_peer(
     claim: &(String, String, String, crate::invite::InvitationKind),
     home: Option<PathBuf>,
+    system_service: bool,
 ) -> Result<Vec<String>, String> {
     let home = home.unwrap_or_else(myceliumd::home_dir);
     let staging = home.join("enrollment-staging");
@@ -204,7 +210,7 @@ async fn setup_peer(
         }
     }
     let ssh_certificate = home.join("ssh/user-cert.pub");
-    let request = vec![
+    let mut request = vec![
         "--gateway".into(),
         claim.0.clone(),
         "--claim".into(),
@@ -221,6 +227,9 @@ async fn setup_peer(
         path_string(&home)?,
         "--write".into(),
     ];
+    if system_service {
+        request.push("--system-service".into());
+    }
     let result = crate::oidc_gateway::redeem(&request).await;
     if result.is_ok() {
         persist_renewal_public_key(&ssh_public, &home)?;

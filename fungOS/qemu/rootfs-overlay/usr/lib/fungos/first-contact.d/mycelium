@@ -1,0 +1,17 @@
+#!/bin/sh
+set -eu
+
+environment=$1
+grep -qx 'PROFILE=fungos-qemu' "$environment" || {
+  echo "unexpected fungOS first-contact profile" >&2
+  exit 1
+}
+
+# The claim has already been copied into tmpfs. Drop the read-only transport
+# before redemption so the guest no longer depends on attached secret media.
+umount /run/fungos-claim
+
+exec /usr/local/bin/mycelium setup \
+  --claim-file /run/fungos-first-contact/claim \
+  --path /var/lib/mycelium \
+  --system-service

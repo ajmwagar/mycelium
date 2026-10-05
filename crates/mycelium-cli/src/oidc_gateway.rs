@@ -727,6 +727,7 @@ pub async fn redeem(args: &[String]) -> Result<Vec<String>, String> {
             &peer.ca_certificate,
             &peer.site,
             &peer.peers,
+            args.iter().any(|argument| argument == "--system-service"),
         )?;
         if !redeemed.certificate.is_empty() {
             let certificate_path =

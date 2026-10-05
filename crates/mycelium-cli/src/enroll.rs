@@ -320,6 +320,7 @@ pub(crate) fn install_peer_material(
     ca_pem: &str,
     site: &str,
     peers: &[String],
+    system_service: bool,
 ) -> Result<Vec<String>, String> {
     validate_label("site", site).map_err(|error| error.to_string())?;
     for peer in peers {
@@ -365,8 +366,9 @@ pub(crate) fn install_peer_material(
         &authority_keys,
         &release_keys,
         &access_keys,
+        system_service,
     )?;
-    start_peer_service(&service, home)?;
+    start_peer_service(&service, home, system_service)?;
     Ok(vec![
         format!("installed peer identity under {}", home.display()),
         format!("started peer service from {}", service.display()),
@@ -376,6 +378,7 @@ pub(crate) fn install_peer_material(
 pub(crate) fn repair_peer_service(
     home: &Path,
     site_override: Option<&str>,
+    system_service: bool,
 ) -> Result<Vec<String>, String> {
     for required in ["node.env", "pki/ca.pem", "pki/node.pem", "pki/node-key.pem"] {
         if !home.join(required).is_file() {
@@ -420,8 +423,16 @@ pub(crate) fn repair_peer_service(
     for peer in peers.split(',').filter(|peer| !peer.is_empty()) {
         validate_peer(peer).map_err(|error| error.to_string())?;
     }
-    let service = write_peer_service(home, site, peers, authority_keys, release_keys, access_keys)?;
-    start_peer_service(&service, home)?;
+    let service = write_peer_service(
+        home,
+        site,
+        peers,
+        authority_keys,
+        release_keys,
+        access_keys,
+        system_service,
+    )?;
+    start_peer_service(&service, home, system_service)?;
     Ok(vec![format!(
         "repaired and verified peer service from {}",
         service.display()
@@ -456,7 +467,27 @@ fn write_peer_service(
     authority_keys: &str,
     release_keys: &str,
     access_keys: &str,
+    system_service: bool,
 ) -> Result<PathBuf, String> {
+    if system_service {
+        if !cfg!(target_os = "linux") {
+            return Err("system peer service is supported only on Linux".into());
+        }
+        let output = Command::new("id")
+            .arg("-u")
+            .output()
+            .map_err(|error| format!("determine user id: {error}"))?;
+        if !output.status.success() || String::from_utf8_lossy(&output.stdout).trim() != "0" {
+            return Err("--system-service requires root".into());
+        }
+        let path = PathBuf::from("/etc/systemd/system/mycelium.service");
+        std::fs::write(
+            &path,
+            resolved_systemd(home).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| format!("write systemd system unit: {error}"))?;
+        return Ok(path);
+    }
     if cfg!(target_os = "macos") {
         let path = user_home()
             .map_err(|error| error.to_string())?
@@ -487,7 +518,7 @@ fn write_peer_service(
     }
 }
 
-fn start_peer_service(service: &Path, home: &Path) -> Result<(), String> {
+fn start_peer_service(service: &Path, home: &Path, system_service: bool) -> Result<(), String> {
     // A CLI-autostarted daemon has no enrolled environment and otherwise wins
     // the Unix socket race against the managed service.
     let _ = Command::new(
@@ -519,12 +550,9 @@ fn start_peer_service(service: &Path, home: &Path) -> Result<(), String> {
             return Err(format!("launchctl bootstrap exited with {status}"));
         }
     } else {
-        for args in [
-            &["--user", "daemon-reload"][..],
-            &["--user", "enable", "--now", "mycelium.service"][..],
-        ] {
+        for args in systemd_start_commands(system_service) {
             let status = Command::new("systemctl")
-                .args(args)
+                .args(*args)
                 .status()
                 .map_err(|error| format!("run systemctl: {error}"))?;
             if !status.success() {
@@ -552,6 +580,17 @@ fn start_peer_service(service: &Path, home: &Path) -> Result<(), String> {
             ));
         }
         std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+}
+
+fn systemd_start_commands(system_service: bool) -> &'static [&'static [&'static str]] {
+    if system_service {
+        &[&["daemon-reload"], &["enable", "--now", "mycelium.service"]]
+    } else {
+        &[
+            &["--user", "daemon-reload"],
+            &["--user", "enable", "--now", "mycelium.service"],
+        ]
     }
 }
 
@@ -784,5 +823,14 @@ mod tests {
             0o600
         );
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn system_service_uses_the_system_manager() {
+        assert_eq!(
+            systemd_start_commands(true),
+            &[&["daemon-reload"][..], &["enable", "--now", "mycelium.service"]]
+        );
+        assert_eq!(systemd_start_commands(false)[0], &["--user", "daemon-reload"]);
     }
 }

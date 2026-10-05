@@ -23,6 +23,13 @@ trap 'rm -rf "$work_dir"' EXIT INT TERM
 
 tar -xf "$rootfs_tar" -C "$work_dir"
 cp -a "$overlay_dir/." "$work_dir/"
+if [ -n "${MYCELIUM_BINARY:-}" ]; then
+  [ -x "$MYCELIUM_BINARY" ] || {
+    echo "MYCELIUM_BINARY is not executable: $MYCELIUM_BINARY" >&2
+    exit 1
+  }
+  install -m 0755 "$MYCELIUM_BINARY" "$work_dir/usr/local/bin/mycelium"
+fi
 cp "$busybox" "$work_dir/busybox"
 chmod 0755 "$work_dir/init"
 mkdir -p "$work_dir/etc/systemd/system/multi-user.target.wants"

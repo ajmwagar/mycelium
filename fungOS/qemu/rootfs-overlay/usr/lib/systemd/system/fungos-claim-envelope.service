@@ -1,0 +1,13 @@
+[Unit]
+Description=Mount the one-time fungOS QEMU claim envelope
+Requires=dev-disk-by\x2dlabel-FUNGOS_CLAIM.device
+After=dev-disk-by\x2dlabel-FUNGOS_CLAIM.device
+Before=fungos-first-contact.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/fungos-mount-claim-envelope
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

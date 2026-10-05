@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+
+mountpoint=/run/fungos-claim
+staging=/run/fungos-first-contact
+mkdir -p "$mountpoint"
+mount -o ro,nodev,nosuid,noexec /dev/disk/by-label/FUNGOS_CLAIM "$mountpoint"
+test -r "$mountpoint/claim"
+test -r "$mountpoint/first-contact.env"
+mkdir -p "$staging"
+install -m 0600 "$mountpoint/claim" "$staging/claim"
