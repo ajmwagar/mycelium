@@ -1,0 +1,26 @@
+[package]
+name = "genesisd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Standalone deterministic machine-birth manifest and artifact service"
+
+[dependencies]
+axum = "0.8"
+fpl-boot-contract = { path = "../fpl-boot-contract" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+
+[[bin]]
+name = "genesisd"
+path = "src/bin/genesisd.rs"
+
+[[bin]]
+name = "genesisctl"
+path = "src/bin/genesisctl.rs"
