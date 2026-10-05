@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "defaults": { "updates": { "mode": "manual" } },
+  "rules": [{
+    "name": "qemu-edge-update-probe",
+    "selector": { "all": ["host.fungos-qemu-01", "platform.linux"] },
+    "packages": [{
+      "name": "edge-update-probe",
+      "channel": "fungos-edge-test",
+      "updates": {
+        "mode": "automatic",
+        "minimum_cache_age_secs": 60,
+        "rollout_window_secs": 300,
+        "retry_backoff_secs": 300
+      }
+    }]
+  }]
+}

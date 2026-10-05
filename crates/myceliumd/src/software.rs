@@ -325,6 +325,11 @@ pub fn reconcile(
             continue;
         }
         if write {
+            if matches!(assignment.updates, UpdatePolicy::Automatic { .. })
+                && crate::software_service::binding(&manifest.name)?.is_none()
+            {
+                return Err(format!("automatic package {} has no locally authorized health/rollback service binding", manifest.name).into());
+            }
             activate(manifest)?;
         }
         statuses.push(status(
@@ -482,19 +487,76 @@ fn compare_versions(left: &str, right: &str) -> Ordering {
 }
 
 pub fn activate(manifest: &PackageManifest) -> Result<ActivatedPackage, AnyError> {
-    activate_from(manifest, &crate::artifacts_dir(), &crate::software_dir())
+    validate_label("package", &manifest.name)?;
+    let binding = crate::software_service::binding(&manifest.name)?;
+    let result = activate_transaction(
+        manifest,
+        &crate::artifacts_dir(),
+        &crate::software_dir(),
+        binding
+            .as_ref()
+            .map(|binding| binding as &dyn crate::software_service::Lifecycle),
+    );
+    let directory = crate::software_dir().join(&manifest.name);
+    std::fs::create_dir_all(&directory)?;
+    let temporary = directory.join(".last-activation.tmp");
+    std::fs::write(
+        &temporary,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "version": manifest.version, "digest": manifest.artifact_digest,
+            "verified_service": binding.is_some() && result.is_ok(),
+            "error": result.as_ref().err().map(ToString::to_string)
+        }))?,
+    )?;
+    std::fs::rename(temporary, directory.join("last-activation.json"))?;
+    result
 }
 
+#[cfg(test)]
 fn activate_from(
     manifest: &PackageManifest,
     artifacts: &Path,
     software: &Path,
+) -> Result<ActivatedPackage, AnyError> {
+    activate_transaction(manifest, artifacts, software, None)
+}
+
+fn activate_transaction(
+    manifest: &PackageManifest,
+    artifacts: &Path,
+    software: &Path,
+    lifecycle: Option<&dyn crate::software_service::Lifecycle>,
 ) -> Result<ActivatedPackage, AnyError> {
     manifest
         .verify()
         .map_err(|error| format!("package signature: {error}"))?;
     validate_label("package", &manifest.name)?;
     validate_label("version", &manifest.version)?;
+    let package_dir = software.join(&manifest.name);
+    std::fs::create_dir_all(&package_dir)?;
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(package_dir.join(".activation.lock"))?;
+    lock.try_lock()
+        .map_err(|_| "another activation is already running for this package")?;
+    let current = package_dir.join("current");
+    let previous = match std::fs::read_link(&current) {
+        Ok(previous) => Some(previous),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    if let Some(previous) = &previous {
+        let components: Vec<_> = previous.components().collect();
+        if components.len() != 2
+            || components[0].as_os_str() != "releases"
+            || !matches!(components[1], std::path::Component::Normal(_))
+        {
+            return Err("current package link is not an internal release".into());
+        }
+    }
     let artifact = artifacts.join(&manifest.artifact_digest);
     let bytes = std::fs::read(&artifact).map_err(|error| {
         format!(
@@ -513,22 +575,57 @@ fn activate_from(
         .join(&manifest.version);
     std::fs::create_dir_all(&release_dir)?;
     let executable = release_dir.join(&manifest.name);
-    let temporary = release_dir.join(format!(".{}.tmp-{}", manifest.name, std::process::id()));
-    std::fs::write(&temporary, bytes)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o755))?;
+    if executable.exists() {
+        if sha256_hex(&std::fs::read(&executable)?) != manifest.artifact_digest {
+            return Err(
+                "refusing to overwrite an immutable package version with different bytes".into(),
+            );
+        }
+    } else {
+        let temporary = release_dir.join(format!(".{}.tmp-{}", manifest.name, std::process::id()));
+        std::fs::write(&temporary, bytes)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o755))?;
+        }
+        std::fs::rename(&temporary, &executable)?;
     }
-    std::fs::rename(&temporary, &executable)?;
-    let package_dir = software.join(&manifest.name);
-    let current_tmp = package_dir.join(format!(".current-{}", std::process::id()));
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(Path::new("releases").join(&manifest.version), &current_tmp)?;
-    #[cfg(not(unix))]
-    return Err("package activation is not implemented on this platform".into());
-    let current = package_dir.join("current");
-    std::fs::rename(current_tmp, current)?;
+    let previous_digest = previous
+        .as_ref()
+        .map(|path| {
+            std::fs::read(package_dir.join(path).join(&manifest.name))
+                .map(|bytes| sha256_hex(&bytes))
+        })
+        .transpose()?;
+    let advance = || {
+        switch_current(
+            &package_dir,
+            Some(&Path::new("releases").join(&manifest.version)),
+        )
+    };
+    if let Some(lifecycle) = lifecycle {
+        lifecycle.preflight(&current.join(&manifest.name))?;
+        lifecycle.stop()?;
+        let applied = advance()
+            .and_then(|()| lifecycle.start())
+            .and_then(|()| lifecycle.verify(&manifest.artifact_digest));
+        if let Err(error) = applied {
+            lifecycle.stop().map_err(|rollback| {
+                format!(
+                    "activation failed: {error}; could not stop candidate for rollback: {rollback}"
+                )
+            })?;
+            switch_current(&package_dir, previous.as_deref())?;
+            if let Some(digest) = previous_digest {
+                lifecycle.start().and_then(|()| lifecycle.verify(&digest))
+                    .map_err(|rollback| format!("activation failed: {error}; previous link restored but recovery failed: {rollback}"))?;
+            }
+            return Err(format!("activation failed and previous version restored: {error}").into());
+        }
+    } else {
+        advance()?;
+    }
     Ok(ActivatedPackage {
         name: manifest.name.clone(),
         version: manifest.version.clone(),
@@ -536,6 +633,26 @@ fn activate_from(
         digest: manifest.artifact_digest.clone(),
         executable,
     })
+}
+
+fn switch_current(package_dir: &Path, target: Option<&Path>) -> Result<(), AnyError> {
+    let current = package_dir.join("current");
+    let Some(target) = target else {
+        if current.exists() || std::fs::symlink_metadata(&current).is_ok() {
+            std::fs::remove_file(current)?;
+        }
+        return Ok(());
+    };
+    let temporary = package_dir.join(format!(".current-{}", std::process::id()));
+    if std::fs::symlink_metadata(&temporary).is_ok() {
+        std::fs::remove_file(&temporary)?;
+    }
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(target, &temporary)?;
+    #[cfg(not(unix))]
+    return Err("package activation requires Unix".into());
+    std::fs::rename(temporary, current)?;
+    Ok(())
 }
 
 fn platform_name(platform: &Platform) -> &'static str {
@@ -547,6 +664,7 @@ fn platform_name(platform: &Platform) -> &'static str {
 
 fn validate_label(kind: &str, value: &str) -> Result<(), String> {
     if value.is_empty()
+        || matches!(value, "." | "..")
         || value.len() > 128
         || value
             .bytes()
@@ -767,5 +885,183 @@ mod tests {
         .unwrap();
         let assignments = plan(&policy, &[peer("node", Platform::Linux, "aarch64", &[])]).unwrap();
         assert_eq!(assignments[0].updates, UpdatePolicy::Manual);
+    }
+
+    struct NativeProbe {
+        healthy_digest: String,
+        calls: std::cell::RefCell<Vec<&'static str>>,
+    }
+
+    impl crate::software_service::Lifecycle for NativeProbe {
+        fn preflight(&self, _: &Path) -> Result<(), AnyError> {
+            self.calls.borrow_mut().push("preflight");
+            Ok(())
+        }
+        fn stop(&self) -> Result<(), AnyError> {
+            self.calls.borrow_mut().push("stop");
+            Ok(())
+        }
+        fn start(&self) -> Result<(), AnyError> {
+            self.calls.borrow_mut().push("start");
+            Ok(())
+        }
+        fn verify(&self, digest: &str) -> Result<(), AnyError> {
+            self.calls.borrow_mut().push("verify");
+            if digest == self.healthy_digest {
+                Ok(())
+            } else {
+                Err("deliberately unhealthy candidate".into())
+            }
+        }
+    }
+
+    fn activation_fixture() -> (PathBuf, PathBuf, PathBuf, PackageManifest, PackageManifest) {
+        let root = std::env::temp_dir().join(format!(
+            "mycelium-native-update-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let artifacts = root.join("artifacts");
+        let software = root.join("software");
+        std::fs::create_dir_all(&artifacts).unwrap();
+        let key = ed25519_dalek::SigningKey::from_bytes(&[19; 32]);
+        let sign = |version: &str, bytes: &[u8]| {
+            PackageManifest::sign(
+                &key,
+                "unibus".into(),
+                version.into(),
+                "test".into(),
+                "x86_64-unknown-linux-musl".into(),
+                bytes,
+            )
+            .unwrap()
+        };
+        let previous = sign("1.0.0", b"good");
+        let candidate = sign("1.1.0", b"bad");
+        std::fs::write(artifacts.join(&previous.artifact_digest), b"good").unwrap();
+        std::fs::write(artifacts.join(&candidate.artifact_digest), b"bad").unwrap();
+        (root, artifacts, software, previous, candidate)
+    }
+
+    #[test]
+    fn unhealthy_service_restores_previous_bytes_and_verifies_recovery() {
+        let (root, artifacts, software, previous, candidate) = activation_fixture();
+        activate_from(&previous, &artifacts, &software).unwrap();
+        let native = NativeProbe {
+            healthy_digest: previous.artifact_digest,
+            calls: Default::default(),
+        };
+        let error =
+            activate_transaction(&candidate, &artifacts, &software, Some(&native)).unwrap_err();
+        assert!(error.to_string().contains("previous version restored"));
+        assert_eq!(
+            std::fs::read(software.join("unibus/current/unibus")).unwrap(),
+            b"good"
+        );
+        assert_eq!(
+            *native.calls.borrow(),
+            [
+                "preflight",
+                "stop",
+                "start",
+                "verify",
+                "stop",
+                "start",
+                "verify"
+            ]
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn healthy_service_advances_only_after_native_verification() {
+        let (root, artifacts, software, previous, candidate) = activation_fixture();
+        activate_from(&previous, &artifacts, &software).unwrap();
+        let native = NativeProbe {
+            healthy_digest: candidate.artifact_digest.clone(),
+            calls: Default::default(),
+        };
+        activate_transaction(&candidate, &artifacts, &software, Some(&native)).unwrap();
+        assert_eq!(
+            std::fs::read(software.join("unibus/current/unibus")).unwrap(),
+            b"bad"
+        );
+        assert_eq!(
+            *native.calls.borrow(),
+            ["preflight", "stop", "start", "verify"]
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unhealthy_first_install_removes_candidate_link() {
+        let (root, artifacts, software, previous, candidate) = activation_fixture();
+        let native = NativeProbe {
+            healthy_digest: previous.artifact_digest,
+            calls: Default::default(),
+        };
+        assert!(activate_transaction(&candidate, &artifacts, &software, Some(&native)).is_err());
+        assert!(std::fs::symlink_metadata(software.join("unibus/current")).is_err());
+        assert_eq!(
+            *native.calls.borrow(),
+            ["preflight", "stop", "start", "verify", "stop"]
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn immutable_versions_and_activation_lock_prevent_overwrite() {
+        let (root, artifacts, software, previous, mut candidate) = activation_fixture();
+        activate_from(&previous, &artifacts, &software).unwrap();
+        candidate.version = previous.version;
+        let key = ed25519_dalek::SigningKey::from_bytes(&[19; 32]);
+        candidate = PackageManifest::sign(
+            &key,
+            candidate.name,
+            candidate.version,
+            candidate.channel,
+            candidate.target,
+            b"bad",
+        )
+        .unwrap();
+        assert!(activate_from(&candidate, &artifacts, &software)
+            .unwrap_err()
+            .to_string()
+            .contains("immutable"));
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(software.join("unibus/.activation.lock"))
+            .unwrap();
+        lock.try_lock().unwrap();
+        assert!(activate_from(&candidate, &artifacts, &software)
+            .unwrap_err()
+            .to_string()
+            .contains("already running"));
+        assert_eq!(
+            std::fs::read(software.join("unibus/current/unibus")).unwrap(),
+            b"good"
+        );
+        drop(lock);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn path_components_and_corrupted_artifacts_fail_before_native_stop() {
+        assert!(validate_label("name", "..").is_err());
+        assert!(validate_label("name", ".").is_err());
+        let (root, artifacts, software, previous, candidate) = activation_fixture();
+        activate_from(&previous, &artifacts, &software).unwrap();
+        std::fs::write(artifacts.join(&candidate.artifact_digest), b"tampered").unwrap();
+        let native = NativeProbe {
+            healthy_digest: previous.artifact_digest,
+            calls: Default::default(),
+        };
+        assert!(activate_transaction(&candidate, &artifacts, &software, Some(&native)).is_err());
+        assert!(native.calls.borrow().is_empty());
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

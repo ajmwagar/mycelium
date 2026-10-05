@@ -1,0 +1,10 @@
+[Unit]
+Description=Disposable fungOS edge package activation probe
+
+[Service]
+ExecStart=/var/lib/mycelium/software/edge-update-probe/current/edge-update-probe /run/fungos-edge-update-probe.sock
+Restart=no
+TimeoutStopSec=3
+
+[Install]
+WantedBy=multi-user.target

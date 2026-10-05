@@ -2127,8 +2127,12 @@ impl Daemon {
                         "software activation requires --write".into(),
                     ));
                 }
-                let activated = crate::software::activate(package)
-                    .map_err(|error| MyceliumError::Validation(error.to_string()))?;
+                let package = package.clone();
+                let activated =
+                    tokio::task::spawn_blocking(move || crate::software::activate(&package))
+                        .await
+                        .map_err(|error| MyceliumError::Validation(error.to_string()))?
+                        .map_err(|error| MyceliumError::Validation(error.to_string()))?;
                 to_value(activated).map_err(json_err)
             }
             Request::SoftwareStatus => to_value(crate::software::read_statuses()).map_err(json_err),
@@ -2145,12 +2149,17 @@ impl Daemon {
                     .into_iter()
                     .filter(|assignment| assignment.node_id == self.mesh.node_id())
                     .collect::<Vec<_>>();
-                let report = crate::software::reconcile(
-                    &assignments,
-                    &self.mesh.packages().await,
-                    &mycelium_peer_protocol::local_compatible_targets(),
-                    write,
-                )
+                let manifests = self.mesh.packages().await;
+                let report = tokio::task::spawn_blocking(move || {
+                    crate::software::reconcile(
+                        &assignments,
+                        &manifests,
+                        &mycelium_peer_protocol::local_compatible_targets(),
+                        write,
+                    )
+                })
+                .await
+                .map_err(|error| MyceliumError::Validation(error.to_string()))?
                 .map_err(|error| MyceliumError::Validation(error.to_string()))?;
                 to_value(report).map_err(json_err)
             }
@@ -2175,8 +2184,19 @@ impl Daemon {
                 );
                 crate::software::write_automatic_state(&state)
                     .map_err(|error| MyceliumError::Validation(error.to_string()))?;
-                let applied = crate::software::reconcile(&eligible, &manifests, &targets, true)
-                    .map_err(|error| MyceliumError::Validation(error.to_string()))?;
+                let activation_manifests = manifests.clone();
+                let activation_targets = targets.clone();
+                let applied = tokio::task::spawn_blocking(move || {
+                    crate::software::reconcile(
+                        &eligible,
+                        &activation_manifests,
+                        &activation_targets,
+                        true,
+                    )
+                })
+                .await
+                .map_err(|error| MyceliumError::Validation(error.to_string()))?
+                .map_err(|error| MyceliumError::Validation(error.to_string()))?;
                 let snapshot =
                     crate::software::reconcile(&assignments, &manifests, &targets, false)
                         .map_err(|error| MyceliumError::Validation(error.to_string()))?;

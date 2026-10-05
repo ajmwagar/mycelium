@@ -1,0 +1,12 @@
+{
+  "edge-update-probe": {
+    "unit": "edge-update-probe.service",
+    "readiness": {
+      "kind": "unix",
+      "path": "/run/fungos-edge-update-probe.sock",
+      "request": "health\n",
+      "expect_prefix": "READY "
+    },
+    "timeout_secs": 3
+  }
+}

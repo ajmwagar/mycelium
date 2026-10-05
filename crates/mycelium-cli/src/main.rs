@@ -1191,6 +1191,15 @@ async fn packages(args: &[String]) -> Result<Vec<String>, ClientError> {
 async fn software(args: &[String]) -> Result<Vec<String>, ClientError> {
     let flags = parse_flags(args);
     let action = flags.rest.first().map(String::as_str).unwrap_or("plan");
+    if action == "auto-run" {
+        match std::fs::metadata(myceliumd::software_policy_path()) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(vec!["no software policy configured".into()])
+            }
+            Err(error) => return Err(ClientError::Io(error)),
+            Ok(_) => {}
+        }
+    }
     let request = match action {
         "plan" => Request::SoftwarePlan {
             policy: flags
@@ -1230,6 +1239,35 @@ async fn software(args: &[String]) -> Result<Vec<String>, ClientError> {
     };
     let mut client = connect().await?;
     let value = client.call(&request).await?;
+    if matches!(
+        request,
+        Request::SoftwarePolicySet {
+            write: true,
+            dry_run: false,
+            ..
+        }
+    ) {
+        let policy: myceliumd::software::SoftwarePolicy =
+            serde_json::from_value(value.clone()).map_err(|error| err_usage(&error.to_string()))?;
+        if policy
+            .rules
+            .iter()
+            .flat_map(|rule| &rule.packages)
+            .any(|package| {
+                matches!(
+                    package.updates.as_ref().unwrap_or(&policy.defaults.updates),
+                    myceliumd::software::UpdatePolicy::Automatic { .. }
+                )
+            })
+        {
+            if !cfg!(target_os = "linux") {
+                return Err(err_usage(
+                    "native automatic package service activation currently requires Linux systemd",
+                ));
+            }
+            install_update_scheduler()?;
+        }
+    }
     if flags.json || action != "plan" {
         return Ok(vec![
             serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string())
@@ -2406,7 +2444,7 @@ fn systemd_update_service(
             "updater paths must not contain whitespace or systemd escape characters",
         ));
     }
-    Ok(format!("[Unit]\nDescription=Mycelium safe automatic update\nAfter=mycelium.service\n\n[Service]\nType=oneshot\nEnvironment=MYCELIUM_NO_AUTOSTART=1\nEnvironment=MYCELIUM_HOME={home}\nEnvironmentFile={home}/node.env\nExecStart={executable} update auto-run\n"))
+    Ok(format!("[Unit]\nDescription=Mycelium safe automatic update\nAfter=mycelium.service\n\n[Service]\nType=oneshot\nEnvironment=MYCELIUM_NO_AUTOSTART=1\nEnvironment=MYCELIUM_HOME={home}\nEnvironmentFile={home}/node.env\nExecStart={executable} update auto-run\nExecStart={executable} software auto-run\n"))
 }
 
 fn xml_update(value: &str) -> String {
@@ -2663,17 +2701,7 @@ fn active_supervisor() -> Option<Supervisor> {
 }
 
 fn system_unit_matches_binary(exec_start: &str, binary: &std::path::Path) -> bool {
-    let Some(binary) = binary.to_str() else {
-        return false;
-    };
-    exec_start.split(';').any(|field| {
-        field
-            .trim()
-            .trim_start_matches('{')
-            .trim()
-            .strip_prefix("path=")
-            .is_some_and(|path| path.trim() == binary)
-    })
+    myceliumd::software_service::exec_start_matches(exec_start, binary)
 }
 
 fn uid() -> Result<String, ClientError> {
