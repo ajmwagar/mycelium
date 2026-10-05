@@ -2,7 +2,8 @@
 
 ## Prerequisites
 
-Use a Debian host with `mmdebstrap`, `tar`, `sha256sum`, and `shellcheck`.
+Use a Debian-compatible host with `mmdebstrap`, `debian-archive-keyring`,
+`tar`, `sha256sum`, and `shellcheck`.
 Building `arm64` on another architecture also needs `qemu-user-static` and
 `binfmt-support`. The build requires root (or a working rootless mmdebstrap
 mode), outbound HTTPS, and enough free space for one root filesystem.

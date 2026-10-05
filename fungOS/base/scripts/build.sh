@@ -9,6 +9,11 @@ arch=${1:-}
 case "$arch" in amd64|arm64) ;; *) echo "usage: $0 {amd64|arm64}" >&2; exit 2;; esac
 
 command -v mmdebstrap >/dev/null || { echo "mmdebstrap is required" >&2; exit 1; }
+debian_keyring=/usr/share/keyrings/debian-archive-keyring.gpg
+[ -r "$debian_keyring" ] || {
+  echo "Debian archive keyring is required at $debian_keyring" >&2
+  exit 1
+}
 out_dir=${OUT_DIR:-"$base_dir/out"}
 work_dir=${WORK_DIR:-"$base_dir/.work/$arch"}
 rootfs="$work_dir/rootfs"
@@ -24,6 +29,7 @@ mirror="deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/$D
 
 mmdebstrap \
   --variant=minbase \
+  --keyring="$debian_keyring" \
   --architectures="$arch" \
   --include="$packages" \
   --aptopt='Acquire::Languages "none"' \

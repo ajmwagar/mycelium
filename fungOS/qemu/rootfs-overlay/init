@@ -1,0 +1,10 @@
+#!/busybox sh
+set -eu
+
+mount -t devtmpfs devtmpfs /dev
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t tmpfs tmpfs /run
+
+echo "fungOS initramfs entering systemd"
+exec /sbin/init

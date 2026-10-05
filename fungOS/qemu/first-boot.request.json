@@ -1,0 +1,52 @@
+{
+  "settings": {
+    "interface": "genesis0",
+    "server_address": "192.0.2.1",
+    "http_base_url": "http://192.0.2.1:8088",
+    "tftp_root": "/home/ajmwagar/.cache/fungos-qemu/tftp",
+    "first_stage_filename": "ipxe-amd64.efi"
+  },
+  "intent": {
+    "schema_version": 1,
+    "machine": "fungos-qemu-01",
+    "selector": {
+      "mac": "52:54:00:12:34:56"
+    },
+    "profile": "fungos-qemu-amd64",
+    "mode": "install_once",
+    "network": "genesis-isolated",
+    "security": {
+      "secure_boot": "disabled"
+    },
+    "post_install": {
+      "enroll_mycelium": false
+    }
+  },
+  "profile": {
+    "schema_version": 1,
+    "id": "fungos-qemu-amd64",
+    "architecture": "amd64",
+    "firmware": "uefi",
+    "artifacts": {
+      "bootloader": {
+        "url": "tftp://192.0.2.1/ipxe-amd64.efi",
+        "sha256": "a44ca2737f3c534be9635d828b94035871ba5e3d777d41a6e86e3a5f099c7e5d"
+      },
+      "kernel": {
+        "url": "http://192.0.2.1:8088/v1/artifacts/7efd88a7facf80874d781ccb2c2421f0aaaa575e3b94760430619e826f490117",
+        "sha256": "7efd88a7facf80874d781ccb2c2421f0aaaa575e3b94760430619e826f490117"
+      },
+      "initrd": {
+        "url": "http://192.0.2.1:8088/v1/artifacts/fefc088a6f2f765b2d4d5d59fca4cee37b50344fecd1441837e8bde129d768c6",
+        "sha256": "fefc088a6f2f765b2d4d5d59fca4cee37b50344fecd1441837e8bde129d768c6"
+      }
+    },
+    "kernel_arguments": [
+      "console=ttyS0,115200n8",
+      "rdinit=/init",
+      "systemd.log_target=console",
+      "systemd.show_status=1",
+      "panic=-1"
+    ]
+  }
+}
