@@ -15,11 +15,18 @@ file alone is not a ready serving directory.
 
 UMIE's current Linux implementation requires CUDA. A VM without a passed-through
 GPU and matching NVIDIA driver/userspace is not an inference node. The device
-condition prevents an accidental restart loop; it is not a health predicate.
-The unit is staged disabled until the compute substrate is ready. Check
+readiness dependency loads matching installed modules and initializes device
+nodes with NVIDIA's native utility before UMIE starts. The unit is staged
+disabled until the compute substrate is ready. Check
 `/health`, `/v1/models` and a real inference request after model load. The current
 health response is not a bounded worker-liveness proof suitable for automatic
-updates; no automatic native binding is supplied yet.
+updates. The optional [local service binding](qemu/software-services.json)
+instead sends a bounded real decision request and requires the correct answer.
+Merge its `umie` entry into the owner-only `software-services.json`; never
+replace existing Canvas/Unibus bindings. This fixture is specific to the staged
+Laya model, not a generic promise about every UMIE model. Keep package activation
+manual until signed update and deliberate failure recovery have been verified
+on the actual compute guest.
 
 Shroud already fits the generic `packages publish --name shroud` path. Before
 adopting its native unit, establish a Shroud-owned drain and restart/recovery

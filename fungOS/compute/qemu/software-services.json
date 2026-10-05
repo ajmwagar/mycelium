@@ -1,0 +1,28 @@
+{
+  "umie": {
+    "unit": "umie.service",
+    "timeout_secs": 60,
+    "readiness": {
+      "kind": "http_json",
+      "address": "127.0.0.1:8096",
+      "path": "/v1/systemone",
+      "timeout_ms": 5000,
+      "request": {
+        "model": "convaiinnovations/laya",
+        "state": { "utterance": "Turn on the lights" },
+        "questions": {
+          "lighting": {
+            "type": "choice",
+            "instructions": "What lighting action is explicitly requested?",
+            "criteria": {
+              "none": "No lighting action.",
+              "on": "Turn on.",
+              "off": "Turn off."
+            }
+          }
+        }
+      },
+      "expect": { "/answers/lighting/choice": "on" }
+    }
+  }
+}

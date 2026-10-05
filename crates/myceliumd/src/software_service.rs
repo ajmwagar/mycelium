@@ -30,6 +30,15 @@ fn startup_timeout() -> u64 {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Readiness {
+    /// Local, bounded HTTP JSON application check. The operator supplies the
+    /// request and required response values, never a release publisher.
+    HttpJson {
+        address: SocketAddr,
+        path: String,
+        request: serde_json::Value,
+        expect: BTreeMap<String, serde_json::Value>,
+        timeout_ms: u64,
+    },
     /// A bounded newline-delimited JSON request and reply. JSON pointers name
     /// required values; this keeps application schemas out of the updater.
     UnixJson {
@@ -99,6 +108,29 @@ impl ServiceBinding {
             return Err("invalid native service binding".into());
         }
         let (request, prefix) = match &self.readiness {
+            Readiness::HttpJson {
+                address,
+                path,
+                request,
+                expect,
+                timeout_ms,
+            } => {
+                if !address.ip().is_loopback()
+                    || !path.starts_with('/')
+                    || path.starts_with("//")
+                    || path.len() > 256
+                    || path.bytes().any(|b| b.is_ascii_control())
+                    || !(1..=5000).contains(timeout_ms)
+                    || !request.is_object()
+                    || serde_json::to_vec(request)?.len() > 4096
+                    || expect.is_empty()
+                    || expect.len() > 16
+                    || expect.keys().any(|p| !p.starts_with('/') || p.len() > 256)
+                {
+                    return Err("invalid bounded local HTTP JSON health probe".into());
+                }
+                return Ok(());
+            }
             Readiness::UnixJson {
                 path,
                 request,
@@ -182,6 +214,19 @@ impl ServiceBinding {
         }
         let timeout = Duration::from_millis(250);
         match &self.readiness {
+            Readiness::HttpJson {
+                address,
+                path,
+                request,
+                expect,
+                timeout_ms,
+            } => http_json_exchange(
+                *address,
+                path.clone(),
+                request.clone(),
+                expect.clone(),
+                *timeout_ms,
+            ),
             Readiness::UnixJson {
                 path,
                 request,
@@ -226,7 +271,7 @@ impl ServiceBinding {
                     })
                     .collect()
             }
-            Readiness::Tcp { address, .. } => {
+            Readiness::Tcp { address, .. } | Readiness::HttpJson { address, .. } => {
                 let (file, encoded) = match address.ip() {
                     std::net::IpAddr::V4(ip) => {
                         ("tcp", format!("{:08X}", u32::from_ne_bytes(ip.octets())))
@@ -367,6 +412,52 @@ fn exchange(stream: &mut (impl Read + Write), request: &str, prefix: &str) -> Re
     Ok(())
 }
 
+fn http_json_exchange(
+    address: SocketAddr,
+    path: String,
+    request: serde_json::Value,
+    expect: BTreeMap<String, serde_json::Value>,
+    timeout_ms: u64,
+) -> Result<(), Error> {
+    // Lifecycle callers may already run within Tokio. Isolate the bounded HTTP
+    // runtime rather than nesting block_on in the daemon runtime.
+    std::thread::spawn(move || -> Result<(), Error> {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?
+            .block_on(async move {
+                let client = reqwest::Client::builder()
+                    .no_proxy()
+                    .redirect(reqwest::redirect::Policy::none())
+                    .timeout(Duration::from_millis(timeout_ms))
+                    .build()?;
+                let mut response = client
+                    .post(format!("http://{address}{path}"))
+                    .json(&request)
+                    .send()
+                    .await?
+                    .error_for_status()?;
+                let mut bytes = Vec::new();
+                while let Some(chunk) = response.chunk().await? {
+                    if bytes.len() + chunk.len() > 256 * 1024 {
+                        return Err("HTTP health reply exceeds bound".into());
+                    }
+                    bytes.extend_from_slice(&chunk);
+                }
+                let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+                if !expect
+                    .iter()
+                    .all(|(pointer, expected)| value.pointer(pointer) == Some(expected))
+                {
+                    return Err("HTTP health reply did not match required values".into());
+                }
+                Ok(())
+            })
+    })
+    .join()
+    .map_err(|_| "HTTP health probe thread panicked")?
+}
+
 fn needs_failed_reset(active_state: &str, result: &str) -> bool {
     active_state == "failed" || (!result.is_empty() && result != "success")
 }
@@ -431,6 +522,122 @@ fn json_exchange(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn http_health_checks_json_result_and_rejects_mismatch() {
+        for (reply, success) in [
+            ("{\"answer\":\"on\"}", true),
+            ("{\"answer\":\"off\"}", false),
+        ] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut request = [0; 8192];
+                stream.read(&mut request).unwrap();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                    reply.len()
+                )
+                .unwrap();
+            });
+            let expected = BTreeMap::from([("/answer".into(), serde_json::json!("on"))]);
+            assert_eq!(
+                http_json_exchange(
+                    address,
+                    "/infer".into(),
+                    serde_json::json!({}),
+                    expected,
+                    1000
+                )
+                .is_ok(),
+                success
+            );
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn http_health_rejects_remote_redirect_path_and_unbounded_deadline() {
+        let mut binding = ServiceBinding {
+            unit: "umie.service".into(),
+            user_manager: false,
+            timeout_secs: 60,
+            readiness: Readiness::HttpJson {
+                address: "127.0.0.1:8096".parse().unwrap(),
+                path: "/v1/systemone".into(),
+                request: serde_json::json!({}),
+                expect: BTreeMap::from([("/answer".into(), serde_json::json!("on"))]),
+                timeout_ms: 5000,
+            },
+        };
+        assert!(binding.validate().is_ok());
+        if let Readiness::HttpJson { address, .. } = &mut binding.readiness {
+            *address = "192.168.1.1:8096".parse().unwrap();
+        }
+        assert!(binding.validate().is_err());
+        if let Readiness::HttpJson { address, path, .. } = &mut binding.readiness {
+            *address = "127.0.0.1:8096".parse().unwrap();
+            *path = "//other-host".into();
+        }
+        assert!(binding.validate().is_err());
+        if let Readiness::HttpJson {
+            path, timeout_ms, ..
+        } = &mut binding.readiness
+        {
+            *path = "/infer".into();
+            *timeout_ms = 5001;
+        }
+        assert!(binding.validate().is_err());
+    }
+
+    #[test]
+    fn compute_binding_requires_real_inference() {
+        let bindings: BTreeMap<String, ServiceBinding> = serde_json::from_str(include_str!(
+            "../../../fungOS/compute/qemu/software-services.json"
+        ))
+        .unwrap();
+        let binding = &bindings["umie"];
+        binding.validate().unwrap();
+        assert!(
+            matches!(&binding.readiness, Readiness::HttpJson { path, expect, .. }
+            if path == "/v1/systemone" && expect.contains_key("/answers/lighting/choice"))
+        );
+    }
+
+    #[test]
+    fn http_health_does_not_follow_redirect_or_accept_http_failure() {
+        for status in [
+            "302 Found\r\nLocation: http://192.0.2.1/",
+            "503 Unavailable",
+        ] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0; 8192];
+                stream.read(&mut request).unwrap();
+                write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                )
+                .unwrap();
+            });
+            assert!(http_json_exchange(
+                address,
+                "/infer".into(),
+                serde_json::json!({}),
+                BTreeMap::from([("/answer".into(), serde_json::json!("on"))]),
+                1000
+            )
+            .is_err());
+            server.join().unwrap();
+        }
+    }
+
     #[test]
     fn rollback_clears_failure_counters_even_after_explicit_stop() {
         assert!(needs_failed_reset("inactive", "exit-code"));

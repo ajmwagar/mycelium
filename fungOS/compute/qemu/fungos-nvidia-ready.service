@@ -1,0 +1,17 @@
+[Unit]
+Description=Initialize the explicitly provisioned fungOS compute GPU
+Before=umie.service
+
+[Service]
+Type=oneshot
+# Driver/firmware provisioning remains an operator responsibility. depmod derives
+# the index from the modules installed for the running kernel; no host ABI guess.
+ExecStart=/usr/sbin/depmod -a
+ExecStart=/usr/sbin/modprobe nvidia
+ExecStart=/usr/sbin/modprobe nvidia_uvm
+# The native utility initializes device nodes and verifies a usable driver/GPU.
+ExecStart=/usr/bin/nvidia-smi -L
+TimeoutStartSec=60
+RemainAfterExit=yes
+UMask=0077
+

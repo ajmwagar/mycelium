@@ -1,9 +1,8 @@
 [Unit]
 Description=fungOS optional UMIE CUDA inference experiment
-After=network-online.target
+After=network-online.target fungos-nvidia-ready.service
 Wants=network-online.target
-# Staging is not proof that a passthrough device/driver is available.
-ConditionPathExists=/dev/nvidia0
+Requires=fungos-nvidia-ready.service
 
 [Service]
 EnvironmentFile=/etc/fungos-compute/umie.env
@@ -15,6 +14,7 @@ ProtectHome=true
 ProtectSystem=strict
 Restart=on-failure
 RestartSec=5
+TimeoutStartSec=60
 
 [Install]
 WantedBy=multi-user.target
