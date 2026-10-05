@@ -84,3 +84,31 @@ The guest cold-booted with UMIE enabled: `fungos-nvidia-ready` initialized the
 GPU without manual module commands, and all six edge/compute services were
 active. The real decision request selected `on` with probability `0.9543316`;
 NVIDIA reported approximately 956 MiB allocated before the request.
+
+## Live activation and rollback result
+
+The locally authorized inference binding was merged without replacing the
+existing Canvas/Unibus bindings. A deliberately invalid application (`false`,
+not UMIE) was signed as `0.1.2` on the isolated manual compute-test channel:
+`7faadececbd287e494595d6a8203bc521e4463c682a496569187a77e761156bc`.
+Activation failed its bounded native readiness check. The updater restored
+`releases/0.1.0`, verified its original executable digest, restarted UMIE, and
+passed the inference predicate. An independent HTTP request also returned the
+correct `on` answer after recovery. The five independent edge units stayed up.
+
+The healthy catalog head was then replaced with signed `0.1.3`:
+`9803585f3dee111367e867e83af582bd3397036a6538b94e799323664bc692dc`.
+Activation succeeded; installed digest and a correct `off` answer were checked
+separately, with approximately 1088 MiB GPU allocation. This candidate is a
+repackaging of the previously verified GNU executable with its `.comment`
+section removed, **not a new source/model build**. It exercises distinct-byte
+signed activation, not a claim about a new inference implementation. Metadata
+arrived through gossip and bytes were manually seeded after trust verification.
+
+The GPU was subsequently returned to Agora, including the newly authorized
+Taiga workload. Ornith and Taiga health endpoints and GPU allocations (9300 MiB
+and 148 MiB), NVENC process, registered GDM greeter, Surf service, and original
+PCI drivers were verified. The volatile NVIDIA udev override was removed,
+native rules reloaded, and recovery timer cancelled only after recovery.
+The guest returned to its original no-GPU configuration with five active edge
+units, no failed units, and UMIE disabled; healthy `0.1.3` remains installed.
