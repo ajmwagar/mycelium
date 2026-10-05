@@ -71,3 +71,20 @@ host-artifact staging, not a new source build, daemon readiness, or microVM
 execution proof. The existing guest exposes `svm` but lacks `/dev/kvm` and the
 cloud runtime packages; neither a Shroud daemon nor Fabd was started. The five
 existing edge services remain active, and Agora's existing Shroud is untouched.
+
+## Subsequent systemd and workload proof
+
+The guest now runs Shroud through the native systemd unit. Matching nested-KVM
+and bridge modules and the corrected runtime dependencies were provisioned;
+`dnsmasq-utils` and `curl` are required by the existing Shroud adapters.
+An isolated, prepared BusyBox microVM booted through Firecracker and printed
+its workload marker from the inner guest. Stop, host reboot, explicit restart
+and a second marker were verified; no workload autostart was enabled. Shroud
+and the five edge services recovered with no failed units. The smoke VM was
+stopped afterward; the host Shroud service remains enabled and running.
+
+See the [nested smoke runbook](qemu/README.md) for image provenance and exact
+commands. **No Mycelium runs inside workload microVMs.** Minimal runtime images
+and application/build tool images are prepared through Shroud's existing OCI
+and rootfs paths, not by cloning the managed fungOS host into every guest.
+Fabd and production migration remain separate follow-up work.

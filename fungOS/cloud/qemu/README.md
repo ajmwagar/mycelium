@@ -69,3 +69,9 @@ one vCPU, 128 MiB memory, and guest IP `172.16.0.100`. Its health checks are
 disabled for this finite smoke workload; reported `ready` is not an application
 health proof. All five independent edge units remained active. Config autostart
 is false, so rebooting the host must not spontaneously launch the test workload.
+
+Native stop succeeded. After reboot, `/dev/kvm` and all six systemd services
+returned, while the workload list was empty as intended. Explicitly starting
+the same microVM emitted the marker again; stopping it left no Firecracker
+process. No failed systemd units remained. Agora's host Shroud, GPU ownership,
+and production Beachhead/Bob resources were not changed by this test.
