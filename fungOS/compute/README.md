@@ -40,3 +40,18 @@ all group devices, verify VFIO and reset support, preserve recovery access,
 then supply the guest driver/CUDA runtime. Group membership alone is not
 proof of a working passthrough configuration. Physical PXE/reinstallation is
 later than in-place adoption and a verified VM experiment.
+
+## Current experiment state
+
+The QEMU UMIE unit is installed but disabled; Unibus and Canvas's Unibus adapter
+remain active. No CUDA device is attached and no model load was attempted.
+Current UMIE source was copied to an isolated Agora build snapshot; `cargo check
+-p umie-serve --locked` passed and its server tests passed (14 passed, one
+hardware/model-specific test ignored). The GNU glibc 2.36 release cross-build
+failed in OpenSSL header expansion. No new UMIE artifact was published or
+activated; resolve that toolchain/runtime compatibility before calling this
+signed-package delivery complete. Host UMIE binaries are not silently substituted.
+
+The compute policy test confirms GPU presence alone selects neither package,
+and explicit UMIE/Shroud roles retain manual updates. Shroud host adoption and
+drain semantics are still pending; Agora's existing daemon was not replaced.
