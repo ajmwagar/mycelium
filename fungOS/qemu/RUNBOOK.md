@@ -86,3 +86,51 @@ delete the envelope image once enrollment is verified. Treat the image as a
 secret until it is deleted, including after a failed boot. Peer state currently
 lives in the RAM root filesystem; disk installation and reboot persistence are
 subsequent steps.
+
+## TV console streaming on Agora-One
+
+The existing `unibus-qemu` adapter can stream the guest without installing
+Unibus or Canvas inside the base image. QEMU exposes loopback-only VNC on
+`127.0.0.1:5901` and its owner-local QMP socket at
+`/run/qemu-canvas-demo/demo.qmp`. The installed adapter configuration is
+`~/.config/unibus/qemu.json` on Agora-One; Unibus owns the media announcement
+and input boundary, while GStreamer sends NVENC H.264/MPEG-TS to the receiver.
+
+The 2026-10-05 display experiment uses the already verified kernel and base
+initramfs directly with QEMU `-kernel` and `-initrd`. This is a display test,
+not another PXE or enrollment proof. There is no claim envelope or writable
+system disk attached. Add `console=ttyS0,115200n8 console=tty0` to the kernel
+arguments to show the boot console in VNC while retaining serial evidence.
+The current image is a text-console base, not the future fungOS-edge desktop.
+
+On Agora-One, `fungos-qemu-tv.service` is a transient system unit running as
+`ajmwagar` with the supplementary `kvm` group; the user service manager did not
+have the newly granted KVM group. Its serial log is
+`~/.cache/fungos-qemu/tv-console.log`. `unibus-qemu.service` remains a transient
+user unit and advertises the existing `agora-qemu-demo` stream, preserving the
+receiver's source binding. VNC is not exposed to the LAN.
+
+On the home-pi receiver, use the compositor account (`ajm`), not a separate
+Mycelium-created SSH account:
+
+```sh
+echo 'workspace switch qemu' | canvasctl
+echo 'inspect' | canvasctl
+echo 'surfaces' | canvasctl
+```
+
+The installed `canvasctl` accepts commands on stdin. The documented positional
+form in the upstream QEMU demo is not accepted by this installed version.
+The selected workspace has a visible `agora-qemu-display` live-video surface.
+Verify advancing frames under `/run/user/1000/dock/canvas/video-frames` and
+the decoder process; an active producer alone does not prove receiver display.
+
+Stop this experiment without stopping unrelated services:
+
+```sh
+# On Agora-One; leaves the separately managed media adapter available.
+sudo systemctl stop fungos-qemu-tv
+```
+
+These transient units are not reboot-persistent. The experiment replaces the
+previous empty QEMU demo on this stream, not the TV's compositor or layout.
