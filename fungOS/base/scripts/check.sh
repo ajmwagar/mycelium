@@ -26,7 +26,7 @@ done <<EOF
 $packages
 EOF
 
-for required in ca-certificates systemd systemd-sysv iproute2 systemd-resolved openssh-server; do
+for required in ca-certificates systemd systemd-sysv iproute2 kmod systemd-resolved udev openssh-server; do
   printf '%s\n' "$packages" | grep -Fx "$required" >/dev/null || {
     echo "missing required package: $required" >&2; exit 1;
   }

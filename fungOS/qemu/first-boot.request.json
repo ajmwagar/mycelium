@@ -37,8 +37,8 @@
         "sha256": "7efd88a7facf80874d781ccb2c2421f0aaaa575e3b94760430619e826f490117"
       },
       "initrd": {
-        "url": "http://192.0.2.1:8088/v1/artifacts/fefc088a6f2f765b2d4d5d59fca4cee37b50344fecd1441837e8bde129d768c6",
-        "sha256": "fefc088a6f2f765b2d4d5d59fca4cee37b50344fecd1441837e8bde129d768c6"
+        "url": "http://192.0.2.1:8088/v1/artifacts/df5bb4f2ad56996ea5d26d0222888c29198e3029be24d5f5ba2ab008c424c23a",
+        "sha256": "df5bb4f2ad56996ea5d26d0222888c29198e3029be24d5f5ba2ab008c424c23a"
       }
     },
     "kernel_arguments": [

@@ -39,6 +39,24 @@ ran. Network convergence after userspace handoff remains a separate acceptance
 condition for the immediate Mycelium-enrollment slice; preboot networking and
 all Genesis transports were proven here.
 
+## Userspace network revalidation
+
+The stricter profile was rebuilt with explicit `udev` and `kmod` dependencies
+and booted again on 2026-10-04. Its base filesystem digest was
+`e8ea565ecc064ce49321a202a0f132ca40dc524fc86149a741cd7ed2dd2c63f5` and
+its initramfs digest was
+`df5bb4f2ad56996ea5d26d0222888c29198e3029be24d5f5ba2ab008c424c23a`.
+The guest renamed the VirtIO interface to `enp0s2`, acquired
+`192.0.2.112/24`, and emitted both required markers:
+
+```text
+FUNGOS_QEMU_NETWORK_OK address=192.0.2.112/24
+FUNGOS_QEMU_BOOT_OK
+```
+
+This supersedes the earlier network caveat. A profile without a global
+userspace address now fails rather than producing a successful proof marker.
+
 ## Cleanup result
 
 The QEMU process, both isolated dnsmasq processes, `genesisd`, `genesis-tap`,

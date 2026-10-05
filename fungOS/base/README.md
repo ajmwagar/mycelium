@@ -1,7 +1,8 @@
 # fungOS base image
 
 This directory builds the reference fungOS host filesystem: a small Debian
-`minbase` with systemd-networkd, SSH, trust roots, and deliberately narrow
+`minbase` with systemd-networkd, explicit udev/kmod hardware discovery, SSH,
+trust roots, and deliberately narrow
 integration points for enrollment and signed updates. It supports `amd64` and
 `arm64`; application, GPU, and board-specific packages belong in other
 profiles.
