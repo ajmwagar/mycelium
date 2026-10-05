@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "defaults": {
+    "updates": {
+      "mode": "automatic",
+      "minimum_cache_age_secs": 60,
+      "rollout_window_secs": 300,
+      "retry_backoff_secs": 300
+    }
+  },
+  "rules": [
+    {
+      "name": "qemu-edge",
+      "selector": { "all": [ "host.fungos-qemu-01", "platform.linux" ] },
+      "packages": [
+        { "name": "unibus-router", "channel": "fungos-edge-test" },
+        { "name": "canvas", "channel": "fungos-edge-test" }
+      ]
+    }
+  ]
+}

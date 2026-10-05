@@ -1,0 +1,30 @@
+{
+  "unibus-router": {
+    "unit": "unibus-router.service",
+    "timeout_secs": 15,
+    "readiness": {
+      "kind": "unix",
+      "path": "/run/fungos-unibus/health.sock",
+      "request": "health\n",
+      "expect_prefix": "READY unibus\n"
+    }
+  },
+  "canvas": {
+    "unit": "canvas.service",
+    "timeout_secs": 60,
+    "readiness": {
+      "kind": "unix_json",
+      "path": "/run/fungos-canvas/dock/canvas/control.sock",
+      "request": {
+        "schema_version": 1,
+        "request_id": "fungos-readiness",
+        "command": { "command": "inspect" }
+      },
+      "expect": {
+        "/schema_version": 1,
+        "/request_id": "fungos-readiness",
+        "/outcome/status": "ok"
+      }
+    }
+  }
+}

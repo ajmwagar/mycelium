@@ -1,0 +1,11 @@
+{
+  "installation_id": "fungos-qemu-edge",
+  "producer_id": "fungos-canvas",
+  "hub_endpoint": "127.0.0.1:18790",
+  "token_file": "/var/lib/fungos-edge/canvas.token",
+  "zones": [ "edge" ],
+  "capabilities": [ "canvas.display", "display" ],
+  "screen_anchors": [ "fungos-qemu-screen" ],
+  "schema_version": 2,
+  "actors": []
+}

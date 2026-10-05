@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "name": "qemu-edge",
+      "selector": {
+        "all": [ "host.fungos-qemu-01", "platform.linux" ]
+      },
+      "packages": [
+        { "name": "unibus-router", "channel": "fungos-edge-test" },
+        { "name": "canvas", "channel": "fungos-edge-test" }
+      ]
+    }
+  ]
+}

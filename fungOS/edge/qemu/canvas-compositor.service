@@ -1,0 +1,18 @@
+[Unit]
+Description=fungOS Canvas native Wayland/KMS compositor
+After=systemd-udev-settle.service fungos-qemu-display.service
+Requires=fungos-qemu-display.service
+
+[Service]
+ExecStart=/var/lib/mycelium/software/canvas-linux/current/canvas-linux desktop-compositor start
+Environment=XDG_RUNTIME_DIR=/run/fungos-compositor
+Environment=HOME=/var/lib/fungos-edge
+Environment=CANVAS_OUTPUT_MODE=1280x720
+RuntimeDirectory=fungos-compositor
+RuntimeDirectoryMode=0700
+StateDirectory=fungos-edge
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

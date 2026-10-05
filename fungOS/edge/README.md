@@ -4,6 +4,27 @@ The base image remains headless. Unibus and Canvas are optional edge application
 not base dependencies. Build pipelines produce their artifacts; Mycelium verifies,
 distributes and activates authorized updates. Applications keep their own protocols.
 
+## Native display and headless targets
+
+See [profile build commands](../profiles.md). Both edge variants support amd64
+and arm64 rootfs builds. Display edge uses **Canvas Linux itself** as the
+Wayland/KMS compositor; the separate iced Canvas application is a Wayland client.
+Do not introduce Xorg, Weston or Sway as a replacement compositor. Headless edge
+does not start either Canvas process and carries no display dependency set.
+
+The [QEMU compositor unit](qemu/canvas-compositor.service) launches the signed
+`canvas-linux` executable. Its source must include the `compositor` feature and
+`desktop-compositor start`; an older same-named binary is not equivalent. The
+home-pi deployment already uses this native path. QEMU configuration remains an
+experimental root-owned session and requires a kernel-matched DRM driver; do not
+copy that unit unchanged onto a Pi. Production edge needs a least-privilege seat.
+
+The application readiness checks below do not yet prove compositor scanout.
+Do not automatically activate compositor releases based solely on a Wayland
+socket: the compositor can legitimately run headless without a usable DRM output.
+Require an application-owned output/renderer health check before enabling that
+package's automatic activation policy.
+
 ## Implemented first slice
 
 Linux package activation can bind to an existing systemd service through

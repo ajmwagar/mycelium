@@ -1,0 +1,19 @@
+{
+  "installation_id": "fungos-qemu-edge",
+  "listen": "127.0.0.1:18790",
+  "nodes": [
+    {
+      "producer_id": "edge-health",
+      "token_file": "/var/lib/fungos-edge/health.token",
+      "zones": [ "health" ],
+      "capabilities": [ "health.probe" ]
+    },
+    {
+      "producer_id": "fungos-canvas",
+      "token_file": "/var/lib/fungos-edge/canvas.token",
+      "zones": [ "edge" ],
+      "capabilities": [ "canvas.display", "display" ],
+      "screen_anchors": [ "fungos-qemu-screen" ]
+    }
+  ]
+}

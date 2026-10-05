@@ -1,0 +1,26 @@
+[Unit]
+Description=fungOS QEMU Canvas experiment
+After=canvas-compositor.service
+Requires=canvas-compositor.service
+
+[Service]
+ExecStart=/var/lib/mycelium/software/canvas/current/canvas
+Environment=WAYLAND_DISPLAY=/run/fungos-compositor/wayland-5
+Environment=WINIT_UNIX_BACKEND=wayland
+UnsetEnvironment=DISPLAY
+Environment=XDG_RUNTIME_DIR=/run/fungos-canvas
+Environment=XDG_CONFIG_HOME=/var/lib/fungos-edge/config
+Environment=XDG_DATA_HOME=/var/lib/fungos-edge/data
+Environment=HOME=/var/lib/fungos-edge
+Environment=WGPU_BACKEND=vulkan
+Environment=LIBGL_ALWAYS_SOFTWARE=true
+Environment=CANVAS_CAPTURE_FRAME=1280x720
+Environment=CANVAS_WORKSPACE_STORE_PATH=/var/lib/fungos-edge/workspaces.json
+RuntimeDirectory=fungos-canvas
+RuntimeDirectoryMode=0700
+StateDirectory=fungos-edge
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

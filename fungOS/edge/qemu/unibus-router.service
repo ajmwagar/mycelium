@@ -1,0 +1,19 @@
+[Unit]
+Description=fungOS edge Unibus router
+After=network.target
+
+[Service]
+ExecStart=/var/lib/mycelium/software/unibus-router/current/unibus-router /etc/fungos-edge/hub.json
+Environment=UNIBUS_HEALTH_SOCKET=/run/fungos-unibus/health.sock
+Environment=UNIBUS_HEALTH_CLIENT=/etc/fungos-edge/health-client.json
+RuntimeDirectory=fungos-unibus
+RuntimeDirectoryMode=0700
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

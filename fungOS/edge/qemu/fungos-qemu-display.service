@@ -1,0 +1,9 @@
+[Unit]
+Description=Load matching display module for the fungOS QEMU experiment
+ConditionPathExists=!/dev/fb0
+Before=canvas-compositor.service
+
+[Service]
+Type=oneshot
+ExecStart=/sbin/insmod /usr/lib/fungos/qemu/bochs.ko.zst
+RemainAfterExit=yes

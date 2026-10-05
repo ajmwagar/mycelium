@@ -30,6 +30,13 @@ fn startup_timeout() -> u64 {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Readiness {
+    /// A bounded newline-delimited JSON request and reply. JSON pointers name
+    /// required values; this keeps application schemas out of the updater.
+    UnixJson {
+        path: PathBuf,
+        request: serde_json::Value,
+        expect: BTreeMap<String, serde_json::Value>,
+    },
     Unix {
         path: PathBuf,
         request: String,
@@ -92,6 +99,24 @@ impl ServiceBinding {
             return Err("invalid native service binding".into());
         }
         let (request, prefix) = match &self.readiness {
+            Readiness::UnixJson {
+                path,
+                request,
+                expect,
+            } => {
+                if !path.is_absolute()
+                    || !request.is_object()
+                    || serde_json::to_vec(request)?.len() > 4096
+                    || expect.is_empty()
+                    || expect.len() > 16
+                    || expect
+                        .keys()
+                        .any(|pointer| !pointer.starts_with('/') || pointer.len() > 256)
+                {
+                    return Err("invalid bounded JSON health probe".into());
+                }
+                return Ok(());
+            }
             Readiness::Unix {
                 path,
                 request,
@@ -157,6 +182,15 @@ impl ServiceBinding {
         }
         let timeout = Duration::from_millis(250);
         match &self.readiness {
+            Readiness::UnixJson {
+                path,
+                request,
+                expect,
+            } => {
+                let mut stream = std::os::unix::net::UnixStream::connect(path)?;
+                stream.set_nonblocking(true)?;
+                json_exchange(&mut stream, request, expect)
+            }
             Readiness::Unix {
                 path,
                 request,
@@ -182,7 +216,7 @@ impl ServiceBinding {
 
     fn owns_listener(&self, pid: &str) -> Result<bool, Error> {
         let inodes: Vec<String> = match &self.readiness {
-            Readiness::Unix { path, .. } => {
+            Readiness::Unix { path, .. } | Readiness::UnixJson { path, .. } => {
                 std::fs::read_to_string(format!("/proc/{pid}/net/unix"))?
                     .lines()
                     .filter_map(|line| {
@@ -280,7 +314,11 @@ impl Lifecycle for ServiceBinding {
         }
     }
     fn start(&self) -> Result<(), Error> {
-        if self.property("ActiveState")? == "failed" {
+        // Explicit stop can change failed to inactive without clearing Result
+        // or systemd's restart-rate counter. Reset before rollback recovery,
+        // but don't reset a never-started/unloaded unit (systemd rejects that).
+        let result = self.property("Result")?;
+        if needs_failed_reset(&self.property("ActiveState")?, &result) {
             self.action("reset-failed")?;
         }
         self.action("start")
@@ -329,9 +367,119 @@ fn exchange(stream: &mut (impl Read + Write), request: &str, prefix: &str) -> Re
     Ok(())
 }
 
+fn needs_failed_reset(active_state: &str, result: &str) -> bool {
+    active_state == "failed" || (!result.is_empty() && result != "success")
+}
+
+fn json_exchange(
+    stream: &mut (impl Read + Write),
+    request: &serde_json::Value,
+    expect: &BTreeMap<String, serde_json::Value>,
+) -> Result<(), Error> {
+    let deadline = Instant::now() + Duration::from_millis(250);
+    let mut bytes = serde_json::to_vec(request)?;
+    bytes.push(b'\n');
+    let mut written = 0;
+    let mut reply = Vec::new();
+    loop {
+        if Instant::now() >= deadline {
+            return Err("JSON health probe deadline exceeded".into());
+        }
+        if written < bytes.len() {
+            match stream.write(&bytes[written..]) {
+                Ok(0) => return Err("health socket closed while writing".into()),
+                Ok(count) => written += count,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                    ) => {}
+                Err(error) => return Err(error.into()),
+            }
+        } else {
+            let mut chunk = [0; 4096];
+            match stream.read(&mut chunk) {
+                Ok(0) => return Err("health socket closed before JSON reply".into()),
+                Ok(count) => {
+                    reply.extend_from_slice(&chunk[..count]);
+                    if reply.len() > 256 * 1024 {
+                        return Err("JSON health reply exceeds bound".into());
+                    }
+                    if let Some(end) = reply.iter().position(|byte| *byte == b'\n') {
+                        let value: serde_json::Value = serde_json::from_slice(&reply[..end])?;
+                        if !expect
+                            .iter()
+                            .all(|(pointer, expected)| value.pointer(pointer) == Some(expected))
+                        {
+                            return Err("JSON health reply did not match required values".into());
+                        }
+                        return Ok(());
+                    }
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                    ) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn rollback_clears_failure_counters_even_after_explicit_stop() {
+        assert!(needs_failed_reset("inactive", "exit-code"));
+        assert!(needs_failed_reset("inactive", "start-limit-hit"));
+        assert!(needs_failed_reset("failed", ""));
+        assert!(!needs_failed_reset("inactive", "success"));
+        assert!(!needs_failed_reset("inactive", ""));
+    }
+    #[test]
+    fn qemu_edge_bindings_are_valid_native_health_contracts() {
+        let bindings: BTreeMap<String, ServiceBinding> = serde_json::from_str(include_str!(
+            "../../../fungOS/edge/qemu/software-services.json"
+        ))
+        .unwrap();
+        assert_eq!(bindings.len(), 2);
+        for binding in bindings.values() {
+            binding.validate().unwrap();
+        }
+        let policy: crate::software::SoftwarePolicy = serde_json::from_str(include_str!(
+            "../../../fungOS/edge/qemu/software-policy.json"
+        ))
+        .unwrap();
+        assert_eq!(policy.rules[0].selector.all.len(), 2);
+        assert_eq!(policy.rules[0].packages.len(), 2);
+    }
+    #[test]
+    fn json_health_checks_application_result_not_just_a_listener() {
+        let request = serde_json::json!({"command": "inspect"});
+        let expect = BTreeMap::from([("/outcome/status".into(), serde_json::json!("ok"))]);
+        let mut good = std::io::Cursor::new(b"{\"outcome\":{\"status\":\"ok\"}}\n".to_vec());
+        // Duplex fixture keeps request writes separate from response reads.
+        struct Duplex<'a>(&'a mut std::io::Cursor<Vec<u8>>);
+        impl Read for Duplex<'_> {
+            fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+                self.0.read(bytes)
+            }
+        }
+        impl Write for Duplex<'_> {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        assert!(json_exchange(&mut Duplex(&mut good), &request, &expect).is_ok());
+        let mut bad = std::io::Cursor::new(b"{\"outcome\":{\"status\":\"error\"}}\n".to_vec());
+        assert!(json_exchange(&mut Duplex(&mut bad), &request, &expect).is_err());
+    }
     #[test]
     #[cfg(target_os = "linux")]
     fn readiness_requires_the_managed_process_to_own_the_listener() {
