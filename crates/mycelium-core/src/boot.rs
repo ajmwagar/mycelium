@@ -4,11 +4,347 @@
 //! routing, or execute Clevis: those belong to drivers and an explicitly
 //! write-gated enrollment workflow.
 
-use std::net::IpAddr;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    net::IpAddr,
+};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{ipv4_in_cidr, Segment, TopoNode, Topology};
+use crate::{canonical_digest, ipv4_in_cidr, MacAddress, Segment, TopoNode, Topology};
+
+pub const BOOT_CONTRACT_SCHEMA_VERSION: u32 = 1;
+
+/// Stable evidence used to associate a physical machine with a boot intent.
+/// At least one hardware identity must be present; a hostname alone is not a
+/// safe selector for unattended provisioning.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BootMachineSelector {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mac: Option<MacAddress>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_uuid: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tpm_public_key_digest: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BootIntentMode {
+    InstallOnce,
+    Always,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SecureBootPolicy {
+    Required,
+    Preferred,
+    Disabled,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TangPolicy {
+    pub threshold: usize,
+    pub endpoints: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BootSecurityPolicy {
+    pub secure_boot: SecureBootPolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tang: Option<TangPolicy>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BootPostInstall {
+    #[serde(default)]
+    pub enroll_mycelium: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mycelium_role: Option<String>,
+}
+
+/// Provider-neutral desired state for one machine's next network boot.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BootIntentV1 {
+    pub schema_version: u32,
+    pub machine: String,
+    pub selector: BootMachineSelector,
+    pub profile: String,
+    pub mode: BootIntentMode,
+    pub network: String,
+    pub security: BootSecurityPolicy,
+    #[serde(default)]
+    pub post_install: BootPostInstall,
+}
+
+impl BootIntentV1 {
+    pub fn validate(&self) -> Result<(), BootContractError> {
+        validate_version(self.schema_version)?;
+        require_text("machine", &self.machine)?;
+        require_text("profile", &self.profile)?;
+        require_text("network", &self.network)?;
+        if self.selector.mac.is_none()
+            && optional_text_is_empty(self.selector.system_uuid.as_deref())
+            && optional_text_is_empty(self.selector.tpm_public_key_digest.as_deref())
+        {
+            return Err(BootContractError::MissingMachineIdentity);
+        }
+        if let Some(digest) = &self.selector.tpm_public_key_digest {
+            validate_sha256("selector.tpm_public_key_digest", digest)?;
+        }
+        if let Some(tang) = &self.security.tang {
+            if tang.threshold == 0 || tang.threshold > tang.endpoints.len() {
+                return Err(BootContractError::InvalidTangThreshold {
+                    threshold: tang.threshold,
+                    endpoints: tang.endpoints.len(),
+                });
+            }
+            if tang.endpoints.iter().collect::<BTreeSet<_>>().len() != tang.endpoints.len() {
+                return Err(BootContractError::DuplicateTangEndpoint);
+            }
+            for endpoint in &tang.endpoints {
+                validate_endpoint("security.tang.endpoints", endpoint, &["http", "https"])?;
+            }
+        }
+        if self.post_install.mycelium_role.is_some() && !self.post_install.enroll_mycelium {
+            return Err(BootContractError::RoleWithoutEnrollment);
+        }
+        Ok(())
+    }
+
+    pub fn digest(&self) -> String {
+        canonical_digest(self)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BootFirmware {
+    Uefi,
+    Bios,
+    RaspberryPi,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BootArtifactKind {
+    Bootloader,
+    Kernel,
+    Initrd,
+    RootFilesystem,
+    Installer,
+    Signature,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BootArtifact {
+    pub url: String,
+    pub sha256: String,
+}
+
+/// Immutable profile data consumed by any provisioning implementation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BootProfileV1 {
+    pub schema_version: u32,
+    pub id: String,
+    pub architecture: String,
+    pub firmware: BootFirmware,
+    pub artifacts: BTreeMap<BootArtifactKind, BootArtifact>,
+    #[serde(default)]
+    pub kernel_arguments: Vec<String>,
+}
+
+impl BootProfileV1 {
+    pub fn validate(&self) -> Result<(), BootContractError> {
+        validate_version(self.schema_version)?;
+        require_text("id", &self.id)?;
+        require_text("architecture", &self.architecture)?;
+        if self.artifacts.is_empty() {
+            return Err(BootContractError::MissingArtifacts);
+        }
+        for (kind, artifact) in &self.artifacts {
+            let schemes: &[&str] = if *kind == BootArtifactKind::Bootloader {
+                &["http", "https", "tftp"]
+            } else {
+                &["http", "https"]
+            };
+            validate_endpoint("artifact.url", &artifact.url, schemes)?;
+            validate_sha256("artifact.sha256", &artifact.sha256)?;
+        }
+        if self
+            .kernel_arguments
+            .iter()
+            .any(|argument| argument.trim().is_empty())
+        {
+            return Err(BootContractError::EmptyField("kernel_arguments"));
+        }
+        Ok(())
+    }
+
+    pub fn digest(&self) -> String {
+        canonical_digest(self)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BootReceiptState {
+    Planned,
+    Booting,
+    Installed,
+    Enrolled,
+    Verified,
+    Failed,
+}
+
+/// Durable evidence from provisioning. It references immutable digests rather
+/// than embedding an intent or profile that could later diverge.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BootReceiptV1 {
+    pub schema_version: u32,
+    pub machine: String,
+    pub intent_digest: String,
+    pub profile_digest: String,
+    pub state: BootReceiptState,
+    pub observed_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mycelium_peer_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl BootReceiptV1 {
+    pub fn validate(&self) -> Result<(), BootContractError> {
+        validate_version(self.schema_version)?;
+        require_text("machine", &self.machine)?;
+        validate_sha256("intent_digest", &self.intent_digest)?;
+        validate_sha256("profile_digest", &self.profile_digest)?;
+        if self.state == BootReceiptState::Failed {
+            require_text("error", self.error.as_deref().unwrap_or_default())?;
+        } else if self.error.is_some() {
+            return Err(BootContractError::ErrorOnSuccessfulReceipt);
+        }
+        if matches!(
+            self.state,
+            BootReceiptState::Enrolled | BootReceiptState::Verified
+        ) {
+            require_text(
+                "mycelium_peer_id",
+                self.mycelium_peer_id.as_deref().unwrap_or_default(),
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn digest(&self) -> String {
+        canonical_digest(self)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BootContractError {
+    UnsupportedSchemaVersion(u32),
+    EmptyField(&'static str),
+    MissingMachineIdentity,
+    MissingArtifacts,
+    InvalidSha256(&'static str),
+    InvalidEndpoint { field: &'static str, value: String },
+    InvalidTangThreshold { threshold: usize, endpoints: usize },
+    DuplicateTangEndpoint,
+    RoleWithoutEnrollment,
+    ErrorOnSuccessfulReceipt,
+}
+
+impl std::fmt::Display for BootContractError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnsupportedSchemaVersion(version) => {
+                write!(f, "unsupported boot contract schema version {version}")
+            }
+            Self::EmptyField(field) => write!(f, "boot contract field `{field}` cannot be empty"),
+            Self::MissingMachineIdentity => write!(
+                f,
+                "boot intent requires a MAC, system UUID, or TPM public-key digest"
+            ),
+            Self::MissingArtifacts => write!(f, "boot profile requires at least one artifact"),
+            Self::InvalidSha256(field) => write!(
+                f,
+                "boot contract field `{field}` must be a lowercase SHA-256 digest"
+            ),
+            Self::InvalidEndpoint { field, value } => write!(
+                f,
+                "boot contract field `{field}` contains unsupported endpoint `{value}`"
+            ),
+            Self::InvalidTangThreshold {
+                threshold,
+                endpoints,
+            } => write!(
+                f,
+                "Tang threshold {threshold} is invalid for {endpoints} endpoint(s)"
+            ),
+            Self::DuplicateTangEndpoint => write!(f, "Tang endpoints must be unique"),
+            Self::RoleWithoutEnrollment => {
+                write!(f, "a Mycelium role requires post-install enrollment")
+            }
+            Self::ErrorOnSuccessfulReceipt => {
+                write!(f, "only failed boot receipts may contain an error")
+            }
+        }
+    }
+}
+
+impl std::error::Error for BootContractError {}
+
+fn validate_version(version: u32) -> Result<(), BootContractError> {
+    if version == BOOT_CONTRACT_SCHEMA_VERSION {
+        Ok(())
+    } else {
+        Err(BootContractError::UnsupportedSchemaVersion(version))
+    }
+}
+
+fn require_text(field: &'static str, value: &str) -> Result<(), BootContractError> {
+    if value.trim().is_empty() {
+        Err(BootContractError::EmptyField(field))
+    } else {
+        Ok(())
+    }
+}
+
+fn optional_text_is_empty(value: Option<&str>) -> bool {
+    value.is_none_or(|value| value.trim().is_empty())
+}
+
+fn validate_sha256(field: &'static str, digest: &str) -> Result<(), BootContractError> {
+    if digest.len() == 64
+        && digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        Ok(())
+    } else {
+        Err(BootContractError::InvalidSha256(field))
+    }
+}
+
+fn validate_endpoint(
+    field: &'static str,
+    endpoint: &str,
+    schemes: &[&str],
+) -> Result<(), BootContractError> {
+    let valid = endpoint
+        .split_once("://")
+        .is_some_and(|(scheme, rest)| schemes.contains(&scheme) && !rest.is_empty());
+    if valid && !endpoint.chars().any(char::is_whitespace) {
+        Ok(())
+    } else {
+        Err(BootContractError::InvalidEndpoint {
+            field,
+            value: endpoint.to_owned(),
+        })
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -245,6 +581,60 @@ mod tests {
     use super::*;
     use crate::{IpRecord, SegmentKind};
 
+    const SHA_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const SHA_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    fn boot_intent() -> BootIntentV1 {
+        BootIntentV1 {
+            schema_version: BOOT_CONTRACT_SCHEMA_VERSION,
+            machine: "radioman-pi".into(),
+            selector: BootMachineSelector {
+                mac: Some(MacAddress([0xdc, 0xa6, 0x32, 0x01, 0x02, 0x03])),
+                ..BootMachineSelector::default()
+            },
+            profile: "fpl-linux-arm64".into(),
+            mode: BootIntentMode::InstallOnce,
+            network: "wagar-house".into(),
+            security: BootSecurityPolicy {
+                secure_boot: SecureBootPolicy::Preferred,
+                tang: Some(TangPolicy {
+                    threshold: 1,
+                    endpoints: vec!["http://192.168.20.8:7500".into()],
+                }),
+            },
+            post_install: BootPostInstall {
+                enroll_mycelium: true,
+                mycelium_role: Some("managed-node".into()),
+            },
+        }
+    }
+
+    fn boot_profile() -> BootProfileV1 {
+        BootProfileV1 {
+            schema_version: BOOT_CONTRACT_SCHEMA_VERSION,
+            id: "fpl-linux-arm64".into(),
+            architecture: "aarch64".into(),
+            firmware: BootFirmware::RaspberryPi,
+            artifacts: BTreeMap::from([
+                (
+                    BootArtifactKind::Kernel,
+                    BootArtifact {
+                        url: "https://genesis.example/kernel".into(),
+                        sha256: SHA_A.into(),
+                    },
+                ),
+                (
+                    BootArtifactKind::Initrd,
+                    BootArtifact {
+                        url: "https://genesis.example/initrd".into(),
+                        sha256: SHA_B.into(),
+                    },
+                ),
+            ]),
+            kernel_arguments: vec!["console=ttyAMA0".into()],
+        }
+    }
+
     fn topology() -> Topology {
         let host_ip = "192.168.20.50".parse().unwrap();
         Topology {
@@ -322,5 +712,127 @@ mod tests {
             .boot_path("server", &["http://tang.local:7500".into()])
             .unwrap_err();
         assert!(matches!(error, BootPlanError::InvalidEndpoint(_)));
+    }
+
+    #[test]
+    fn boot_contracts_round_trip_and_have_stable_digests() {
+        let intent = boot_intent();
+        let profile = boot_profile();
+        intent.validate().unwrap();
+        profile.validate().unwrap();
+
+        let encoded = serde_json::to_string(&intent).unwrap();
+        let decoded: BootIntentV1 = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, intent);
+        assert_eq!(decoded.digest(), intent.digest());
+
+        let profile_value = serde_json::to_value(&profile).unwrap();
+        let reordered = serde_json::Value::Object(
+            profile_value
+                .as_object()
+                .unwrap()
+                .iter()
+                .rev()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+        );
+        let decoded: BootProfileV1 = serde_json::from_value(reordered).unwrap();
+        assert_eq!(decoded.digest(), profile.digest());
+    }
+
+    #[test]
+    fn boot_intent_rejects_unsafe_or_incomplete_identity_policy() {
+        let mut intent = boot_intent();
+        intent.selector = BootMachineSelector::default();
+        assert_eq!(
+            intent.validate(),
+            Err(BootContractError::MissingMachineIdentity)
+        );
+
+        intent = boot_intent();
+        intent.security.tang.as_mut().unwrap().threshold = 2;
+        assert!(matches!(
+            intent.validate(),
+            Err(BootContractError::InvalidTangThreshold { .. })
+        ));
+
+        intent = boot_intent();
+        intent.post_install.enroll_mycelium = false;
+        assert_eq!(
+            intent.validate(),
+            Err(BootContractError::RoleWithoutEnrollment)
+        );
+
+        intent = boot_intent();
+        intent.security.tang.as_mut().unwrap().endpoints = vec![
+            "http://192.168.20.8:7500".into(),
+            "http://192.168.20.8:7500".into(),
+        ];
+        assert_eq!(
+            intent.validate(),
+            Err(BootContractError::DuplicateTangEndpoint)
+        );
+    }
+
+    #[test]
+    fn boot_profile_rejects_unpinned_artifacts() {
+        let mut profile = boot_profile();
+        profile
+            .artifacts
+            .get_mut(&BootArtifactKind::Kernel)
+            .unwrap()
+            .sha256 = "latest".into();
+        assert_eq!(
+            profile.validate(),
+            Err(BootContractError::InvalidSha256("artifact.sha256"))
+        );
+
+        let mut profile = boot_profile();
+        profile
+            .artifacts
+            .get_mut(&BootArtifactKind::Kernel)
+            .unwrap()
+            .url = "tftp://192.168.20.8/kernel".into();
+        assert!(matches!(
+            profile.validate(),
+            Err(BootContractError::InvalidEndpoint { .. })
+        ));
+
+        let kernel = profile.artifacts.remove(&BootArtifactKind::Kernel).unwrap();
+        profile
+            .artifacts
+            .insert(BootArtifactKind::Bootloader, kernel);
+        profile.validate().unwrap();
+    }
+
+    #[test]
+    fn receipt_requires_enrollment_evidence_and_failure_details() {
+        let intent = boot_intent();
+        let profile = boot_profile();
+        let mut receipt = BootReceiptV1 {
+            schema_version: BOOT_CONTRACT_SCHEMA_VERSION,
+            machine: intent.machine.clone(),
+            intent_digest: intent.digest(),
+            profile_digest: profile.digest(),
+            state: BootReceiptState::Enrolled,
+            observed_at: 42,
+            mycelium_peer_id: None,
+            error: None,
+        };
+        assert_eq!(
+            receipt.validate(),
+            Err(BootContractError::EmptyField("mycelium_peer_id"))
+        );
+        receipt.mycelium_peer_id = Some("peer:radioman-pi".into());
+        receipt.validate().unwrap();
+
+        receipt.state = BootReceiptState::Failed;
+        receipt.mycelium_peer_id = None;
+        assert_eq!(
+            receipt.validate(),
+            Err(BootContractError::EmptyField("error"))
+        );
+        receipt.error = Some("installer exited".into());
+        receipt.validate().unwrap();
     }
 }

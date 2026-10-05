@@ -211,6 +211,9 @@ mycelium nbde plan <device> \
 Tang endpoints currently use literal IP addresses deliberately: boot-time DNS
 is not assumed. A later enrollment workflow will call the system Clevis/Tang
 tools and retain a passphrase recovery slot rather than reimplementing NBDE.
+The proposed standalone provisioning service, first-contact enrollment flow,
+and Mycelium driver boundary are documented in
+[Genesis: machine provisioning and first contact](docs/genesis.md).
 
 ## Intelligent SSH hops
 

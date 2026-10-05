@@ -32,7 +32,12 @@ pub use allocation::{
     AllocationBasis, AllocationReceipt, AllocationStrategy, AllocationValue, DhcpScopeIntent,
     LogicalNetwork, NetworkBinding, NetworkDriftReport, NetworkDriftState,
 };
-pub use boot::{BootPath, BootPlanError, BootReachability, BootTarget, NbdePlan};
+pub use boot::{
+    BootArtifact, BootArtifactKind, BootContractError, BootFirmware, BootIntentMode, BootIntentV1,
+    BootMachineSelector, BootPath, BootPlanError, BootPostInstall, BootProfileV1, BootReachability,
+    BootReceiptState, BootReceiptV1, BootSecurityPolicy, BootTarget, NbdePlan, SecureBootPolicy,
+    TangPolicy, BOOT_CONTRACT_SCHEMA_VERSION,
+};
 pub use capabilities::{DhcpManagement, DnsFiltering, Identity, Sensors, VlanManagement, Wireless};
 pub use capabilities::{
     ID_CAPABILITIES, ID_DHCP_ADD_STATIC_LEASE, ID_DHCP_ENSURE_POOL, ID_DHCP_LIST_POOLS,
