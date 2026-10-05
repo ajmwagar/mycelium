@@ -1012,6 +1012,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "genesis-dnsmasq"
+version = "0.1.0"
+dependencies = [
+ "fpl-boot-contract",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "genesisd"
 version = "0.1.0"
 dependencies = [
