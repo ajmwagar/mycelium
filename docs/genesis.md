@@ -56,7 +56,7 @@ identity.
 
 ## Enrollment security
 
-The Mycelium authority issues a single-use claim bound to:
+The intended physical-PXE design binds first contact to:
 
 - the boot-intent digest;
 - expected site, hostname, role, and machine selector;
@@ -64,8 +64,18 @@ The Mycelium authority issues a single-use claim bound to:
 - the expected Genesis service identity;
 - an optional TPM attestation key or hardware fingerprint.
 
-Claims are not placed in TFTP files, public iPXE scripts, kernel command lines,
-or logs. An installer bootstrap token retrieves the envelope once over HTTPS.
+These are design requirements, not implemented claim fields. The existing
+Mycelium peer invitation binds the peer name, site, roles, seed peers, expiry,
+and remaining uses; CSR signing checks the exact expected common name. It does
+not currently bind a boot-intent digest, MAC, TPM identity, or Genesis server.
+The QEMU experiment transports that existing invitation using protected virtual
+media. Physical PXE's initial authorization channel remains an explicit operator
+choice; HTTPS alone does not authenticate the new machine. See
+[physical first contact](genesis-first-contact.md) for the boundary and runbook.
+
+Claims must not be placed in TFTP files, public iPXE scripts, kernel command lines,
+or logs. Any HTTPS handoff must reuse the existing invitation lifecycle, not
+introduce a parallel claim database or release a claim merely for knowing a MAC.
 The peer private key is generated on the new machine and is never returned to
 Genesis. TPM-backed systems may seal or generate that key and attach attestation
 evidence. Systems without a TPM use a locally generated key with explicitly
