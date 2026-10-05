@@ -9,7 +9,15 @@ pub async fn run(args: &[String]) -> Result<Vec<String>, String> {
             .unwrap_or_else(myceliumd::home_dir);
         return crate::enroll::repair_peer_service(&home, value(args, "--site"));
     }
-    let claim = value(args, "--claim");
+    let claim_path = value(args, "--claim-file").map(expand_home);
+    if value(args, "--claim").is_some() && claim_path.is_some() {
+        return Err("setup accepts only one of --claim or --claim-file".into());
+    }
+    let claim_from_file = claim_path
+        .as_deref()
+        .map(read_claim_file)
+        .transpose()?;
+    let claim = value(args, "--claim").or(claim_from_file.as_deref());
     let embedded = claim
         .map(crate::invite::decode_pair_claim)
         .transpose()?
@@ -24,11 +32,13 @@ pub async fn run(args: &[String]) -> Result<Vec<String>, String> {
         .as_ref()
         .is_some_and(|(_, _, _, kind)| *kind == crate::invite::InvitationKind::Peer)
     {
-        return setup_peer(
+        let result = setup_peer(
             embedded.as_ref().expect("checked above"),
             value(args, "--path").map(expand_home),
         )
         .await;
+        remove_consumed_claim(&result, claim_path.as_deref())?;
+        return result;
     }
     let ssh_dir = user_home()?.join(".ssh");
     let private_key = value(args, "--key")
@@ -94,7 +104,46 @@ pub async fn run(args: &[String]) -> Result<Vec<String>, String> {
         private_key.display(),
         certificate.display()
     ));
+    remove_consumed_claim(&Ok(()), claim_path.as_deref())?;
     Ok(lines)
+}
+
+fn read_claim_file(path: &Path) -> Result<String, String> {
+    let metadata = fs::metadata(path)
+        .map_err(|error| format!("read claim metadata {}: {error}", path.display()))?;
+    if !metadata.is_file() {
+        return Err(format!("claim file is not a regular file: {}", path.display()));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            return Err(format!(
+                "claim file must not be accessible by group or other users: {}",
+                path.display()
+            ));
+        }
+    }
+    if metadata.len() > 4096 {
+        return Err(format!("claim file exceeds 4096 bytes: {}", path.display()));
+    }
+    let claim = fs::read_to_string(path)
+        .map_err(|error| format!("read claim file {}: {error}", path.display()))?;
+    let claim = claim.trim();
+    if claim.is_empty() {
+        return Err(format!("claim file is empty: {}", path.display()));
+    }
+    Ok(claim.to_owned())
+}
+
+fn remove_consumed_claim<T>(result: &Result<T, String>, path: Option<&Path>) -> Result<(), String> {
+    if result.is_ok() {
+        if let Some(path) = path {
+            fs::remove_file(path)
+                .map_err(|error| format!("remove consumed claim {}: {error}", path.display()))?;
+        }
+    }
+    Ok(())
 }
 
 async fn setup_peer(
@@ -242,6 +291,46 @@ fn path_string(path: &Path) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn temporary_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "mycelium-setup-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    #[test]
+    fn claim_file_is_trimmed_and_removed_only_after_success() {
+        let path = temporary_path("claim");
+        fs::write(&path, "  MYC1-test-claim\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        assert_eq!(read_claim_file(&path).unwrap(), "MYC1-test-claim");
+        remove_consumed_claim(&Err::<(), _>("retry".into()), Some(&path)).unwrap();
+        assert!(path.exists());
+        remove_consumed_claim(&Ok(()), Some(&path)).unwrap();
+        assert!(!path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claim_file_rejects_permissions_visible_to_other_users() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = temporary_path("permissions");
+        fs::write(&path, "MYC1-test-claim").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        let error = read_claim_file(&path).unwrap_err();
+        assert!(error.contains("must not be accessible"));
+        fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn optional_join_arguments_are_forwarded_without_a_shell() {
