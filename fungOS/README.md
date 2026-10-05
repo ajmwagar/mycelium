@@ -26,6 +26,7 @@ product-level commercial licensing.
 ## Documents
 
 - [Ecosystem map](ecosystem.md) — project ownership, boundaries, and shared contracts.
+- [Repository inventory](repository-inventory.md) — current GitHub ownership, visibility, and licenses.
 - [Community and GTM](community-and-gtm.md) — who this is for and how adoption compounds.
 - [Licensing](licensing.md) — a default licensing decision framework.
 
