@@ -88,3 +88,9 @@ commands. **No Mycelium runs inside workload microVMs.** Minimal runtime images
 and application/build tool images are prepared through Shroud's existing OCI
 and rootfs paths, not by cloning the managed fungOS host into every guest.
 Fabd and production migration remain separate follow-up work.
+
+The corrected cloud rootfs was rebuilt and inspected on Agora at
+`/home/ajmwagar/.cache/fungos-cloud.dkKsxc/out/fungos-cloud-amd64.tar`, SHA-256
+`2f5abd39627033adf3c1c98947f3f0892f8338ea424f5350d697d7cb601f9975`.
+It supersedes the initial runtime tarball above, but retains the experimental
+snapshot/security and non-bootable-image limitations.
