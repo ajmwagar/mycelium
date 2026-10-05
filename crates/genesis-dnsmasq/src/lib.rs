@@ -269,6 +269,9 @@ dhcp-host={},set:genesis\n\
 dhcp-match=set:efi-x86_64,option:client-arch,7\n\
 dhcp-match=set:efi-x86_64,option:client-arch,9\n\
 dhcp-userclass=set:ipxe,iPXE\n\
+tag-if=set:genesis-first,tag:genesis,tag:efi-x86_64,tag:!ipxe\n\
+pxe-service=tag:genesis-first,BC_EFI,Genesis iPXE,{},{}\n\
+pxe-service=tag:genesis-first,x86-64_EFI,Genesis iPXE,{},{}\n\
 dhcp-boot=tag:genesis,tag:efi-x86_64,tag:!ipxe,{},,{}\n\
 dhcp-boot=tag:genesis,tag:ipxe,{}/v1/boot/bootstrap.ipxe\n\
 enable-tftp\n\
@@ -276,6 +279,10 @@ tftp-root={}\n",
         settings.interface,
         settings.server_address,
         mac,
+        settings.first_stage_filename,
+        settings.server_address,
+        settings.first_stage_filename,
+        settings.server_address,
         settings.first_stage_filename,
         settings.server_address,
         settings.http_base_url,
@@ -311,7 +318,7 @@ fn render_machine_script(request: &AdapterRequest) -> String {
         script.push('\n');
     }
     if let Some(initrd) = initrd {
-        script.push_str(&format!("initrd {} initrd\n", initrd.url));
+        script.push_str(&format!("initrd --name initrd {}\n", initrd.url));
     }
     for kind in [
         BootArtifactKind::Installer,
@@ -414,6 +421,15 @@ mod tests {
                                 .into(),
                         },
                     ),
+                    (
+                        BootArtifactKind::Initrd,
+                        BootArtifact {
+                            url: "http://192.0.2.1:8088/v1/artifacts/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                                .into(),
+                            sha256: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                                .into(),
+                        },
+                    ),
                 ]),
                 kernel_arguments: vec!["console=ttyS0".into()],
             },
@@ -435,6 +451,11 @@ mod tests {
             .http_files
             .values()
             .all(|content| !content.contains("aaaaaaaaaaaaaaaa")));
+        assert!(plan
+            .http_files
+            .values()
+            .any(|content| content
+                .contains("initrd --name initrd http://192.0.2.1:8088/v1/artifacts/")));
     }
 
     #[test]

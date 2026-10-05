@@ -74,7 +74,7 @@ pub enum StoreError {
 impl Store {
     pub fn open(root: impl Into<PathBuf>) -> Result<Self, StoreError> {
         let store = Self { root: root.into() };
-        for directory in ["profiles", "intents", "receipts", "artifacts"] {
+        for directory in ["profiles", "intents", "receipts", "artifacts", "boot"] {
             let path = store.root.join(directory);
             fs::create_dir_all(&path).map_err(|source| StoreError::Io { path, source })?;
         }
@@ -191,6 +191,34 @@ impl Store {
         Ok(bytes)
     }
 
+    /// Install a deterministic, non-secret iPXE file under a stable boot name.
+    ///
+    /// Boot files are desired-state projections and may be atomically replaced
+    /// when an operator applies a new reviewed intent. Credentials and
+    /// enrollment claims must never be placed in this surface.
+    pub fn put_boot_file(&self, name: &str, content: &str) -> Result<(), StoreError> {
+        let name = safe_boot_name(name)?;
+        if !content.starts_with("#!ipxe\n") {
+            return Err(StoreError::Invalid {
+                kind: "boot file",
+                message: "iPXE files must start with #!ipxe".into(),
+            });
+        }
+        atomic_replace(&self.root.join("boot").join(name), content.as_bytes())
+    }
+
+    pub fn boot_file(&self, name: &str) -> Result<Vec<u8>, StoreError> {
+        let name = safe_boot_name(name)?;
+        let path = self.root.join("boot").join(name);
+        fs::read(&path).map_err(|source| match source.kind() {
+            std::io::ErrorKind::NotFound => StoreError::NotFound(path.clone()),
+            _ => StoreError::Io {
+                path: path.clone(),
+                source,
+            },
+        })
+    }
+
     fn put_json<T: Serialize>(
         &self,
         directory: &str,
@@ -298,6 +326,7 @@ pub fn router(store: Store) -> Router {
         .route("/v1/intents/{digest}", get(get_intent))
         .route("/v1/receipts/{machine}", get(get_receipt))
         .route("/v1/artifacts/{digest}", get(get_artifact))
+        .route("/v1/boot/{name}", get(get_boot_file))
         .with_state(Arc::new(store))
 }
 
@@ -343,6 +372,22 @@ async fn get_artifact(
     Ok(response)
 }
 
+async fn get_boot_file(
+    State(store): State<Arc<Store>>,
+    AxumPath(name): AxumPath<String>,
+) -> Result<Response, HttpError> {
+    let bytes = store.boot_file(&name)?;
+    let mut response = Body::from(bytes).into_response();
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/plain; charset=utf-8"),
+    );
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Ok(response)
+}
+
 #[derive(Debug)]
 struct HttpError(StoreError);
 
@@ -376,6 +421,20 @@ fn safe_component(value: &str) -> Option<&str> {
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')))
     .then_some(value)
+}
+
+fn safe_boot_name(value: &str) -> Result<&str, StoreError> {
+    let value = safe_component(value).ok_or_else(|| StoreError::Invalid {
+        kind: "boot file name",
+        message: "must be a safe filename component".into(),
+    })?;
+    if !value.ends_with(".ipxe") {
+        return Err(StoreError::Invalid {
+            kind: "boot file name",
+            message: "must end with .ipxe".into(),
+        });
+    }
+    Ok(value)
 }
 
 fn validate_digest(value: &str) -> Result<(), StoreError> {
@@ -667,5 +726,32 @@ mod tests {
             serde_json::from_slice::<BootProfileV1>(&body).unwrap(),
             profile()
         );
+    }
+
+    #[tokio::test]
+    async fn boot_projection_serves_only_explicit_ipxe_files() {
+        let temporary = TestDirectory::new();
+        let store = Store::open(temporary.path()).unwrap();
+        store
+            .put_boot_file("bootstrap.ipxe", "#!ipxe\necho genesis\n")
+            .unwrap();
+        assert!(store.put_boot_file("../secret", "#!ipxe\n").is_err());
+        assert!(store.put_boot_file("not-ipxe.txt", "hello\n").is_err());
+
+        let response = router(store)
+            .oneshot(
+                Request::get("/v1/boot/bootstrap.ipxe")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-store"
+        );
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(&body[..], b"#!ipxe\necho genesis\n");
     }
 }

@@ -23,6 +23,7 @@ GET /v1/profiles/{sha256}
 GET /v1/intents/{sha256}
 GET /v1/receipts/{machine}
 GET /v1/artifacts/{sha256}
+GET /v1/boot/{name}.ipxe
 ```
 
 Mutations are local-only through `genesisctl` in this first slice:
@@ -32,6 +33,7 @@ genesisctl --root ./genesis-state profile put profile.json
 genesisctl --root ./genesis-state intent put intent.json
 genesisctl --root ./genesis-state plan intent.json profile.json
 genesisctl --root ./genesis-state artifact put "$SHA256" ./artifact
+genesisctl --root ./genesis-state boot put bootstrap.ipxe ./bootstrap.ipxe
 genesisctl --root ./genesis-state receipt put receipt.json
 ```
 

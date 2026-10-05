@@ -43,6 +43,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         [kind, command, machine] if command == "get" && kind == "receipt" => {
             print_json(&store.receipt(machine)?)?;
         }
+        [kind, command, name, path] if command == "put" && kind == "boot" => {
+            store.put_boot_file(name, &fs::read_to_string(path)?)?;
+            println!("ok");
+        }
+        [kind, command, name] if command == "get" && kind == "boot" => {
+            print!("{}", String::from_utf8(store.boot_file(name)?)?);
+        }
         [command, intent_path, profile_path] if command == "plan" => {
             let intent: BootIntentV1 = read_json(intent_path)?;
             let profile: BootProfileV1 = read_json(profile_path)?;
@@ -71,6 +78,7 @@ fn print_help() {
         "usage: genesisctl [--root PATH] \
          <profile put FILE|profile get DIGEST|intent put FILE|intent get DIGEST|\
          receipt put FILE|receipt get MACHINE|artifact put SHA256 FILE|\
+         boot put NAME FILE|boot get NAME|\
          plan INTENT_FILE PROFILE_FILE>"
     );
 }
