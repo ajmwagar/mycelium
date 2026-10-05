@@ -78,3 +78,9 @@ in an isolated Agora snapshot; the dirty workspace lockfile was not changed.
 UMIE remains disabled pending the next GPU handoff. A newly observed host
 `umie-taiga.service` is outside the original recorded drain list and was left
 running pending operator coordination.
+
+On the subsequent authorized test, Taiga joined the recorded temporary drain.
+The guest cold-booted with UMIE enabled: `fungos-nvidia-ready` initialized the
+GPU without manual module commands, and all six edge/compute services were
+active. The real decision request selected `on` with probability `0.9543316`;
+NVIDIA reported approximately 956 MiB allocated before the request.
