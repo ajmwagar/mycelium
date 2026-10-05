@@ -66,8 +66,25 @@ and private CUDA 12.4 cuBLAS libraries under
 executable returns its normal usage response. These libraries are experiment
 dependencies, not part of the public base image. Candidate SHA-256:
 `fe3c524204956751dc9f1a075de55cf217d1af19689b98eba2cc3b251221fbdd`.
-Signed publication has not been confirmed: the Neo daemon's publish RPC did
-not return. The candidate is not an activated Mycelium-managed release yet.
+Signed publication is now confirmed on `fungos-compute-test`; the guest received
+the authority-signed manifest through gossip. `releases seed` verified the
+uploaded candidate against that manifest, and `software activate umie` installed
+version 0.1.0 with the same digest under the managed `current` link. This was
+manual byte seeding, not evidence of automatic artifact fetching. The disabled
+UMIE service was not started; GPU, driver and model readiness are still pending.
+
+The publication incident exposed an unresponsive local daemon, exhausted Neo
+disk space, and a startup ordering bug: saved-device reconnection ran before RPC
+acceptance. Reconnection now runs in the background with a 30-second deadline
+per device, retaining unreachable devices. Hello and publication client requests
+are bounded; a timeout reports unknown outcome and closes the write side to
+prevent late-response reuse. Do not blindly retry a timed-out publication: check
+the catalog first. Disposable local `/tmp` build copies were removed, not source,
+identities or installed packages.
+
+For guest seeding, upload to `/var/lib/mycelium/incoming` (owner-only), not `/tmp`:
+the daemon's systemd `PrivateTmp=yes` intentionally hides the SSH session's
+temporary directory. Keep the sandbox; do not disable it to copy an artifact.
 
 The compute policy test confirms GPU presence alone selects neither package,
 and explicit UMIE/Shroud roles retain manual updates. Shroud host adoption and

@@ -332,16 +332,25 @@ impl Daemon {
             dhcp_scopes: Mutex::new(dhcp_scopes),
             mesh,
         };
-        // Reconnect saved devices; failures are recorded but keep the entry
-        // (the appliance may simply be asleep).
-        let pending: Vec<SavedDevice> = me.saved.lock().await.values().cloned().collect();
-        for s in pending {
-            match me.attach_saved(&s).await {
-                Ok(_) => {}
-                Err(e) => eprintln!("myceliumd: reconnect {} failed: {e}", s.meta.id),
+        Ok(me)
+    }
+
+    // Appliance reachability must not gate the local control plane. Preserve
+    // saved entries when a node is asleep and bound each background attempt.
+    async fn reconnect_saved(&self, timeout: std::time::Duration) {
+        let pending: Vec<SavedDevice> = self.saved.lock().await.values().cloned().collect();
+        for saved in pending {
+            match tokio::time::timeout(timeout, self.attach_saved(&saved)).await {
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => {
+                    eprintln!("myceliumd: reconnect {} failed: {error}", saved.meta.id)
+                }
+                Err(_) => eprintln!(
+                    "myceliumd: reconnect {} timed out after {timeout:?}",
+                    saved.meta.id
+                ),
             }
         }
-        Ok(me)
     }
 
     fn driver(&self, name: &str) -> Option<Arc<dyn Driver>> {
@@ -3137,6 +3146,12 @@ pub async fn serve() -> std::io::Result<()> {
             .await
             .map_err(|e| std::io::Error::other(format!("boot failed: {e}")))?,
     );
+    let reconnect = daemon.clone();
+    tokio::spawn(async move {
+        reconnect
+            .reconnect_saved(std::time::Duration::from_secs(30))
+            .await
+    });
     daemon
         .mesh
         .start()
@@ -3259,10 +3274,13 @@ mod tests {
         }
         async fn attach(
             &self,
-            _target: &Target,
+            target: &Target,
             _creds: &CredentialSet,
             inventory: &Inventory,
         ) -> Result<DeviceId> {
+            if matches!(target, Target::Host { host, .. } if host == "sleeping.local") {
+                std::future::pending::<()>().await;
+            }
             let meta = DeviceMeta {
                 id: DeviceId::new("fake-1"),
                 kind: DeviceKind::Other,
@@ -3276,6 +3294,52 @@ mod tests {
             inventory.add(Arc::new(FakeDev { meta }));
             Ok(id)
         }
+    }
+
+    #[tokio::test]
+    async fn sleeping_saved_device_does_not_block_rpc_and_is_retained() {
+        let daemon = Arc::new(daemon_with_fake());
+        let id = DeviceId::new("sleeping");
+        daemon.saved.lock().await.insert(
+            id.clone(),
+            SavedDevice {
+                meta: DeviceMeta {
+                    id: id.clone(),
+                    kind: DeviceKind::Other,
+                    driver: "fake".into(),
+                    vendor: None,
+                    model: None,
+                    firmware: None,
+                    address: "sleeping.local".into(),
+                },
+                target: "sleeping.local".into(),
+                name: None,
+                username: None,
+                credential_ref: None,
+                password_env: None,
+                key_path: None,
+            },
+        );
+        let reconnect = daemon.clone();
+        let task = tokio::spawn(async move {
+            reconnect
+                .reconnect_saved(std::time::Duration::from_millis(50))
+                .await;
+        });
+        tokio::task::yield_now().await;
+        let response = tokio::time::timeout(
+            std::time::Duration::from_millis(20),
+            daemon.dispatch(Request::Hello),
+        )
+        .await
+        .expect("control plane must remain responsive");
+        assert!(response.ok);
+        tokio::time::timeout(std::time::Duration::from_secs(1), task)
+            .await
+            .expect("reconnect must be bounded")
+            .unwrap();
+        assert!(daemon.saved.lock().await.contains_key(&id));
+        assert!(daemon.inventory.devices().is_empty());
     }
 
     fn daemon_with_fake() -> Daemon {

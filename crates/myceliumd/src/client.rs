@@ -78,6 +78,38 @@ impl Client {
     }
 
     pub async fn request(&mut self, req: &Request) -> Result<Response, ClientError> {
+        // Publishing a local artifact must not wait forever behind daemon
+        // startup or mesh work. A timeout is not evidence that a write failed.
+        let deadline = match req {
+            Request::Hello => Some(Duration::from_secs(10)),
+            Request::PackagePublish { .. } => Some(Duration::from_secs(60)),
+            _ => None,
+        };
+        if let Some(deadline) = deadline {
+            return self.request_with_deadline(req, deadline).await;
+        }
+        self.request_io(req).await
+    }
+
+    async fn request_with_deadline(
+        &mut self,
+        req: &Request,
+        deadline: Duration,
+    ) -> Result<Response, ClientError> {
+        match tokio::time::timeout(deadline, self.request_io(req)).await {
+            Ok(result) => result,
+            Err(_) => {
+                // Do not allow a late response to be mistaken for the next RPC.
+                let _ = self.stream.shutdown().await;
+                Err(ClientError::Io(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "daemon RPC timed out; outcome is unknown: check the package catalog before retrying a publication",
+                )))
+            }
+        }
+    }
+
+    async fn request_io(&mut self, req: &Request) -> Result<Response, ClientError> {
         let line = serde_json::to_string(req).expect("Request is serializable");
         self.stream.write_all(line.as_bytes()).await?;
         self.stream.write_all(b"\n").await?;
@@ -101,6 +133,31 @@ impl Client {
                 kind: resp.kind.unwrap_or_else(|| "daemon".into()),
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn unresponsive_daemon_has_a_deadline_and_connection_is_not_reused() {
+        let (stream, _silent_daemon) = UnixStream::pair().unwrap();
+        let mut client = Client {
+            stream: BufStream::new(stream),
+        };
+        let error = client
+            .request_with_deadline(&Request::Hello, Duration::from_millis(20))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, ClientError::Io(ref error) if error.kind() == std::io::ErrorKind::TimedOut)
+        );
+        assert!(error.to_string().contains("outcome is unknown"));
+        assert!(client
+            .request_with_deadline(&Request::Hello, Duration::from_millis(20))
+            .await
+            .is_err());
     }
 }
 
