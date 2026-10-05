@@ -1,0 +1,8 @@
+[Unit]
+Description=fungOS persistent QEMU experiment on Agora-One
+After=network.target
+
+[Service]
+User=ajmwagar
+SupplementaryGroups=kvm
+ExecStart=/usr/bin/qemu-system-x86_64 -name fungos-persistent-tv -machine q35,accel=kvm -cpu host -m 2048 -smp 2 -kernel /home/ajmwagar/.cache/fungos-qemu/genesis-state/artifacts/7efd88a7facf80874d781ccb2c2421f0aaaa575e3b94760430619e826f490117 -initrd /home/ajmwagar/.cache/fungos-build/network-out/fungos-persistent-test.initrd -append "rdinit=/init fungos.root=LABEL=FUNGOS_ROOT console=ttyS0,115200n8 console=tty0 systemd.show_status=1 panic=-1" -drive if=virtio,format=raw,file=/home/ajmwagar/.cache/fungos-qemu/fungos-persistent-test.img -nic user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:22229-:22 -vga std -display vnc=127.0.0.1:1 -qmp unix:/run/qemu-canvas-demo/demo.qmp,server=on,wait=off -serial file:/home/ajmwagar/.cache/fungos-qemu/persistent-console.log -monitor none

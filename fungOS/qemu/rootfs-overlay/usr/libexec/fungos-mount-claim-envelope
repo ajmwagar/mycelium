@@ -3,6 +3,12 @@ set -eu
 
 mountpoint=/run/fungos-claim
 staging=/run/fungos-first-contact
+attempts=0
+while [ ! -b /dev/disk/by-label/FUNGOS_CLAIM ]; do
+  attempts=$((attempts + 1))
+  [ "$attempts" -lt 10 ] || { echo "fungOS claim disk missing" >&2; exit 1; }
+  sleep 1
+done
 mkdir -p "$mountpoint"
 mount -o ro,nodev,nosuid,noexec /dev/disk/by-label/FUNGOS_CLAIM "$mountpoint"
 trap 'umount "$mountpoint"' EXIT

@@ -134,3 +134,68 @@ sudo systemctl stop fungos-qemu-tv
 
 These transient units are not reboot-persistent. The experiment replaces the
 previous empty QEMU demo on this stream, not the TV's compositor or layout.
+
+## Persistent root experiment
+
+Set `ROOTFS_IMAGE_OUTPUT` when running `scripts/build-initramfs.sh` as root.
+The builder creates a new sparse 8 GiB ext4 image labeled `FUNGOS_ROOT`,
+normalizes copied files to root ownership, and leaves machine-ID generation to
+first boot. It refuses an existing image path. The output contains the same
+Debian root, QEMU overlay, and optional static Mycelium binary as the initramfs.
+
+Attach the image as a writable VirtIO disk and add
+`fungos.root=LABEL=FUNGOS_ROOT` to the kernel arguments. The bootstrap waits at
+most ten attempts for the labeled disk and switches root onto it. A missing or
+invalid disk fails instead of silently using an ephemeral RAM root. Without
+that argument the original RAM-root experiment remains available.
+
+[`fungos-qemu-tv.service`](fungos-qemu-tv.service) records the Agora-One test
+deployment. Unlike the earlier transient unit, it is installed under
+`/etc/systemd/system`; it is deliberately not enabled for automatic host boot.
+The kernel and initramfs are still supplied by the QEMU host: this is not yet
+a standalone UEFI/GRUB disk installation or a physical-machine installer.
+
+Use a claim disk only on the first un-enrolled boot. After successful setup,
+detach and delete it. `/var/lib/mycelium`, `/etc/machine-id`, SSH host keys,
+and `/etc/hostname` now live on the disk. Subsequent first-contact execution
+skips claim-media handling when the enrolled certificate exists.
+
+The claim disk is only the QEMU handoff adapter. Physical PXE needs an
+authenticated, server-validated HTTPS claim handoff with an expiring one-use
+secret staged into `/run`, then the same `setup --claim-file` consumption.
+Never treat a MAC address alone as authority to disclose a claim or place a
+claim in TFTP, kernel arguments, unauthenticated HTTP, or public boot logs.
+
+## Isolated signed-update and rollback runbook
+
+Use the guest's existing shared authority resolver, with a disposable test
+root trusted only by that guest and an isolated channel (`fungos-qemu-test`).
+Disconnect mesh seeds for the test; do not publish its artifacts from a
+production node. Store candidates beneath `/var/lib/mycelium/test-candidates`,
+not `/tmp`: the managed daemon uses `PrivateTmp` and cannot read the SSH
+session's `/tmp`. Use `MYCELIUM_HOME=/var/lib/mycelium` and
+`MYCELIUM_NO_AUTOSTART=1` for diagnostic CLI invocations.
+
+1. Generate a test signer with `releases keygen`, configure its public key in
+   `MYCELIUM_AUTHORITY_KEYS`, and restart the managed daemon.
+2. Publish a compatible static binary with `releases publish --write`, then
+   bootstrap it with `update apply --channel fungos-qemu-test --write`.
+3. Compile [`tests/failing-update.rs`](tests/failing-update.rs) on Agora-One
+   with the musl target. It passes candidate self-check but intentionally exits
+   instead of running a daemon. Sign and publish it only in this isolated test.
+4. Apply the broken release. Require an explicit rollback error, an active
+   recovered system service, and the previous installed binary's digest.
+5. Bootstrap a healthy release, publish a newer healthy artifact, then enable
+   the test update policy. The minimum permitted test values are age `60s`,
+   rollout window `300s`, and retry backoff `300s`; do not weaken validation.
+6. Verify the system timer and runner load the enrolled `node.env`, respect the
+   age/rollout delay, and activate only after eligibility. A diagnostic
+   `systemctl start mycelium-update.service` exercises the same automatic runner.
+7. Reboot without claim media. Compare certificate, machine-ID, installed
+   binary, and update-state digests and confirm service readiness.
+8. Disable the test policy, remove the private test signer, restore mesh seeds
+   and production trust configuration, and verify peer convergence again.
+
+The failure test exposed an unmanaged socket daemon masking a broken managed
+replacement. Update activation now checks Unix socket peer credentials against
+systemd's `MainPID`, both before replacement and during readiness checks.

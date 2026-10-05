@@ -6,5 +6,25 @@ mount -t proc proc /proc
 mount -t sysfs sysfs /sys
 mount -t tmpfs tmpfs /run
 
+case " $(cat /proc/cmdline) " in
+  *" fungos.root=LABEL=FUNGOS_ROOT "*)
+    mkdir -p /sysroot
+    attempts=0
+    while ! root_device=$(/busybox findfs LABEL=FUNGOS_ROOT); do
+      attempts=$((attempts + 1))
+      [ "$attempts" -lt 10 ] || { echo "fungOS root disk missing" >&2; exit 1; }
+      /busybox sleep 1
+    done
+    /busybox mount -t ext4 "$root_device" /sysroot
+    [ -x /sysroot/sbin/init ] || { echo "fungOS root disk has no init" >&2; exit 1; }
+    /busybox mount --move /dev /sysroot/dev
+    /busybox mount --move /proc /sysroot/proc
+    /busybox mount --move /sys /sysroot/sys
+    /busybox mount --move /run /sysroot/run
+    echo "fungOS switching to persistent root"
+    exec /busybox switch_root /sysroot /sbin/init
+    ;;
+esac
+
 echo "fungOS initramfs entering systemd"
 exec /sbin/init

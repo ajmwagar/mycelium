@@ -44,6 +44,13 @@ impl Client {
         Ok(Self { stream: BufStream::new(stream) })
     }
 
+    /// PID of the process answering this Unix socket, when the OS exposes it.
+    pub fn peer_pid(&self) -> Result<Option<u32>, ClientError> {
+        self.stream.get_ref().peer_cred()
+            .map(|cred| cred.pid().and_then(|pid| u32::try_from(pid).ok()))
+            .map_err(ClientError::Io)
+    }
+
     /// Detached spawn: process group leader, logs to $MYCELIUM_HOME.
     /// Runs `self <exe> _serve` so the same binary can host the daemon
     /// (the CLI and daemon ship together; PATH never consulted).

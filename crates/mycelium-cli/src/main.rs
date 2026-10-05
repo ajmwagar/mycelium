@@ -2334,10 +2334,15 @@ fn install_update_scheduler() -> Result<(), ClientError> {
         return Ok(());
     }
     if cfg!(target_os = "linux") {
-        let home = std::env::var_os("HOME")
-            .map(std::path::PathBuf::from)
-            .ok_or_else(|| err_usage("HOME is not set"))?;
-        let dir = home.join(".config/systemd/user");
+        let system = matches!(active_supervisor(), Some(Supervisor::SystemdSystem));
+        let dir = if system {
+            std::path::PathBuf::from("/etc/systemd/system")
+        } else {
+            std::env::var_os("HOME")
+                .map(std::path::PathBuf::from)
+                .ok_or_else(|| err_usage("HOME is not set"))?
+                .join(".config/systemd/user")
+        };
         if executable.to_string_lossy().contains(char::is_whitespace) {
             return Err(err_usage(
                 "automatic updater binary path may not contain whitespace",
@@ -2346,10 +2351,7 @@ fn install_update_scheduler() -> Result<(), ClientError> {
         std::fs::create_dir_all(&dir).map_err(ClientError::Io)?;
         std::fs::write(
             dir.join("mycelium-update.service"),
-            format!(
-                "[Unit]\nDescription=Mycelium safe automatic update\nAfter=mycelium.service\n\n[Service]\nType=oneshot\nEnvironment=MYCELIUM_NO_AUTOSTART=1\nExecStart={} update auto-run\n",
-                executable.to_string_lossy()
-            ),
+            systemd_update_service(&executable, &myceliumd::home_dir())?,
         )
         .map_err(ClientError::Io)?;
         std::fs::write(
@@ -2357,15 +2359,23 @@ fn install_update_scheduler() -> Result<(), ClientError> {
             "[Unit]\nDescription=Check for Mycelium updates\n\n[Timer]\nOnBootSec=2m\nOnUnitActiveSec=5m\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n",
         )
         .map_err(ClientError::Io)?;
-        let status = std::process::Command::new("systemctl")
-            .args(["--user", "daemon-reload"])
+        let mut reload = std::process::Command::new("systemctl");
+        if !system {
+            reload.arg("--user");
+        }
+        let status = reload
+            .arg("daemon-reload")
             .status()
             .map_err(ClientError::Io)?;
         if !status.success() {
-            return Err(err_usage("systemd user daemon-reload failed"));
+            return Err(err_usage("systemd daemon-reload failed"));
         }
-        let status = std::process::Command::new("systemctl")
-            .args(["--user", "enable", "--now", "mycelium-update.timer"])
+        let mut enable = std::process::Command::new("systemctl");
+        if !system {
+            enable.arg("--user");
+        }
+        let status = enable
+            .args(["enable", "--now", "mycelium-update.timer"])
             .status()
             .map_err(ClientError::Io)?;
         if !status.success() {
@@ -2376,6 +2386,27 @@ fn install_update_scheduler() -> Result<(), ClientError> {
     Err(err_usage(
         "automatic updates are unsupported on this platform",
     ))
+}
+
+fn systemd_update_service(
+    executable: &std::path::Path,
+    home: &std::path::Path,
+) -> Result<String, ClientError> {
+    let executable = executable
+        .to_str()
+        .ok_or_else(|| err_usage("updater path is not UTF-8"))?;
+    let home = home
+        .to_str()
+        .ok_or_else(|| err_usage("Mycelium home is not UTF-8"))?;
+    if [executable, home]
+        .iter()
+        .any(|path| path.contains(char::is_whitespace) || path.contains(['%', '"', '\\']))
+    {
+        return Err(err_usage(
+            "updater paths must not contain whitespace or systemd escape characters",
+        ));
+    }
+    Ok(format!("[Unit]\nDescription=Mycelium safe automatic update\nAfter=mycelium.service\n\n[Service]\nType=oneshot\nEnvironment=MYCELIUM_NO_AUTOSTART=1\nEnvironment=MYCELIUM_HOME={home}\nEnvironmentFile={home}/node.env\nExecStart={executable} update auto-run\n"))
 }
 
 fn xml_update(value: &str) -> String {
@@ -2465,6 +2496,13 @@ async fn activate_update(
     }
     let supervisor = active_supervisor();
     if let Some(supervisor) = supervisor {
+        if let Some(pid) = supervisor.systemd_pid()? {
+            if !supervised_peer_matches(pid, client.peer_pid()?) {
+                return Err(err_usage("socket daemon is not owned by the Mycelium supervisor; reconcile the service before updating"));
+            }
+        }
+    }
+    if let Some(supervisor) = supervisor {
         supervisor.stop()?;
     } else {
         let _ = client.request(&Request::Shutdown).await;
@@ -2479,7 +2517,7 @@ async fn activate_update(
         return Err(ClientError::Io(error));
     }
     start_daemon(supervisor, destination)?;
-    if wait_for_daemon().await.is_ok() {
+    if wait_for_daemon(supervisor).await.is_ok() {
         return Ok(());
     }
 
@@ -2489,7 +2527,7 @@ async fn activate_update(
     let _ = std::fs::rename(destination, &failed);
     std::fs::rename(&previous, destination).map_err(ClientError::Io)?;
     start_daemon(supervisor, destination)?;
-    wait_for_daemon().await.map_err(|_| {
+    wait_for_daemon(supervisor).await.map_err(|_| {
         ClientError::Protocol(
             "candidate failed health check; rollback daemon also failed to start".into(),
         )
@@ -2507,6 +2545,30 @@ enum Supervisor {
 }
 
 impl Supervisor {
+    fn systemd_pid(self) -> Result<Option<u32>, ClientError> {
+        let system = match self {
+            Self::Systemd => false,
+            Self::SystemdSystem => true,
+            Self::Launchd => return Ok(None),
+        };
+        let mut command = std::process::Command::new("systemctl");
+        if !system {
+            command.arg("--user");
+        }
+        let output = command
+            .args(["show", "mycelium", "--property=MainPID", "--value"])
+            .output()
+            .map_err(ClientError::Io)?;
+        if !output.status.success() {
+            return Err(err_usage("cannot inspect supervised Mycelium PID"));
+        }
+        let pid = String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .parse::<u32>()
+            .map_err(|_| err_usage("invalid supervised Mycelium PID"))?;
+        Ok(Some(pid))
+    }
+
     fn stop(self) -> Result<(), ClientError> {
         let status = match self {
             Self::Systemd => std::process::Command::new("systemctl")
@@ -2605,7 +2667,11 @@ fn system_unit_matches_binary(exec_start: &str, binary: &std::path::Path) -> boo
         return false;
     };
     exec_start.split(';').any(|field| {
-        field.trim().trim_start_matches('{').trim().strip_prefix("path=")
+        field
+            .trim()
+            .trim_start_matches('{')
+            .trim()
+            .strip_prefix("path=")
             .is_some_and(|path| path.trim() == binary)
     })
 }
@@ -2657,11 +2723,26 @@ fn spawn_daemon_from(binary: &std::path::Path) -> Result<(), ClientError> {
     Ok(())
 }
 
-async fn wait_for_daemon() -> Result<(), ClientError> {
+fn supervised_peer_matches(supervised_pid: u32, peer_pid: Option<u32>) -> bool {
+    supervised_pid != 0 && peer_pid == Some(supervised_pid)
+}
+
+async fn wait_for_daemon(supervisor: Option<Supervisor>) -> Result<(), ClientError> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         match Client::try_connect().await {
             Ok(mut client) => {
+                if let Some(supervisor) = supervisor {
+                    if let Some(pid) = supervisor.systemd_pid()? {
+                        if !supervised_peer_matches(pid, client.peer_pid()?) {
+                            if std::time::Instant::now() >= deadline {
+                                return Err(ClientError::DaemonUnresponsive);
+                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                            continue;
+                        }
+                    }
+                }
                 client.call(&Request::PeerList).await?;
                 return Ok(());
             }
@@ -4857,6 +4938,30 @@ fn render_tunnel_plan(plan: &serde_json::Value) -> Vec<String> {
 #[cfg(test)]
 mod ssh_command_tests {
     use super::*;
+
+    #[test]
+    fn update_health_rejects_stale_or_unmanaged_socket_daemons() {
+        assert!(supervised_peer_matches(123, Some(123)));
+        assert!(!supervised_peer_matches(123, Some(456)));
+        assert!(!supervised_peer_matches(0, Some(0)));
+        assert!(!supervised_peer_matches(123, None));
+    }
+
+    #[test]
+    fn updater_retains_enrolled_home_and_rejects_unit_injection() {
+        let unit = systemd_update_service(
+            std::path::Path::new("/var/lib/mycelium/bin/mycelium"),
+            std::path::Path::new("/var/lib/mycelium"),
+        )
+        .unwrap();
+        assert!(unit.contains("EnvironmentFile=/var/lib/mycelium/node.env"));
+        assert!(unit.contains("Environment=MYCELIUM_HOME=/var/lib/mycelium"));
+        assert!(systemd_update_service(
+            std::path::Path::new("/tmp/%n"),
+            std::path::Path::new("/var/lib/mycelium")
+        )
+        .is_err());
+    }
 
     #[test]
     fn system_update_supervisor_matches_only_its_installation() {

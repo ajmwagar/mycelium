@@ -1,7 +1,7 @@
 [Unit]
 Description=Mount the one-time fungOS QEMU claim envelope
-Requires=dev-disk-by\x2dlabel-FUNGOS_CLAIM.device
-After=dev-disk-by\x2dlabel-FUNGOS_CLAIM.device
+ConditionPathExists=!/var/lib/mycelium/pki/node.pem
+After=systemd-udev-trigger.service
 Before=fungos-first-contact.service
 
 [Service]
