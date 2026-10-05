@@ -14,7 +14,10 @@ enrollment is complete; any other status leaves the oneshot unit failed and
 eligible for retry on the next boot or manual restart.
 
 No token, endpoint, certificate, or Mycelium package is embedded in the base
-image.
+image. A Mycelium adapter consumes an owner-only claim file with `mycelium
+setup --claim-file PATH`; successful redemption removes it. Genesis must
+deliver that file through a protected, single-use bootstrap envelope rather
+than TFTP, a public iPXE script, kernel arguments, or an environment variable.
 
 ## Signed update verification
 

@@ -94,6 +94,16 @@ mycelium pair --kind peer --name james --site mames-house \
 
 The recipient passes the printed claim to `mycelium setup --claim ...` (or the
 installer's `--claim` option). Joining as a peer does not itself grant SSH.
+Unattended provisioning should place the claim in an owner-only file and avoid
+process arguments:
+
+```sh
+chmod 600 /run/fungos/claim
+mycelium setup --claim-file /run/fungos/claim
+```
+
+The file is removed only after successful redemption. A failed attempt retains
+it for a bounded retry; group- or world-accessible claim files are rejected.
 Roles are carried as signed SSH certificate principals; each host opts into
 roles with `host-bundle --allow USER=ROLE`. A host with no mapping denies all
 Mycelium certificate roles while leaving its pre-existing SSH methods intact.
