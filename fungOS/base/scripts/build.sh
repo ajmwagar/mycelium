@@ -6,7 +6,9 @@ base_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 . "$base_dir/config/release.env"
 
 arch=${1:-}
-case "$arch" in amd64|arm64) ;; *) echo "usage: $0 {amd64|arm64}" >&2; exit 2;; esac
+profile=${2:-base}
+case "$arch" in amd64|arm64) ;; *) echo "usage: $0 {amd64|arm64} [base|edge|headless-edge]" >&2; exit 2;; esac
+case "$profile" in base|edge|headless-edge) ;; *) echo "unsupported profile: $profile" >&2; exit 2;; esac
 
 command -v mmdebstrap >/dev/null || { echo "mmdebstrap is required" >&2; exit 1; }
 debian_keyring=/usr/share/keyrings/debian-archive-keyring.gpg
@@ -15,15 +17,15 @@ debian_keyring=/usr/share/keyrings/debian-archive-keyring.gpg
   exit 1
 }
 out_dir=${OUT_DIR:-"$base_dir/out"}
-work_dir=${WORK_DIR:-"$base_dir/.work/$arch"}
+work_dir=${WORK_DIR:-"$base_dir/.work/$profile/$arch"}
 rootfs="$work_dir/rootfs"
-artifact="$out_dir/fungos-base-$arch.tar"
-package_file="$out_dir/fungos-base-$arch.packages"
-manifest="$out_dir/fungos-base-$arch.manifest"
+artifact="$out_dir/fungos-$profile-$arch.tar"
+package_file="$out_dir/fungos-$profile-$arch.packages"
+manifest="$out_dir/fungos-$profile-$arch.manifest"
 
 mkdir -p "$out_dir" "$work_dir"
 [ ! -e "$rootfs" ] || { echo "refusing non-clean work directory: $rootfs" >&2; exit 1; }
-"$base_dir/scripts/resolve-packages.sh" > "$package_file"
+"$base_dir/scripts/resolve-packages.sh" "$base_dir/profiles/$profile.capabilities" > "$package_file"
 packages=$(paste -sd, "$package_file")
 mirror="deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/$DEBIAN_SNAPSHOT $DEBIAN_SUITE main"
 
@@ -72,7 +74,7 @@ tar --sort=name --format=posix --numeric-owner --owner=0 --group=0 \
   echo "debian_suite=$DEBIAN_SUITE"
   echo "debian_snapshot=$DEBIAN_SNAPSHOT"
   echo "source_date_epoch=$SOURCE_DATE_EPOCH"
-  echo "profile=base"
+  echo "profile=$profile"
   echo "artifact=$(basename "$artifact")"
   echo "artifact_sha256=$(sha256sum "$artifact" | cut -d' ' -f1)"
   echo "packages_sha256=$(sha256sum "$package_file" | cut -d' ' -f1)"

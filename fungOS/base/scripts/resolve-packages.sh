@@ -20,6 +20,13 @@ fi
 packages="$tmp_dir/packages"
 : > "$packages"
 while IFS= read -r capability; do
+  # Composition reuses the base declaration; no copied base package list.
+  case "$capability" in
+    @base)
+      "$base_dir/scripts/resolve-packages.sh" "$base_dir/profiles/base.capabilities" >> "$packages"
+      continue
+      ;;
+  esac
   case "$capability" in *[!a-z0-9-]*|'') echo "invalid capability: $capability" >&2; exit 1;; esac
   declaration="$base_dir/capabilities/$capability.packages"
   [ -f "$declaration" ] || { echo "unknown capability: $capability" >&2; exit 1; }

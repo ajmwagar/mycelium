@@ -32,6 +32,22 @@ for required in ca-certificates systemd systemd-sysv iproute2 kmod systemd-resol
   }
 done
 
+headless=$("$base_dir/scripts/resolve-packages.sh" "$base_dir/profiles/headless-edge.capabilities")
+edge=$("$base_dir/scripts/resolve-packages.sh" "$base_dir/profiles/edge.capabilities")
+for forbidden in weston xserver-xorg-core sway; do
+  if printf '%s\n' "$edge" "$headless" | grep -Fx "$forbidden" >/dev/null; then
+    echo "unexpected external compositor: $forbidden" >&2; exit 1
+  fi
+done
+if printf '%s\n' "$headless" | grep -E '^(mesa-vulkan-drivers|libwayland-server0|libgbm1)$' >/dev/null; then
+  echo "headless-edge includes display dependencies" >&2; exit 1
+fi
+for required in libgbm1 libwayland-server0 mesa-vulkan-drivers; do
+  printf '%s\n' "$edge" | grep -Fx "$required" >/dev/null || {
+    echo "edge missing compositor runtime: $required" >&2; exit 1;
+  }
+done
+
 if command -v shellcheck >/dev/null; then
   shellcheck "$base_dir"/scripts/*.sh "$base_dir"/rootfs/usr/libexec/fungos-*
 else
