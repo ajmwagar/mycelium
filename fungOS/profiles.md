@@ -17,6 +17,10 @@ reachable and supportable:
 
 No media, inference, workload, or product application belongs in the base.
 
+Development and capable edge hosts can opt into [Shroud OCI conversion
+tooling](tooling/README.md) independently of workload execution. Its native
+dependency overlay and signed executable policy do not change default images.
+
 ## Edge
 
 `fungOS-edge` extends base for interactive on-premises systems. Its initial

@@ -1,0 +1,5 @@
+# Native conversion tools used by Shroud's shroudoci; no workload daemon.
+cpio
+skopeo
+squashfs-tools
+umoci

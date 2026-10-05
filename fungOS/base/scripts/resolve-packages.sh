@@ -10,6 +10,10 @@ tmp_dir=$(mktemp -d)
 trap 'rm -rf "$tmp_dir"' EXIT HUP INT TERM
 capabilities="$tmp_dir/capabilities"
 sed -e 's/[[:space:]]*#.*$//' -e '/^[[:space:]]*$/d' "$profile" > "$capabilities"
+if [ -n "${2:-}" ]; then
+  [ -f "$2" ] || { echo "capability overlay not found: $2" >&2; exit 1; }
+  sed -e 's/[[:space:]]*#.*$//' -e '/^[[:space:]]*$/d' "$2" >> "$capabilities"
+fi
 
 [ -s "$capabilities" ] || { echo "profile has no capabilities" >&2; exit 1; }
 if [ "$(sort "$capabilities" | uniq -d | wc -l | tr -d ' ')" -ne 0 ]; then

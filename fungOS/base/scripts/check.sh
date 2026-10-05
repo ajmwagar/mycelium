@@ -48,6 +48,23 @@ if printf '%s\n' "$cloud" | grep -E '^(libgbm1|libwayland-server0|mesa-vulkan-dr
   echo "cloud includes display dependencies" >&2; exit 1
 fi
 edge=$("$base_dir/scripts/resolve-packages.sh" "$base_dir/profiles/edge.capabilities")
+tooling=$("$base_dir/scripts/resolve-packages.sh" "$base_dir/profiles/edge.capabilities" "$base_dir/../tooling/shroudoci.capabilities")
+for required in cpio skopeo squashfs-tools umoci; do
+  printf '%s\n' "$tooling" | grep -Fx "$required" >/dev/null || {
+    echo "tooling missing converter dependency: $required" >&2; exit 1;
+  }
+done
+for unchanged in "$packages" "$edge" "$headless"; do
+  if printf '%s\n' "$unchanged" | grep -E '^(skopeo|umoci|squashfs-tools)$' >/dev/null; then
+    echo "conversion tooling leaked into a default profile" >&2; exit 1
+  fi
+done
+for inherited in $edge; do
+  printf '%s\n' "$tooling" | grep -Fx "$inherited" >/dev/null || exit 1
+done
+if "$base_dir/scripts/resolve-packages.sh" "$base_dir/profiles/base.capabilities" "$base_dir/../tooling/does-not-exist" >/dev/null 2>&1; then
+  echo "missing overlay was silently accepted" >&2; exit 1
+fi
 for forbidden in weston xserver-xorg-core sway; do
   if printf '%s\n' "$edge" "$headless" | grep -Fx "$forbidden" >/dev/null; then
     echo "unexpected external compositor: $forbidden" >&2; exit 1

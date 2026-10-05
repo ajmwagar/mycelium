@@ -25,7 +25,8 @@ manifest="$out_dir/fungos-$profile-$arch.manifest"
 
 mkdir -p "$out_dir" "$work_dir"
 [ ! -e "$rootfs" ] || { echo "refusing non-clean work directory: $rootfs" >&2; exit 1; }
-"$base_dir/scripts/resolve-packages.sh" "$base_dir/profiles/$profile.capabilities" > "$package_file"
+overlay=${CAPABILITY_OVERLAY:-}
+"$base_dir/scripts/resolve-packages.sh" "$base_dir/profiles/$profile.capabilities" "$overlay" > "$package_file"
 packages=$(paste -sd, "$package_file")
 mirror="deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/$DEBIAN_SNAPSHOT $DEBIAN_SUITE main"
 
