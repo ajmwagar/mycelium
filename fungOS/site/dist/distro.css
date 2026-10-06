@@ -60,6 +60,10 @@ tbody th { width: 22%; }
 .doc-links li { padding-block: .25rem; }
 .builds, .values { padding-left: 1.2rem; }
 .builds li { margin-bottom: .8rem; }
+.platforms { display: flex; flex-wrap: wrap; gap: .7rem 1.4rem; list-style: none; padding: 0; margin: 0; font-size: .875rem; }
+.platforms li { display: inline-flex; align-items: center; gap: .45rem; }
+.platforms img { width: 1.375rem; height: 1.375rem; opacity: .65; flex: none; }
+.platforms span { color: var(--muted); }
 details { font-size: .875rem; border-top: 1px solid var(--line); padding-top: .7rem; }
 summary { cursor: pointer; color: var(--link); margin-bottom: .6rem; }
 .capture { max-width: 560px; margin: 0 0 1rem; }
