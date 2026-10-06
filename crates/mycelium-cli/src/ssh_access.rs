@@ -332,6 +332,10 @@ fn krl_bytes_match(desired: &[u8], current: &[u8]) -> bool {
         && desired[28..] == current[28..]
 }
 
+// Start relative to timer activation, not machine boot: installation/re-enabling
+// can happen long after boot, with no retained oneshot activation timestamp.
+const SSH_POLICY_TIMER: &str = "[Unit]\nDescription=Periodically reconcile Mycelium SSH access policy\n\n[Timer]\nOnActiveSec=2m\nOnUnitActiveSec=2m\nRandomizedDelaySec=30s\n\n[Install]\nWantedBy=timers.target\n";
+
 fn host_policy_install_timer(args: &[String]) -> Result<Vec<String>, String> {
     require_write(args)?;
     require_root("SSH host-policy timer installation")?;
@@ -350,16 +354,19 @@ fn host_policy_install_timer(args: &[String]) -> Result<Vec<String>, String> {
         "[Unit]\nDescription=Reconcile Mycelium SSH access policy\nAfter=network-online.target\n\n[Service]\nType=oneshot\nEnvironment=MYCELIUM_HOME={}\nEnvironment=MYCELIUM_NO_AUTOSTART=1\nExecStart={} access ssh host-policy reconcile --write\n",
         home.display(), binary.display()
     );
-    let timer = "[Unit]\nDescription=Periodically reconcile Mycelium SSH access policy\n\n[Timer]\nOnBootSec=2m\nOnUnitActiveSec=2m\nRandomizedDelaySec=30s\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n";
     fs::write("/etc/systemd/system/mycelium-ssh-policy.service", unit)
         .map_err(|error| format!("write SSH policy service: {error}"))?;
-    fs::write("/etc/systemd/system/mycelium-ssh-policy.timer", timer)
-        .map_err(|error| format!("write SSH policy timer: {error}"))?;
+    fs::write(
+        "/etc/systemd/system/mycelium-ssh-policy.timer",
+        SSH_POLICY_TIMER,
+    )
+    .map_err(|error| format!("write SSH policy timer: {error}"))?;
     command("systemctl", &["daemon-reload"])?;
     command(
         "systemctl",
         &["enable", "--now", "mycelium-ssh-policy.timer"],
     )?;
+    command("systemctl", &["restart", "mycelium-ssh-policy.timer"])?;
     Ok(vec![
         "installed two-minute gossiped SSH policy reconciliation timer".into(),
     ])
@@ -1487,6 +1494,13 @@ fn command(program: &str, args: &[&str]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ssh_policy_timer_schedules_after_late_install_or_restart() {
+        assert!(SSH_POLICY_TIMER.contains("\nOnActiveSec=2m\n"));
+        assert!(SSH_POLICY_TIMER.contains("\nOnUnitActiveSec=2m\n"));
+        assert!(!SSH_POLICY_TIMER.contains("OnBootSec="));
+    }
 
     #[test]
     fn krl_comparison_ignores_only_creation_time() {
