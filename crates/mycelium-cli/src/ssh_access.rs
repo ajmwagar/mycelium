@@ -248,10 +248,6 @@ fn host_bundle_matches_installed(bundle: &Path) -> Result<bool, String> {
             installed.join("mycelium/user_ca.pub"),
         ),
         (
-            bundle.join("revoked.krl"),
-            installed.join("mycelium/revoked.krl"),
-        ),
-        (
             bundle.join("60-mycelium-access.conf"),
             installed.join("sshd_config.d/60-mycelium-access.conf"),
         ),
@@ -259,6 +255,12 @@ fn host_bundle_matches_installed(bundle: &Path) -> Result<bool, String> {
         if fs::read(desired).ok() != fs::read(current).ok() {
             return Ok(false);
         }
+    }
+    if !krl_files_match(
+        &bundle.join("revoked.krl"),
+        &installed.join("mycelium/revoked.krl"),
+    )? {
+        return Ok(false);
     }
     let manifest = load_host_manifest(bundle)?;
     for account in &manifest.accounts {
@@ -287,6 +289,47 @@ fn host_bundle_matches_installed(bundle: &Path) -> Result<bool, String> {
         })
         .unwrap_or_default();
     Ok(current.iter().map(String::as_str).collect::<BTreeSet<_>>() == expected)
+}
+
+fn krl_files_match(desired: &Path, current: &Path) -> Result<bool, String> {
+    let desired_bytes = fs::read(desired)
+        .map_err(|error| format!("read desired KRL {}: {error}", desired.display()))?;
+    let current_bytes = match fs::read(current) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(format!("read installed KRL {}: {error}", current.display())),
+    };
+    if !krl_bytes_match(&desired_bytes, &current_bytes) {
+        return Ok(false);
+    }
+    // Let OpenSSH validate the complete format, including sections/extensions.
+    // Invalid installed data must be repaired, never treated as converged.
+    for path in [desired, current] {
+        let output = Command::new("ssh-keygen")
+            .args(["-Q", "-l", "-f"])
+            .arg(path)
+            .output()
+            .map_err(|error| format!("validate KRL {}: {error}", path.display()))?;
+        if !output.status.success() {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn krl_bytes_match(desired: &[u8], current: &[u8]) -> bool {
+    // OpenSSH PROTOCOL.krl v1: magic(8), format(4), version(8),
+    // generated_date(8), flags(8), reserved/string, comment/string.
+    // Only generated_date is incidental. Keep every other byte significant;
+    // CA binding, revocations, version, flags and comments must still match.
+    // https://github.com/openssh/openssh-portable/blob/master/PROTOCOL.krl
+    const HEADER: &[u8] = b"SSHKRL\n\0\0\0\0\x01";
+    desired.len() >= 44
+        && current.len() >= 44
+        && desired.starts_with(HEADER)
+        && current.starts_with(HEADER)
+        && desired[..20] == current[..20]
+        && desired[28..] == current[28..]
 }
 
 fn host_policy_install_timer(args: &[String]) -> Result<Vec<String>, String> {
@@ -1444,6 +1487,65 @@ fn command(program: &str, args: &[&str]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn krl_comparison_ignores_only_creation_time() {
+        let mut original = b"SSHKRL\n\0\0\0\0\x01".to_vec();
+        original.resize(44, 0);
+        let mut later = original.clone();
+        later[20..28].copy_from_slice(&1234u64.to_be_bytes());
+        assert!(krl_bytes_match(&original, &later));
+        for offset in (0..20).chain(28..original.len()) {
+            let mut changed = later.clone();
+            changed[offset] ^= 1;
+            assert!(!krl_bytes_match(&original, &changed), "offset {offset}");
+        }
+        assert!(!krl_bytes_match(&original[..28], &later[..28]));
+        let mut extended = later.clone();
+        extended.push(1);
+        assert!(!krl_bytes_match(&original, &extended));
+    }
+
+    #[test]
+    fn krl_comparison_validates_format_and_detects_revocation_changes() {
+        let root =
+            std::env::temp_dir().join(format!("mycelium-krl-compare-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let ca = root.join("ca");
+        command(
+            "ssh-keygen",
+            &["-q", "-t", "ed25519", "-N", "", "-f", ca.to_str().unwrap()],
+        )
+        .unwrap();
+        let desired = root.join("desired.krl");
+        let current = root.join("current.krl");
+        let args = vec![
+            "--ca-public".into(),
+            ca.with_extension("pub").to_string_lossy().into_owned(),
+            "--path".into(),
+            desired.to_string_lossy().into_owned(),
+            "--write".into(),
+        ];
+        krl(&args, &serde_json::json!({"grants":[], "revocations":[]})).unwrap();
+        let mut bytes = fs::read(&desired).unwrap();
+        bytes[20..28].copy_from_slice(&1u64.to_be_bytes());
+        fs::write(&current, &bytes).unwrap();
+        assert!(krl_files_match(&desired, &current).unwrap());
+        assert!(!krl_files_match(&desired, &root.join("missing")).unwrap());
+        fs::remove_file(&desired).unwrap();
+        krl(
+            &args,
+            &serde_json::json!({"grants":[], "revocations":[{"statement":{"serial":42}}]}),
+        )
+        .unwrap();
+        assert!(!krl_files_match(&desired, &current).unwrap());
+        // A matching malformed body is not evidence of convergence.
+        bytes.push(1);
+        fs::write(&desired, &bytes).unwrap();
+        fs::write(&current, &bytes).unwrap();
+        assert!(!krl_files_match(&desired, &current).unwrap());
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn durations_are_explicit_and_bounded() {
