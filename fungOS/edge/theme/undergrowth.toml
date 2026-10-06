@@ -1,0 +1,50 @@
+schema_version = 1
+id = "fungos-undergrowth"
+name = "Undergrowth"
+subtitle = "fungOS"
+
+[palette]
+background = "#151b19"
+background_strong = "#101512"
+surface = "#222925"
+surface_muted = "#2d3530"
+text = "#e0e5dc"
+text_muted = "#9fa99e"
+primary = "#a5ba86"
+success = "#99b78a"
+warning = "#c9b882"
+danger = "#c58d82"
+info = "#92b1b0"
+border = "#39433b"
+border_strong = "#67755f"
+
+[chrome]
+titlebar_height = 30.0
+control_style = "glyphs"
+title_alignment = "left"
+border_width = 1.0
+border_radius = 8.0
+shadow_blur = 20.0
+shadow_offset = 5.0
+shadow_opacity = 0.28
+header_opacity = 0.96
+focus_edge = "border"
+
+[effects]
+glow = 0.0
+scanlines = 0.0
+noise = 0.0
+corner_style = "rounded"
+density = 1.0
+
+[motion]
+micro_ms = 120
+transition_ms = 220
+entrance_ms = 280
+stagger_ms = 60
+easing = "fluid"
+
+[typography]
+font_family = "Inter, system-ui, sans-serif"
+mono_family = "ui-monospace, monospace"
+letter_spacing = 0.0

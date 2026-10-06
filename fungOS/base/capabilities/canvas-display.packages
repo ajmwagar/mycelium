@@ -9,3 +9,4 @@ libseat1
 libwayland-server0
 libxkbcommon0
 mesa-vulkan-drivers
+xcursor-themes
