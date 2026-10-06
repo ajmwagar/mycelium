@@ -181,9 +181,26 @@ were unchanged. The transport certificate hash also remained unchanged across
 that daemon restart. All five edge units and the update timer remained active.
 No VM reboot, networking, DNS, account or authority changes were made.
 
-The SSH-enabled intent was rejected before mutation because this guest has no
-SSH host policy. Read-only assessment also found no configured access-authority
-keys or converged grants. Existing SSH account/grant tests pass, but **positive
-live SSH reconciliation is not yet verified on this guest**. Configure its
-existing fleet SSH authority and authorized grants explicitly before enabling
-that part of the intent; profile assignment does not mint them.
+Initially, the SSH-enabled intent was rejected before mutation because the
+guest had no SSH host policy, access-authority keys or converged grants.
+After explicit operator authorization, the guest was configured with the
+existing fleet access signer's public key and SSH CA public key, accepting
+only `network-admin`. No private authority keys were copied to the guest.
+
+A key-bound, eight-hour `ajmwagar` grant converged through signed gossip.
+The reconciliation dry-run resolved only `ajmwagar`; a fresh node plan with
+`reconcile_ssh: true` applied successfully and created the personal account
+with a locked password. A one-hour role-bound certificate issued by the
+existing CA authenticated as `ajmwagar` through Agora's existing QEMU SSH
+forward, with agent authentication disabled. This does not grant sudo;
+`sudo -n true` was denied. The root recovery authorized-key hash stayed
+unchanged, `sshd -t` passed, and the existing application PIDs were retained.
+These are finite test credentials, not a proof of automatic renewal.
+
+The existing two-minute SSH-policy timer was installed and exercised, but
+then disabled on this guest: regenerated OpenSSH KRL timestamps defeat
+bytewise no-op comparison and unnecessarily reinstall trust files and create
+rollback copies. This is tracked as `mycelium-fwep`. Explicit SSH reconciliation
+works; continuous SSH reconciliation is pending that idempotence fix. The
+software update timer and all edge services remain active. Profile assignment
+still does not mint grants or imply authorization.
