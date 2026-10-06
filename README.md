@@ -917,11 +917,23 @@ optional producer, and discovery never grants authority.
 
 Services are a separate projection of lightweight topology evidence. Mycelium
 currently recognizes explicit MCP, DCP, Unibus, Isochrone, ADB, PostgreSQL,
-MySQL/MariaDB, SQL Server, and Redis service or product names. Standard TCP
+MySQL/MariaDB, SQL Server, Redis, and IPFS/Kubo service or product names. Standard TCP
 ports are treated only as derived-confidence evidence.
 Recognition performs no additional network I/O. Endpoints, protocols, formats,
 freshness, and provenance use the same provider-neutral observation envelope,
 while each protocol retains its own session behavior and authorization.
+
+For Kubo, Linux SSH observers additionally query `/api/v0/version` on already
+observed loopback TCP listeners (5001, commonly remapped 5002, or a custom port
+owned by a visible `ipfs`/`kubo` process). At most four probes run per scan,
+each capped at two seconds and 4097 output bytes. Ports alone never identify
+IPFS. Verified responses project `kind: ipfs`, `role: rpc`, Kubo version,
+provenance and expiry. RPC access is administrative: these records have
+`endpoint_scope: host-local` and **no invented LAN endpoint**. No pins, content,
+keys, config or swarm changes are made. An IPFS process hint has unknown
+endpoint scope; a gateway or reachable swarm endpoint is not inferred from it.
+The observer needs `curl`; it never installs tools or elevates privileges.
+Inspect with `mycelium scan --json` followed by `mycelium services --json`.
 
 `mycelium targets` lists appliances explicitly enrolled behind management
 drivers. The former `mycelium devices` spelling remains a compatibility alias;

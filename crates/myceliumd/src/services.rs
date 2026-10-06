@@ -17,9 +17,12 @@ pub fn project(topology: &Topology) -> ServiceCatalog {
             let Some((kind, confidence)) = recognize(service) else {
                 continue;
             };
+            // A listener observation identifies software, not its routability.
+            // In particular Kubo RPC is administrative and loopback-only here.
             let endpoints = node
                 .ips
                 .keys()
+                .filter(|_| kind != "ipfs")
                 .map(|ip| endpoint(&service.transport, ip.to_string(), service.port))
                 .collect();
             let mut protocols = BTreeSet::from([service.transport.to_lowercase()]);
@@ -44,6 +47,29 @@ pub fn project(topology: &Topology) -> ServiceCatalog {
             attributes.insert("service_name".into(), service.name.clone());
             if let Some(product) = &service.product {
                 attributes.insert("product".into(), product.clone());
+            }
+            if kind == "ipfs" {
+                protocols.insert("ipfs".into());
+                let local_rpc =
+                    service.name == "ipfs-rpc" && service.origin.source == "kubo-loopback-version";
+                attributes.insert(
+                    "endpoint_scope".into(),
+                    if local_rpc { "host-local" } else { "unknown" }.into(),
+                );
+                attributes.insert("role".into(), if local_rpc { "rpc" } else { "node" }.into());
+                attributes.insert("authentication".into(), "unknown".into());
+                if local_rpc {
+                    protocols.insert("http".into());
+                    attributes.insert("administrative".into(), "true".into());
+                    if let Some(version) = service
+                        .product
+                        .as_deref()
+                        .and_then(|p| p.strip_prefix("IPFS Kubo/"))
+                    {
+                        attributes.insert("implementation".into(), "kubo".into());
+                        attributes.insert("version".into(), version.into());
+                    }
+                }
             }
             if let Some(site) = &service.origin.site {
                 attributes.insert("site".into(), site.clone());
@@ -116,6 +142,7 @@ fn recognize(service: &ServiceRecord) -> Option<(String, Confidence)> {
         ("mysql", &["mysql", "mariadb"][..]),
         ("sql-server", &["mssql", "sqlserver"][..]),
         ("redis", &["redis"][..]),
+        ("ipfs", &["ipfs", "kubo"][..]),
     ] {
         if aliases.iter().any(|alias| tokens.contains(alias)) {
             return Some((kind.into(), Confidence::Strong));
@@ -168,6 +195,8 @@ mod tests {
             ("postgres", None, 5433, "postgresql"),
             ("unknown", Some("MariaDB server"), 3307, "mysql"),
             ("redis", None, 6381, "redis"),
+            ("ipfs-rpc", Some("IPFS Kubo/0.43.1"), 5002, "ipfs"),
+            ("ipfs", None, 4001, "ipfs"),
         ] {
             assert_eq!(
                 recognize(&service(name, product, port)).unwrap().0,
@@ -188,6 +217,64 @@ mod tests {
         let mut udp_adb = service("adb", Some("adb"), 5353);
         udp_adb.transport = "udp".into();
         assert!(recognize(&udp_adb).is_none());
+    }
+
+    #[test]
+    fn ipfs_ports_alone_are_not_evidence() {
+        for port in [4001, 4002, 5001, 5002, 8080, 8081] {
+            assert!(recognize(&service("unknown", None, port)).is_none());
+        }
+        assert!(recognize(&service("myipfsbackup", None, 9000)).is_none());
+    }
+
+    #[test]
+    fn loopback_rpc_is_visible_without_inventing_lan_access() {
+        let mut node = TopoNode {
+            id: "agora".into(),
+            ..TopoNode::default()
+        };
+        let addr = "192.0.2.10".parse().unwrap();
+        node.ips.insert(
+            addr,
+            IpRecord {
+                addr,
+                prefix: None,
+                vlan: None,
+                origins: BTreeSet::new(),
+            },
+        );
+        let mut rpc = service("ipfs-rpc", Some("IPFS Kubo/0.43.1"), 5002);
+        rpc.origin.source = "kubo-loopback-version".into();
+        node.services.insert("tcp:5002/ipfs-rpc".into(), rpc);
+        let mut topology = Topology::default();
+        topology.nodes.insert(node.id.clone(), node);
+        let catalog = project(&topology);
+        let observed = &catalog.observations[0];
+        assert_eq!(observed.value.kind, "ipfs");
+        assert!(observed.value.endpoints.is_empty());
+        assert_eq!(observed.value.attributes["endpoint_scope"], "host-local");
+        assert_eq!(observed.value.attributes["version"], "0.43.1");
+        assert_eq!(observed.value.attributes["administrative"], "true");
+        assert_eq!(observed.expires_at, 100 + SERVICE_TTL_SECONDS);
+        assert_eq!(observed.provenance.observer, "neo");
+        assert!(observed.value.protocols.contains("http"));
+    }
+
+    #[test]
+    fn process_hint_does_not_claim_rpc_or_gateway_access() {
+        let mut node = TopoNode {
+            id: "titan".into(),
+            ..TopoNode::default()
+        };
+        node.services
+            .insert("tcp:4001/ipfs".into(), service("ipfs", Some("ipfs"), 4001));
+        let mut topology = Topology::default();
+        topology.nodes.insert(node.id.clone(), node);
+        let catalog = project(&topology);
+        let value = &catalog.observations[0].value;
+        assert!(value.endpoints.is_empty());
+        assert_eq!(value.attributes["endpoint_scope"], "unknown");
+        assert!(!value.attributes.contains_key("administrative"));
     }
 
     #[test]

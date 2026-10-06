@@ -424,23 +424,52 @@ impl Device for LinuxDevice {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
+        let mut warnings = Vec::new();
+        let mut kubo_versions = BTreeMap::new();
+        for (address, port) in crate::ipfs::candidates(sections[5]) {
+            match self
+                .session
+                .exec(&crate::ipfs::version_command(address, port))
+                .await
+            {
+                Ok(response) if response.success() => {
+                    if let Some(version) = crate::ipfs::parse_version(&response.stdout) {
+                        kubo_versions.insert(port, version);
+                    }
+                }
+                Ok(_) => {} // A candidate listener need not speak Kubo.
+                Err(error) => warnings.push(format!("Kubo loopback probe {port}: {error}")),
+            }
+        }
         for listener in parse_listeners(sections[5]) {
+            let kubo_version = (listener.transport == "tcp")
+                .then(|| kubo_versions.get(&listener.port))
+                .flatten();
             out.push(Observation::Service {
                 device: self.meta.id.to_string(),
                 mac: None,
                 ip: None,
                 service: ServiceRecord {
-                    name: service_name(listener.port, listener.process.as_deref()),
+                    name: if kubo_version.is_some() {
+                        "ipfs-rpc".into()
+                    } else {
+                        service_name(listener.port, listener.process.as_deref())
+                    },
                     transport: listener.transport,
                     port: listener.port,
-                    product: listener.process,
+                    product: kubo_version
+                        .map(|version| format!("IPFS Kubo/{version}"))
+                        .or(listener.process),
                     state: ServiceState::Up,
                     observed_at,
-                    origin: origin("ss-listen"),
+                    origin: origin(if kubo_version.is_some() {
+                        "kubo-loopback-version"
+                    } else {
+                        "ss-listen"
+                    }),
                 },
             });
         }
-        let mut warnings = Vec::new();
         let control_plane = match parse_control_plane(sections[7]) {
             Ok(control_plane) => control_plane,
             Err(error) => {

@@ -5,6 +5,7 @@
 //! an observer, not a general remote-shell capability.
 
 mod driver;
+mod ipfs;
 mod parsers;
 
 pub use driver::{LinuxDevice, LinuxDriver, DRIVER_NAME};
