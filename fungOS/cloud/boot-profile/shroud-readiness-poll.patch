@@ -1,0 +1,16 @@
+diff --git a/shroud/src/main.rs b/shroud/src/main.rs
+index f48c137..ea8593e 100644
+--- a/shroud/src/main.rs
++++ b/shroud/src/main.rs
+@@ -2982,7 +2982,10 @@ impl ShroudState {
+                     api_socket_path.display()
+                 );
+             }
+-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
++            // Firecracker normally binds its API socket within milliseconds.
++            // Avoid adding a full 100 ms quantum before configuring every VM;
++            // the bounded deadline and metadata readiness check remain intact.
++            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+         }
+     }
+ }

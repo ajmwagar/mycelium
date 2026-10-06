@@ -127,3 +127,40 @@ successful `list` response before invoking the profiler. Repeat with level `5`,
 then remove only that temporary drop-in and restart to restore the default.
 Do not interpret a connection-refused startup race as a measured boot failure.
 The temporary override was removed after this experiment.
+
+## Normal-mode readiness polling comparison
+
+The next [small Shroud patch](shroud-readiness-poll.patch) changes API socket
+polling from 100 ms to 10 ms, retaining the metadata readiness check, socket
+permissions and ten-second deadline. It does not poll continuously or change
+the guest kernel command line. This patch layers on the console patch above.
+
+| Batch | Socket poll | Median request → execution | Median start ACK |
+| --- | --- | --- | --- |
+| [A](boot-poll-100ms-a.json) | 100 ms | 1.021 s | 202 ms |
+| [B](boot-poll-10ms-b.json) | 10 ms | 0.947 s | 123 ms |
+| [C](boot-poll-10ms-c.json) | 10 ms | 0.944 s | 124 ms |
+
+These conventional medians show approximately 7% less request-to-execution
+latency and 39% less start-ACK latency. All thirty starts/stops passed. Both
+versions use normal logging and identical prepared artifacts; caches and host
+load remain uncontrolled. This is A/B/B, not a randomized or interleaved trial.
+Theme captures/builds were paused and existing display processes stayed running.
+Do not compare this quieter-host baseline directly to earlier batches.
+
+Representative raw Firecracker logs corroborate the mechanism: socket bind to
+first configuration request was [109 ms before](boot-poll-100ms-a.log) and
+[18 ms after](boot-poll-10ms-b.log). The 10-ms observation sampling resolution
+and request-to-ACK semantics remain those of the existing profiler.
+
+All 75 Shroud tests passed after locked check; release musl build completed on
+Agora. The signed test-channel version `0.1.3` has SHA-256
+`12e5984c949be1b8944ccba0de69fdfb43101dd9ed57680640e93e5491b28120`.
+It was seeded and activated through existing Mycelium package workflows only
+on `fungos-edge-qemu-01`; native service readiness verified and all six host
+application/management services remained active. Prior releases are retained.
+Shroud's source patches are not upstream merged; no production deployment.
+
+Most remaining latency is after the start ACK. Next measure a supported
+microVM-specific kernel against this exact baseline and validate application
+health; do not disable warnings, mitigations or readiness to improve a score.

@@ -1,0 +1,33 @@
+2026-10-06T21:39:00.971466477 [anonymous-instance:main] Running Firecracker v1.16.1
+2026-10-06T21:39:00.971567387 [anonymous-instance:main] Listening on API socket ("/var/lib/shroud/sockets/fc_fungos-smoke.sock").
+2026-10-06T21:39:00.972085137 [anonymous-instance:fc_api] API server started.
+2026-10-06T21:39:00.989386292 [anonymous-instance:fc_api] The API server received a Put request on "/machine-config" with body "{\"mem_size_mib\":128,\"smt\":false,\"vcpu_count\":1}".
+2026-10-06T21:39:00.989429872 [anonymous-instance:fc_api] The request was executed successfully. Status code: 204 No Content.
+2026-10-06T21:39:00.996385614 [anonymous-instance:fc_api] The API server received a Put request on "/boot-source" with body "{\"boot_args\":\"console=ttyS0 reboot=k panic=1 pci=off init=/init loglevel=5\",\"initrd_path\":\"/var/lib/shroud/images/fungos-smoke/initramfs.cpio\",\"kernel_image_path\":\"/var/lib/shroud/kernels/vmlinux\"}".
+2026-10-06T21:39:00.996440764 [anonymous-instance:fc_api] The request was executed successfully. Status code: 204 No Content.
+2026-10-06T21:39:01.002315456 [anonymous-instance:fc_api] The API server received a Put request on "/drives/rootfs" with body "{\"drive_id\":\"rootfs\",\"is_read_only\":true,\"is_root_device\":true,\"path_on_host\":\"/var/lib/shroud/images/fungos-smoke/rootfs.sqsh\"}".
+2026-10-06T21:39:01.002361886 [anonymous-instance:fc_api] The request was executed successfully. Status code: 204 No Content.
+2026-10-06T21:39:01.006909597 [anonymous-instance:fc_api] The API server received a Put request on "/network-interfaces/eth0" with body "{\"guest_mac\":\"02:89:3f:62:98:0c\",\"host_dev_name\":\"sh-tap-893f6298\",\"iface_id\":\"eth0\"}".
+2026-10-06T21:39:01.007552657 [anonymous-instance:fc_api] The request was executed successfully. Status code: 204 No Content.
+2026-10-06T21:39:01.012359118 [anonymous-instance:fc_api] The API server received a Put request on "/actions" with body "{\"action_type\":\"InstanceStart\"}".
+2026-10-06T21:39:01.021624811 [anonymous-instance:main] Artificially kick devices
+2026-10-06T21:39:01.021735791 [anonymous-instance:fc_vcpu 0] Received a VcpuEvent::Resume message with immediate_exit enabled. immediate_exit was disabled before proceeding
+2026-10-06T21:39:01.022343521 [anonymous-instance:fc_api] The request was executed successfully. Status code: 204 No Content.
+2026-10-06T21:39:01.091472930 [anonymous-instance:fc_vcpu 0] vcpu: IO write @ 0xcf8:0x4 failed: bus_error: MissingAddressRange
+2026-10-06T21:39:01.091507170 [anonymous-instance:fc_vcpu 0] vcpu: IO read @ 0xcfc:0x2 failed: bus_error: MissingAddressRange
+[    0.000000] x86 CPU feature dependency check failure: CPU0 has '18*32+31' enabled but '18*32+26' disabled. Kernel might be fine, but no guarantees.
+[    0.101298] PCI: Fatal: No config space access function found
+[    0.163751] PCI: System does not support PCI
+2026-10-06T21:39:01.425678113 [anonymous-instance:fc_vcpu 0] vcpu: IO read @ 0x87:0x1 failed: bus_error: MissingAddressRange
+[    0.340748] i8042: PNP: PS/2 appears to have AUX port disabled, if this is incorrect please boot with i8042.nopnp
+[    0.346696] amd_pstate: the _CPC object is not present in SBIOS or ACPI disabled
+2026-10-06T21:39:01.615758366 [anonymous-instance:fc_vcpu 0] Invalid MMIO read @ 0xfed803c0:0x4: bus_error: MissingAddressRange
+2026-10-06T21:39:01.615801226 [anonymous-instance:fc_vcpu 0] Invalid MMIO read @ 0xfed803c0:0x4: bus_error: MissingAddressRange
+Mounted /proc, /sys, /dev, /dev/pts, and /dev/shm.
+udhcpc: started, v1.38.0
+udhcpc: broadcasting discover
+udhcpc: broadcasting select for 172.16.0.100, server 172.16.0.1
+udhcpc: lease of 172.16.0.100 obtained from 172.16.0.1, lease time 43200
+Starting container/vm entrypoint...
+FUNGOS_MICROVM_OK
+x86_64
