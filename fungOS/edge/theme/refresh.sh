@@ -15,6 +15,7 @@ case "$mode" in
     service_dir="$root/etc/systemd/system/canvas-compositor.service.d"
     mkdir -p "$asset_dir" "$config_dir/packs" "$config_dir/selections" "$service_dir"
     install -m 0644 "$work/undergrowth.ppm" "$asset_dir/undergrowth.ppm"
+    install -m 0644 "$work/undergrowth.png" "$asset_dir/undergrowth.png"
     install -m 0644 "$theme_dir/undergrowth.toml" "$config_dir/packs/undergrowth.toml"
     install -m 0644 "$theme_dir/dock.txt" "$config_dir/selections/dock.txt"
     install -m 0644 "$theme_dir/../qemu/canvas-compositor.service.d/30-undergrowth.conf" "$service_dir/30-undergrowth.conf"
