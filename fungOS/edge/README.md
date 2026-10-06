@@ -96,6 +96,35 @@ still requires three stable samples from the supervised process. Readiness check
 and service inspection run outside the mesh RPC event loop. This is a bounded
 native-service adapter, not a second supervisor or application scheduler.
 
+### QEMU reconciliation evidence, 2026-10-06
+
+Built the clean Mycelium source on Agora for `x86_64-unknown-linux-musl`;
+type checking and all 85 daemon tests passed (test temporary files used a
+dedicated cache directory because the host `/tmp` quota was exhausted).
+Published signed Mycelium `0.1.12` on the guest-only `fungos-qemu-test` channel
+using the existing fleet release authority. The guest received its manifest
+through gossip; bytes were explicitly transferred and seeded, then installed
+through signed self-update. Installed SHA-256:
+`1e85bc9004463cfbcc66a6b7a4e866bbf082ece0bf18dd941ca517c012078b4b`.
+This does not claim automatic artifact fetching or a fleet-wide rollout.
+
+- Stopped the guest's Unibus router: dry-run reported `drifted` with
+  `native service is not active`, despite its installed version still matching.
+- Explicit reconciliation restarted and verified the same signed release.
+- Repeated reconciliation left the healthy supervised PID unchanged.
+- A second deliberate stoppage was repaired by `software auto-run`; its next
+  invocation returned an empty `applied` list and current application status.
+- The router restart exposed a native dependency gap: `Requires=unibus-router`
+  stopped Canvas's adapter, but starting the router did not pull it back in.
+  The display-only [router drop-in](qemu/unibus-router.service.d/20-canvas-adapter.conf)
+  adds `Wants=canvas-edge.service`. Native systemd unit validation passed;
+  repeating the repair started both services. The adapter's existing restart
+  policy handles the short interval before the router begins accepting connections.
+
+The update timer was paused only during fault injection and restored afterward.
+No reboot, GPU handoff, network change, identity rotation or account creation
+was performed. Compositor automatic updates remain gated on output readiness.
+
 ## QEMU evidence, 2026-10-05
 
 The native fixture is Rust, not a substitute implementation of Unibus or Canvas:
