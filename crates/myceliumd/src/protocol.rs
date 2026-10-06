@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 #[serde(tag = "method", content = "params", rename_all = "snake_case")]
 pub enum Request {
     Hello,
+    NodeObserve,
+    NodeRefresh { write: bool },
     /// Registered drivers (builtin + Lua plugins).
     Drivers,
     /// Recognize + open a device. `driver` pins the class; otherwise each

@@ -228,7 +228,7 @@ fn host_policy_reconcile(args: &[String], state: &Value) -> Result<Vec<String>, 
     result
 }
 
-fn require_root(action: &str) -> Result<(), String> {
+pub(crate) fn require_root(action: &str) -> Result<(), String> {
     let output = Command::new("id")
         .arg("-u")
         .output()

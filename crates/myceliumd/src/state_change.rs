@@ -4,12 +4,12 @@ use mycelium_core::{
     ExecutionMode, ExecutionState, MyceliumError, Result, StateChangePlan, StateChangeReceipt,
 };
 
-pub(crate) struct StateChangeTransaction {
+pub struct StateChangeTransaction {
     receipt: StateChangeReceipt,
 }
 
 impl StateChangeTransaction {
-    pub(crate) fn begin(plan: StateChangePlan, mode: ExecutionMode) -> Result<Self> {
+    pub fn begin(plan: StateChangePlan, mode: ExecutionMode) -> Result<Self> {
         let now = now();
         let receipt = StateChangeReceipt {
             schema_version: 1,
@@ -31,11 +31,11 @@ impl StateChangeTransaction {
         Ok(Self { receipt })
     }
 
-    pub(crate) fn mode(&self) -> ExecutionMode {
+    pub fn mode(&self) -> ExecutionMode {
         self.receipt.mode
     }
 
-    pub(crate) fn finish(mut self, result: serde_json::Value) -> Result<StateChangeReceipt> {
+    pub fn finish(mut self, result: serde_json::Value) -> Result<StateChangeReceipt> {
         self.receipt.result = Some(result);
         self.receipt.finished_at = Some(now());
         self.receipt.state = if self.receipt.mode == ExecutionMode::Plan {
@@ -47,7 +47,7 @@ impl StateChangeTransaction {
         Ok(self.receipt)
     }
 
-    pub(crate) fn fail(mut self, error: impl Into<String>) -> Result<StateChangeReceipt> {
+    pub fn fail(mut self, error: impl Into<String>) -> Result<StateChangeReceipt> {
         let error = error.into();
         self.receipt.error = Some(error.clone());
         self.receipt.finished_at = Some(now());

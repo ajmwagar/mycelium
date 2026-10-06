@@ -88,3 +88,73 @@ Fab or another build provider produces immutable artifacts. Mycelium verifies,
 gossips, selects, stages, and atomically advances signed versions. Native
 systemd or launchd adapters restart and health-check services. Profile changes
 therefore reuse one update path and do not introduce per-profile installers.
+
+## Assigning a runtime profile to an enrolled Linux node
+
+The CLI composes existing software placement and SSH reconciliation; it does not
+convert an installed base image or install missing Debian runtime dependencies.
+Build/install those dependencies through the image's normal provisioning path.
+Changing a runtime profile does not uninstall deselected packages or stop their
+services. `profile.edge` is descriptive discovery metadata, never an access role.
+
+An intent names the stable peer ID, runtime profile, optional hostname, existing
+software-policy representation, and whether to reconcile already-configured SSH
+host policy. For example, create the local intent from a reviewed package policy:
+
+```sh
+export MYCELIUM_HOME=/var/lib/mycelium
+node_id=$(mycelium node status --json | jq -r '.node.hello.node_id')
+jq --arg id "$node_id" '{
+  node_id: $id,
+  profile: "edge",
+  hostname: "edge-lab-01",
+  software_policy: .,
+  reconcile_ssh: false
+}' reviewed-software-policy.json > node-intent.json
+
+mycelium node plan node-intent.json --json > node-plan.json
+mycelium node apply --plan node-plan.json --dry-run --json
+sudo --preserve-env=MYCELIUM_HOME mycelium node apply --plan node-plan.json --write --json
+mycelium node status --json
+```
+
+Use `node.PEER_ID` in software selectors instead of `host.OLD_HOSTNAME` when
+renaming. Plans project the requested hostname/profile into existing observed
+facts and display the selected package versions/digests. An old-hostname policy
+that selects nothing fails loudly. The planner pins peer identity, current
+hostname/policy/intent, selected manifests and optional SSH grant/CA view into
+the existing content-addressed `StateChangePlan`. Changed preconditions require
+a fresh plan. Root and explicit `--write` are required for application. Missing
+compatible manifests or cached artifacts block before mutation.
+
+Apply saves desired state, sets the static/transient hostname with Linux's
+`hostnamectl`, refreshes signed discovery without restarting the daemon, and
+calls the existing software and optional SSH reconcilers. The peer key,
+transport certificates and machine-id stay intact. This does not change DNS,
+certificate SANs, addresses, VLANs, images or reboot policy. Repeating a freshly
+planned healthy intent leaves application processes running. The normal native
+update timer still owns later automatic software repair; hostname and SSH
+changes are not smuggled into that timer.
+
+For `reconcile_ssh: true`, first configure the existing host policy with
+`mycelium access ssh host-policy set --role ROLE --ca-public /absolute/user_ca.pub --write`.
+Signed grants/revocations must have converged from an already-trusted authority.
+The node planner does not create grants, accept a new CA, grant sudo or store
+passwords. The existing SSH reconciler owns account creation, principals, KRL
+validation and trust-file rollback. Its dedicated timer remains available via
+`mycelium access ssh host-policy install-timer --write`.
+
+The common execution receipt records success or failure under the node's
+Mycelium state. This is **not** a cross-domain atomic transaction: desired policy
+can persist and a hostname can change before a later package/access operation
+fails. Inspect the receipt and live state, fix the reported prerequisite, then
+generate a fresh plan. Per-package rollback remains independently verified.
+Do not infer successful profile reconciliation from metadata alone. Concurrent
+independent software publishers/operators are not serialized by the local node
+write lock; quiesce those when applying a reviewed lifecycle change.
+
+For manual recovery, the same operations are independently available: software
+policy set/reconcile, `hostnamectl`, node observation refresh through apply, and
+SSH host-policy reconcile. Neither Fab, Unibus nor a central controller is
+required. This first adapter supports Linux/systemd; Darwin remains read-only
+for node status until it has its own hostname/service adapter.

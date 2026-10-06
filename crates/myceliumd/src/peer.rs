@@ -107,6 +107,36 @@ impl Mesh {
         &self.hello.hostname
     }
 
+    pub async fn local_hello(&self) -> PeerHello {
+        self.observations.lock().await.values().find_map(|envelope| {
+            if envelope.origin == self.node_id() {
+                if let PeerEvent::Hello(hello) = &envelope.event { return Some(hello.clone()); }
+            }
+            None
+        }).unwrap_or_else(|| self.hello.clone())
+    }
+
+    /// Refresh public observations after a locally authorized rename/profile
+    /// change. Neither the peer signing key nor transport credentials change.
+    pub async fn refresh_local_hello(&self) -> Result<PeerHello, AnyError> {
+        let mut hello = self.local_hello().await;
+        let previous = hello.clone();
+        let intent = crate::node_profile::read()?;
+        if intent.as_ref().is_some_and(|intent| intent.node_id != self.node_id()) {
+            return Err("local profile belongs to another peer".into());
+        }
+        hello.hostname = tokio::task::spawn_blocking(|| output("hostname", &["-s"]))
+            .await??.trim().to_owned();
+        hello.capabilities.retain(|fact| !fact.starts_with("profile."));
+        if let Some(intent) = intent {
+            hello.capabilities.push(format!("profile.{}", intent.profile));
+        }
+        if hello != previous {
+            self.publish(PeerEvent::Hello(hello.clone())).await?;
+        }
+        Ok(hello)
+    }
+
     #[cfg(test)]
     pub fn ephemeral_for_test() -> Arc<Self> {
         let key = SigningKey::from_bytes(&[3; 32]);
@@ -233,6 +263,7 @@ impl Mesh {
 
     pub async fn start(self: &Arc<Self>) -> Result<(), AnyError> {
         self.publish(PeerEvent::Hello(self.hello.clone())).await?;
+        self.refresh_local_hello().await?;
         let collector = self.clone();
         tokio::spawn(async move {
             loop {
@@ -286,7 +317,7 @@ impl Mesh {
         let hardware_collector = self.clone();
         tokio::spawn(async move {
             loop {
-                let hello = hardware_collector.hello.clone();
+                let hello = hardware_collector.local_hello().await;
                 match tokio::task::spawn_blocking(move || crate::hardware::collect(&hello)).await {
                     Ok(Ok(snapshot)) => {
                         if let Err(error) = hardware_collector
@@ -500,7 +531,7 @@ impl Mesh {
         stig_profile: Option<String>,
         remediation_plan: bool,
     ) -> Result<SecurityPosture, AnyError> {
-        let hello = self.hello.clone();
+        let hello = self.local_hello().await;
         let (posture, events) = tokio::task::spawn_blocking(move || {
             let stig = match (stig_content.as_deref(), stig_profile.as_deref()) {
                 (Some(content), Some(profile)) => Some(crate::security::StigScan {
@@ -1091,7 +1122,7 @@ impl Mesh {
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
     {
         let (reader, mut writer) = tokio::io::split(stream);
-        send(&mut writer, &PeerMessage::Hello(self.hello.clone())).await?;
+        send(&mut writer, &PeerMessage::Hello(self.local_hello().await)).await?;
         let mut lines = BufReader::new(reader).lines();
         let mut digest_interval = tokio::time::interval(DIGEST_INTERVAL);
         digest_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);

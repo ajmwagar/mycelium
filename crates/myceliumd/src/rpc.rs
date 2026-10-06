@@ -565,7 +565,7 @@ impl Daemon {
             .into_iter()
             .filter_map(|view| view.hello.map(|hello| hello.hostname))
             .collect::<BTreeSet<_>>();
-        let local_hostname = self.mesh.hostname().to_owned();
+        let local_hostname = self.mesh.local_hello().await.hostname;
         let mut already_saved = self
             .saved
             .lock()
@@ -844,6 +844,14 @@ impl Daemon {
     async fn handle(&self, req: Request) -> Result<serde_json::Value> {
         use serde_json::to_value;
         match req {
+            Request::NodeObserve => {
+                let intent = crate::node_profile::read().map_err(|error| MyceliumError::Validation(error.to_string()))?;
+                to_value(serde_json::json!({ "hello": self.mesh.local_hello().await, "intent": intent })).map_err(json_err)
+            }
+            Request::NodeRefresh { write } => {
+                if !write { return Err(MyceliumError::WritesNotPermitted("node observation refresh requires --write".into())); }
+                to_value(self.mesh.refresh_local_hello().await.map_err(|error| MyceliumError::Validation(error.to_string()))?).map_err(json_err)
+            }
             Request::Hello => to_value(serde_json::json!({
                 "version": crate::VERSION,
                 "pid": std::process::id(),

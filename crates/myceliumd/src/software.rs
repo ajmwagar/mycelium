@@ -251,6 +251,8 @@ pub fn facts(peer: &PeerView) -> BTreeSet<String> {
     facts.insert(format!("arch.{}", hello.architecture));
     facts.insert(format!("site.{}", hello.site));
     facts.insert(format!("host.{}", hello.hostname));
+    // Package assignment survives a hostname change.
+    facts.insert(format!("node.{}", hello.node_id));
     facts.extend(hello.capabilities.iter().cloned());
     if let Some(snapshot) = &peer.hardware {
         for device in &snapshot.devices {
@@ -886,6 +888,17 @@ mod tests {
             .version,
             "1.10.0"
         );
+    }
+
+    #[test]
+    fn stable_node_selector_survives_rename() {
+        let before = peer("old-host", Platform::Linux, "x86_64", &[]);
+        let mut after = before.clone();
+        after.hello.as_mut().unwrap().hostname = "new-host".into();
+        let stable = format!("node.{}", before.hello.as_ref().unwrap().node_id);
+        assert!(facts(&before).contains(&stable));
+        assert!(facts(&after).contains(&stable));
+        assert!(!facts(&after).contains("host.old-host"));
     }
 
     #[test]

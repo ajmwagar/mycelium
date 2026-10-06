@@ -9,6 +9,7 @@ mod completions;
 mod dns;
 mod enroll;
 mod invite;
+mod node;
 mod oidc;
 mod oidc_gateway;
 mod pair;
@@ -136,6 +137,9 @@ usage:
   mycelium software status [--json]
   mycelium software reconcile (--write | --dry-run) [--json]
   mycelium software auto-run [--json]
+  mycelium node status [--json]
+  mycelium node plan INTENT.json [--json]
+  mycelium node apply --plan PLAN.json (--write | --dry-run) [--json]
   mycelium access list [--json]
   mycelium access keygen --path PATH --write [--json]
   mycelium access publish --statement PATH --signing-key PATH --write [--dry-run] [--json]
@@ -628,6 +632,7 @@ async fn run(cmd: &str, args: &[String]) -> Result<Vec<String>, ClientError> {
         "releases" => releases(args).await,
         "packages" => packages(args).await,
         "software" => software(args).await,
+        "node" => node::run(args).await.map_err(access_error),
         "access" => access(args).await,
         "authority" => authority(args).await,
         "update" => update(args).await,

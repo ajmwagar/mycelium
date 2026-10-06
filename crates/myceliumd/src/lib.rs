@@ -24,6 +24,7 @@ pub mod credential_provider;
 mod execution;
 mod hardware;
 pub mod peer;
+pub mod node_profile;
 pub mod protocol;
 pub mod resources;
 pub mod rpc;
@@ -34,7 +35,7 @@ pub mod siem;
 pub mod software;
 pub mod software_service;
 pub mod ssh_renewal;
-mod state_change;
+pub mod state_change;
 pub mod topology_feed;
 pub mod update_policy;
 
