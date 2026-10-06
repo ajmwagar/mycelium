@@ -75,3 +75,6 @@ returned, while the workload list was empty as intended. Explicitly starting
 the same microVM emitted the marker again; stopping it left no Firecracker
 process. No failed systemd units remained. Agora's host Shroud, GPU ownership,
 and production Beachhead/Bob resources were not changed by this test.
+
+For repeated startup measurements that distinguish control acknowledgment
+from guest execution, see the [boot profiler and baseline](../boot-profile/README.md).
