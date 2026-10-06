@@ -78,3 +78,52 @@ Next compare these artifacts on direct KVM versus nested KVM, then evaluate
 a deliberately smaller supported guest kernel and real service readiness.
 Audit dependencies before changing host network-online semantics; removing
 the wait merely to improve a number does not improve readiness.
+
+## Console verbosity comparison, 2026-10-06
+
+ShroudOCI hardcoded `debug` in the guest kernel command line. The attached
+[upstream patch](shroud-guest-loglevel.patch), against Shroud `15c05fa`, defaults
+to `loglevel=5` and accepts `SHROUD_GUEST_KERNEL_LOG_LEVEL=debug` to restore the
+exact previous behavior, or a single digit 0–7. It preserves serial access,
+panic/reboot behavior and all security settings. Level 5 prints warnings and
+more severe messages; this is not disabling the console.
+
+Four consecutive ten-boot batches used the same candidate binary and prepared
+fixture, changing only verbosity:
+
+| Batch | Verbosity | Median request → execution | Range |
+| --- | --- | --- | --- |
+| [A](boot-console-debug-a.json) | debug | 1.580 s | 1.482–1.695 s |
+| [B](boot-console-normal-b.json) | normal | 1.111 s | 1.075–1.201 s |
+| [C](boot-console-debug-c.json) | debug | 1.860 s | 1.593–2.290 s |
+| [D](boot-console-normal-d.json) | normal | 1.156 s | 1.046–1.417 s |
+
+Table medians average the two central samples; the raw harness JSON uses
+nearest rank instead. A→B improved about 30%; C→D about 38%. Shared host load
+was uncontrolled and increased during C (load average 11, concurrent compiler
+and other VMs), so these are encouraging observations, not an isolated causal
+estimate or fleet latency guarantee. All 40 boots completed and the fixture
+was stopped after each batch. The baseline above used an older Shroud build
+and is not the matched comparison. Representative serial output shrank from
+21,471 bytes in debug mode to 3,780 bytes in normal mode.
+
+Build verification on Agora: locked `cargo check -p shroud -p shroudoci`,
+75 Shroud tests and 47 ShroudOCI tests passed; release musl build succeeded.
+Use a writable `TMPDIR` beneath the build user's cache if `/tmp` is quota-full.
+The patch remains an upstream submission artifact, not an upstream merged change.
+
+Candidate Shroud SHA-256:
+`e8cbb9ac83bd9e4dacf1660e404f5c25e86ba20fd93cbdc48047e6bbc481eafa`.
+It was signed using the existing package authority as version `0.1.2`, channel
+`fungos-cloud-test`, target `x86_64-unknown-linux-musl`, seeded through
+`mycelium releases seed`, and installed only in this disposable guest using
+`mycelium software activate shroud`. Native Unix-JSON service readiness passed;
+the previous `0.1.1` release remains available for rollback. No fleet rollout.
+
+To repeat, set a temporary Shroud systemd service drop-in with
+`Environment=SHROUD_GUEST_KERNEL_LOG_LEVEL=debug`, reload and restart only after
+confirming no workloads are running. Wait for the existing control API's
+successful `list` response before invoking the profiler. Repeat with level `5`,
+then remove only that temporary drop-in and restart to restore the default.
+Do not interpret a connection-refused startup race as a measured boot failure.
+The temporary override was removed after this experiment.

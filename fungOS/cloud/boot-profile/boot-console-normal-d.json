@@ -1,0 +1,71 @@
+{
+  "cache_state": "uncontrolled; no host cache eviction",
+  "fixture": "fungos-smoke",
+  "fixture_stopped_after_run": true,
+  "guest_marker_median_ms": 1142.028767,
+  "guest_marker_p95_ms": 1417.358313,
+  "measurement": "fresh microVM start request to observed guest execution marker; not application health",
+  "poll_interval_ms": 10,
+  "samples": [
+    {
+      "guest_marker_observed_ms": 1417.358313,
+      "iteration": 1,
+      "start_ack_ms": 296.397312,
+      "stop_ack_ms": 46.070763
+    },
+    {
+      "guest_marker_observed_ms": 1387.030346,
+      "iteration": 2,
+      "start_ack_ms": 289.278071,
+      "stop_ack_ms": 29.775738
+    },
+    {
+      "guest_marker_observed_ms": 1169.2510249999998,
+      "iteration": 3,
+      "start_ack_ms": 235.17638499999998,
+      "stop_ack_ms": 38.29385
+    },
+    {
+      "guest_marker_observed_ms": 1100.133206,
+      "iteration": 4,
+      "start_ack_ms": 246.028799,
+      "stop_ack_ms": 42.262651999999996
+    },
+    {
+      "guest_marker_observed_ms": 1094.8167740000001,
+      "iteration": 5,
+      "start_ack_ms": 218.317021,
+      "stop_ack_ms": 32.888119
+    },
+    {
+      "guest_marker_observed_ms": 1237.741953,
+      "iteration": 6,
+      "start_ack_ms": 240.908216,
+      "stop_ack_ms": 31.804729
+    },
+    {
+      "guest_marker_observed_ms": 1206.705215,
+      "iteration": 7,
+      "start_ack_ms": 268.746025,
+      "stop_ack_ms": 28.986477999999998
+    },
+    {
+      "guest_marker_observed_ms": 1046.252371,
+      "iteration": 8,
+      "start_ack_ms": 221.950122,
+      "stop_ack_ms": 30.366418
+    },
+    {
+      "guest_marker_observed_ms": 1076.5632890000002,
+      "iteration": 9,
+      "start_ack_ms": 232.314915,
+      "stop_ack_ms": 32.739079
+    },
+    {
+      "guest_marker_observed_ms": 1142.028767,
+      "iteration": 10,
+      "start_ack_ms": 217.905111,
+      "stop_ack_ms": 58.995317
+    }
+  ]
+}

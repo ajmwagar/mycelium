@@ -1,0 +1,92 @@
+diff --git a/shroudoci/src/lib.rs b/shroudoci/src/lib.rs
+index 820db01..689f742 100644
+--- a/shroudoci/src/lib.rs
++++ b/shroudoci/src/lib.rs
+@@ -833,16 +833,17 @@ $BB reboot -f
+ 
+         let guest_mac = provided_guest_mac.unwrap_or("AA:FC:00:00:00:01");
+ 
++        let log_level = match env::var("SHROUD_GUEST_KERNEL_LOG_LEVEL") {
++            Ok(value) => Some(value),
++            Err(env::VarError::NotPresent) => None,
++            Err(error) => return Err(error).context("read SHROUD_GUEST_KERNEL_LOG_LEVEL"),
++        };
++        let boot_args = firecracker_boot_args(root_vfs_tag, log_level.as_deref())?;
++
+         let boot_source = json!({
+             "kernel_image_path": kernel_image_path,
+             "initrd_path": initramfs_path,
+-            "boot_args": format!(
+-                "console=ttyS0 reboot=k panic=1 pci=off init=/init debug{}",
+-                match root_vfs_tag {
+-                    Some(t) => format!(" shroud_root_tag={t}"),
+-                    None => String::new(),
+-                }
+-            )
++            "boot_args": boot_args
+         });
+         let drives = rootfs_drive_payload(&rootfs_path);
+         let network = json!({
+@@ -1017,6 +1018,27 @@ fn remove_path_if_exists(path: &Path) -> Result<()> {
+     .with_context(|| format!("failed to remove {}", path.display()))
+ }
+ 
++fn firecracker_boot_args(root_vfs_tag: Option<&str>, log_level: Option<&str>) -> Result<String> {
++    // Keep errors and warnings on the serial console, not every informational
++    // or debug printk. Operators can restore the exact old mode with `debug`.
++    let level = log_level.unwrap_or("5");
++    anyhow::ensure!(
++        level == "debug" || (level.len() == 1 && matches!(level.as_bytes()[0], b'0'..=b'7')),
++        "SHROUD_GUEST_KERNEL_LOG_LEVEL must be a single digit 0..7 or debug"
++    );
++    let verbosity = if level == "debug" {
++        "debug".to_owned()
++    } else {
++        format!("loglevel={level}")
++    };
++    Ok(format!(
++        "console=ttyS0 reboot=k panic=1 pci=off init=/init {verbosity}{}",
++        root_vfs_tag
++            .map(|tag| format!(" shroud_root_tag={tag}"))
++            .unwrap_or_default()
++    ))
++}
++
+ fn firecracker_machine_config_payload(config: FirecrackerMachineConfig) -> Value {
+     json!({
+         "vcpu_count": config.vcpu_count,
+@@ -1163,11 +1185,32 @@ mod tests {
+         assert!(init[mount..entry].contains("poweroff -f; exit 1"));
+     }
+     use super::{
+-        firecracker_machine_config_payload, render_env_export, rootfs_drive_payload, udhcpc_script,
+-        FirecrackerMachineConfig,
++        firecracker_boot_args, firecracker_machine_config_payload, render_env_export,
++        rootfs_drive_payload, udhcpc_script, FirecrackerMachineConfig,
+     };
+     use serde_json::json;
+ 
++    #[test]
++    fn boot_args_retain_recovery_and_make_console_verbosity_explicit() {
++        assert_eq!(
++            firecracker_boot_args(None, None).unwrap(),
++            "console=ttyS0 reboot=k panic=1 pci=off init=/init loglevel=5"
++        );
++        assert!(firecracker_boot_args(Some("root-share"), Some("7"))
++            .unwrap()
++            .ends_with("loglevel=7 shroud_root_tag=root-share"));
++        assert_eq!(
++            firecracker_boot_args(None, Some("debug")).unwrap(),
++            "console=ttyS0 reboot=k panic=1 pci=off init=/init debug"
++        );
++        for invalid in ["", "8", "-1", "05", "7 mitigations=off", "debug quiet"] {
++            assert!(
++                firecracker_boot_args(None, Some(invalid)).is_err(),
++                "{invalid}"
++            );
++        }
++    }
++
+     #[test]
+     fn renders_firecracker_machine_config_payload() {
+         let payload = firecracker_machine_config_payload(FirecrackerMachineConfig {
