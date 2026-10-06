@@ -65,6 +65,10 @@ pub(crate) trait Lifecycle {
     fn stop(&self) -> Result<(), Error>;
     fn start(&self) -> Result<(), Error>;
     fn verify(&self, digest: &str) -> Result<(), Error>;
+    /// Read-only observation, without waiting for a stopped service to start.
+    fn check(&self, digest: &str) -> Result<(), Error> {
+        self.verify(digest)
+    }
 }
 
 pub fn binding(name: &str) -> Result<Option<ServiceBinding>, Error> {
@@ -330,6 +334,21 @@ pub fn exec_start_matches(exec_start: &str, executable: &Path) -> bool {
 }
 
 impl Lifecycle for ServiceBinding {
+    fn check(&self, digest: &str) -> Result<(), Error> {
+        let pid = self.property("MainPID")?;
+        if pid.is_empty()
+            || pid == "0"
+            || !pid.bytes().all(|b| b.is_ascii_digit())
+            || self.property("ActiveState")? != "active"
+        {
+            return Err("native service is not active".into());
+        }
+        if mycelium_peer_protocol::sha256_hex(&std::fs::read(format!("/proc/{pid}/exe"))?) != digest
+        {
+            return Err("native service is not executing the desired signed digest".into());
+        }
+        self.probe(&pid)
+    }
     fn preflight(&self, executable: &Path) -> Result<(), Error> {
         self.validate()?;
         if !cfg!(target_os = "linux") {
@@ -374,12 +393,7 @@ impl Lifecycle for ServiceBinding {
         let mut stable_pid = String::new();
         loop {
             let pid = self.property("MainPID")?;
-            let healthy = pid != "0"
-                && pid.bytes().all(|b| b.is_ascii_digit())
-                && self.property("ActiveState")? == "active"
-                && std::fs::read(format!("/proc/{pid}/exe"))
-                    .is_ok_and(|bytes| mycelium_peer_protocol::sha256_hex(&bytes) == digest)
-                && self.probe(&pid).is_ok();
+            let healthy = self.check(digest).is_ok() && self.property("MainPID")? == pid;
             if healthy {
                 consecutive = if stable_pid == pid {
                     consecutive + 1

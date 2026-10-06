@@ -66,6 +66,36 @@ backoff. Missing package policy is a no-op; malformed policy fails loudly.
 6. Inspect `mycelium software status --json`, the native unit, and the persisted
    activation result. Disabling automatic policy does not remove installed bytes.
 
+## Reconciling installed applications
+
+`mycelium software reconcile --dry-run --json` observes the installed release
+link, signed byte digest and any locally bound native service. A matching version
+alone is not compliance: a stopped service, wrong running executable, failed
+application readiness check or altered installed bytes returns `state: drifted`
+with a `drift` reason. This command performs no service lifecycle changes.
+`software status` is the last persisted report, not a fresh health observation.
+
+`mycelium software reconcile --write --json` repairs unhealthy bound services
+through the same activation transaction used for upgrades, even at the same
+version. Healthy current applications are left running. Candidate bytes must be
+cached and signature/size/digest verified before any service is stopped; failed
+readiness still invokes checked rollback. An altered immutable release fails
+loudly and is not overwritten. That integrity incident needs explicit operator
+recovery, not an automatic "repair" that hides it.
+
+For installed packages with `updates.mode: automatic`, the existing update timer
+also attempts same-version service repair after the cache-age, deterministic
+rollout and retry-backoff gates permit it. Only locally bound services are
+eligible; manual packages remain manual. To intentionally keep an application
+stopped, set its update policy to manual first. Automatic policy does not install
+a previously uninstalled package, authorize a reboot, rename a host, change
+networking or create users. Those remain separate existing capabilities.
+
+The observer uses a single bounded readiness sample; post-activation verification
+still requires three stable samples from the supervised process. Readiness checks
+and service inspection run outside the mesh RPC event loop. This is a bounded
+native-service adapter, not a second supervisor or application scheduler.
+
 ## QEMU evidence, 2026-10-05
 
 The native fixture is Rust, not a substitute implementation of Unibus or Canvas:

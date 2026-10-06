@@ -2183,14 +2183,26 @@ impl Daemon {
                     .filter(|assignment| assignment.node_id == self.mesh.node_id())
                     .collect::<Vec<_>>();
                 let mut state = crate::software::read_automatic_state();
-                let eligible = crate::software::automatic_assignments(
-                    assignments.clone(),
-                    &manifests,
-                    &targets,
-                    self.mesh.node_id(),
-                    unix_now(),
-                    &mut state,
-                );
+                // Local health probes and systemd inspection must not block
+                // mesh RPC/gossip while deciding whether repair is eligible.
+                let eligibility_assignments = assignments.clone();
+                let eligibility_manifests = manifests.clone();
+                let eligibility_targets = targets.clone();
+                let node_id = self.mesh.node_id().to_owned();
+                let (eligible, next_state) = tokio::task::spawn_blocking(move || {
+                    let eligible = crate::software::automatic_assignments(
+                        eligibility_assignments,
+                        &eligibility_manifests,
+                        &eligibility_targets,
+                        &node_id,
+                        unix_now(),
+                        &mut state,
+                    );
+                    (eligible, state)
+                })
+                .await
+                .map_err(|error| MyceliumError::Validation(error.to_string()))?;
+                let state = next_state;
                 crate::software::write_automatic_state(&state)
                     .map_err(|error| MyceliumError::Validation(error.to_string()))?;
                 let activation_manifests = manifests.clone();
@@ -2206,9 +2218,12 @@ impl Daemon {
                 .await
                 .map_err(|error| MyceliumError::Validation(error.to_string()))?
                 .map_err(|error| MyceliumError::Validation(error.to_string()))?;
-                let snapshot =
+                let snapshot = tokio::task::spawn_blocking(move || {
                     crate::software::reconcile(&assignments, &manifests, &targets, false)
-                        .map_err(|error| MyceliumError::Validation(error.to_string()))?;
+                })
+                .await
+                .map_err(|error| MyceliumError::Validation(error.to_string()))?
+                .map_err(|error| MyceliumError::Validation(error.to_string()))?;
                 crate::software::persist_statuses(&snapshot)
                     .map_err(|error| MyceliumError::Validation(error.to_string()))?;
                 to_value(serde_json::json!({ "applied": applied, "status": snapshot }))

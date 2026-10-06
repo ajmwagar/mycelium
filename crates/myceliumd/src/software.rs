@@ -103,6 +103,7 @@ pub enum PackageState {
     AwaitingArtifact,
     Ready,
     Current,
+    Drifted,
     Updated,
 }
 
@@ -114,6 +115,9 @@ pub struct PackageStatus {
     pub desired_version: Option<String>,
     pub state: PackageState,
     pub updates: UpdatePolicy,
+    /// Present only when observed installed bytes or a locally bound service drift.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drift: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -304,13 +308,29 @@ pub fn reconcile(
             continue;
         };
         if installed_version.as_deref() == Some(manifest.version.as_str()) {
-            statuses.push(status(
+            let binding = crate::software_service::binding(&manifest.name)?;
+            let health = current_health(
+                manifest,
+                &crate::software_dir(),
+                binding
+                    .as_ref()
+                    .map(|binding| binding as &dyn crate::software_service::Lifecycle),
+            );
+            let mut observed = status(
                 assignment,
-                installed_version,
+                installed_version.clone(),
                 Some(manifest.version.clone()),
-                PackageState::Current,
-            ));
-            continue;
+                if health.is_ok() {
+                    PackageState::Current
+                } else {
+                    PackageState::Drifted
+                },
+            );
+            observed.drift = health.err().map(|error| error.to_string());
+            if !write || observed.drift.is_none() {
+                statuses.push(observed);
+                continue;
+            }
         }
         if !crate::artifacts_dir()
             .join(&manifest.artifact_digest)
@@ -362,7 +382,39 @@ fn status(
         desired_version,
         state,
         updates: assignment.updates.clone(),
+        drift: None,
     }
+}
+
+/// "Current" means immutable signed bytes match, and any locally authorized
+/// native service passes a PID-bound readiness observation. This never starts
+/// services; reconcile --write reuses the existing activation/rollback boundary.
+fn current_health(
+    manifest: &PackageManifest,
+    software: &Path,
+    lifecycle: Option<&dyn crate::software_service::Lifecycle>,
+) -> Result<(), AnyError> {
+    manifest
+        .verify()
+        .map_err(|error| format!("package signature: {error}"))?;
+    validate_label("package", &manifest.name)?;
+    validate_label("version", &manifest.version)?;
+    let current = software.join(&manifest.name).join("current");
+    if std::fs::read_link(&current)? != Path::new("releases").join(&manifest.version) {
+        return Err("current package link is not the desired internal release".into());
+    }
+    let executable = current.join(&manifest.name);
+    let bytes = std::fs::read(&executable)?;
+    if bytes.len() as u64 != manifest.artifact_size
+        || sha256_hex(&bytes) != manifest.artifact_digest
+    {
+        return Err("installed package bytes do not match signed manifest".into());
+    }
+    if let Some(lifecycle) = lifecycle {
+        lifecycle.preflight(&executable)?;
+        lifecycle.check(&manifest.artifact_digest)?;
+    }
+    Ok(())
 }
 
 fn installed_version(name: &str) -> Option<String> {
@@ -423,8 +475,19 @@ pub fn automatic_assignments(
             else {
                 return false;
             };
-            if compare_versions(&manifest.version, &installed) != Ordering::Greater {
-                return false;
+            match compare_versions(&manifest.version, &installed) {
+                Ordering::Less => return false,
+                Ordering::Equal => {
+                    let binding = match crate::software_service::binding(&manifest.name) {
+                        Ok(Some(binding)) => binding,
+                        // Unbound packages do not authorize service repair.
+                        _ => return false,
+                    };
+                    if current_health(manifest, &crate::software_dir(), Some(&binding)).is_ok() {
+                        return false;
+                    }
+                }
+                Ordering::Greater => {}
             }
             let Ok(metadata) =
                 std::fs::metadata(crate::artifacts_dir().join(&manifest.artifact_digest))
@@ -853,19 +916,85 @@ mod tests {
     }
 
     #[test]
+    fn current_requires_signed_bytes_not_only_version() {
+        let (root, artifacts, software, previous, _) = activation_fixture();
+        let activated = activate_from(&previous, &artifacts, &software).unwrap();
+        current_health(&previous, &software, None).unwrap();
+        std::fs::write(&activated.executable, b"tampered").unwrap();
+        assert!(current_health(&previous, &software, None)
+            .unwrap_err()
+            .to_string()
+            .contains("installed package bytes"));
+        // Repair must not overwrite a supposedly immutable release silently.
+        assert!(activate_from(&previous, &artifacts, &software)
+            .unwrap_err()
+            .to_string()
+            .contains("immutable package"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn current_rejects_external_release_link() {
+        let (root, artifacts, software, previous, _) = activation_fixture();
+        activate_from(&previous, &artifacts, &software).unwrap();
+        let current = software.join("unibus/current");
+        std::fs::remove_file(&current).unwrap();
+        std::os::unix::fs::symlink(software.join("unibus/releases/1.0.0"), &current).unwrap();
+        assert!(current_health(&previous, &software, None)
+            .unwrap_err()
+            .to_string()
+            .contains("internal release"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn read_only_health_detects_drift_without_service_actions() {
+        let (root, artifacts, software, previous, _) = activation_fixture();
+        activate_from(&previous, &artifacts, &software).unwrap();
+        let native = NativeProbe {
+            healthy_digest: "stopped".into(),
+            calls: Default::default(),
+        };
+        assert!(current_health(&previous, &software, Some(&native)).is_err());
+        assert_eq!(*native.calls.borrow(), ["preflight", "verify"]);
+        assert_eq!(
+            std::fs::read_link(software.join("unibus/current")).unwrap(),
+            Path::new("releases/1.0.0")
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn same_version_activation_repairs_service_and_is_idempotent_when_healthy() {
+        let (root, artifacts, software, previous, _) = activation_fixture();
+        activate_from(&previous, &artifacts, &software).unwrap();
+        let native = NativeProbe {
+            healthy_digest: previous.artifact_digest.clone(),
+            calls: Default::default(),
+        };
+        activate_transaction(&previous, &artifacts, &software, Some(&native)).unwrap();
+        assert_eq!(
+            *native.calls.borrow(),
+            ["preflight", "stop", "start", "verify"]
+        );
+        native.calls.borrow_mut().clear();
+        current_health(&previous, &software, Some(&native)).unwrap();
+        assert_eq!(*native.calls.borrow(), ["preflight", "verify"]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn compute_policy_requires_explicit_roles_and_keeps_updates_manual() {
         let policy: SoftwarePolicy =
             serde_json::from_str(include_str!("../../../fungOS/compute/software-policy.json"))
                 .unwrap();
         policy.validate().unwrap();
-        assert!(
-            plan(
-                &policy,
-                &[peer("gpu", Platform::Linux, "x86_64", &["resource.gpu"])]
-            )
-            .unwrap()
-            .is_empty()
-        );
+        assert!(plan(
+            &policy,
+            &[peer("gpu", Platform::Linux, "x86_64", &["resource.gpu"])]
+        )
+        .unwrap()
+        .is_empty());
         let assignments = plan(
             &policy,
             &[peer(
@@ -877,28 +1006,34 @@ mod tests {
         )
         .unwrap();
         assert_eq!(assignments.len(), 2);
-        assert!(assignments.iter().all(|item| item.updates == UpdatePolicy::Manual));
+        assert!(assignments
+            .iter()
+            .all(|item| item.updates == UpdatePolicy::Manual));
         assert!(assignments.iter().any(|item| item.package == "umie"));
         assert!(assignments.iter().any(|item| item.package == "shroud"));
     }
 
     #[test]
     fn tooling_policy_is_explicit_linux_and_manual() {
-        let policy: SoftwarePolicy = serde_json::from_str(include_str!(
-            "../../../fungOS/tooling/software-policy.json"
-        ))
-        .unwrap();
+        let policy: SoftwarePolicy =
+            serde_json::from_str(include_str!("../../../fungOS/tooling/software-policy.json"))
+                .unwrap();
         policy.validate().unwrap();
-        let assignments = plan(&policy, &[
-            peer("developer", Platform::Linux, "x86_64", &["role.shroudoci"]),
-            peer("pi", Platform::Linux, "aarch64", &["role.shroudoci"]),
-            peer("ordinary", Platform::Linux, "x86_64", &["role.shroud"]),
-            peer("mac", Platform::Darwin, "x86_64", &["role.shroudoci"]),
-        ])
+        let assignments = plan(
+            &policy,
+            &[
+                peer("developer", Platform::Linux, "x86_64", &["role.shroudoci"]),
+                peer("pi", Platform::Linux, "aarch64", &["role.shroudoci"]),
+                peer("ordinary", Platform::Linux, "x86_64", &["role.shroud"]),
+                peer("mac", Platform::Darwin, "x86_64", &["role.shroudoci"]),
+            ],
+        )
         .unwrap();
         assert_eq!(assignments.len(), 2);
-        assert!(assignments.iter().all(|assignment| assignment.package == "shroudoci"
-            && assignment.updates == UpdatePolicy::Manual));
+        assert!(assignments
+            .iter()
+            .all(|assignment| assignment.package == "shroudoci"
+                && assignment.updates == UpdatePolicy::Manual));
     }
 
     #[test]
