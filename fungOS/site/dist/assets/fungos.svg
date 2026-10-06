@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <title>fungOS</title>
+  <rect width="32" height="32" rx="2" fill="#283d31"/>
+  <path d="M5 17a11 11 0 0 1 22 0H5Zm8 2h6v7h-6Z" fill="#e5eadd"/>
+</svg>
