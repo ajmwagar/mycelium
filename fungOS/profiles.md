@@ -204,17 +204,22 @@ unchanged, `sshd -t` passed, and the existing application PIDs were retained.
 These are finite test credentials, not a proof of automatic renewal.
 
 The existing two-minute SSH-policy timer exposed a KRL timestamp comparison
-bug and was temporarily disabled. The `mycelium-fwep` fix passed all 56 CLI
+bug and was temporarily disabled. The `mycelium-fwep` fix passed all 57 CLI
 tests, including real OpenSSH KRL validation, timestamp-only equality, changed
-revocations, missing files and malformed bodies. Signed musl Mycelium `0.1.14`
+revocations, missing files, malformed bodies and timer activation scheduling.
+Signed musl Mycelium `0.1.15`
 was installed through the guest-only `fungos-qemu-test` channel after manifest
 gossip and explicit artifact seeding. Installed SHA-256:
-`05211d03f13282ff98bac4c922620f10e18f71533544e36dd426498bc3d01e7f`.
+`78f5537e0e5ad18914175a4b8471cda9b8578721e4a1f6f9cc6ce2afb1d15808`.
 
 Live explicit and systemd-service reconciliation reported already converged,
 retaining the installed KRL/configuration inodes and modification times and
 the three existing rollback copies. Certificate SSH still authenticated;
 the recovery-key hash, Unibus PID 22089 and Canvas PID 253 were unchanged.
-The SSH-policy timer was re-enabled. The software update timer and all edge
+The SSH-policy timer now starts relative to activation (including installation
+or re-enabling long after boot), rather than an already-elapsed boot deadline.
+It was re-installed and a real scheduled run at 21:06:31 UTC succeeded without
+changing trust-file timestamps/inodes or creating rollback copies; the next
+run was scheduled for 21:08:39 UTC. The software update timer and all edge
 services remain active. Profile assignment still does not mint grants or
 imply authorization.
