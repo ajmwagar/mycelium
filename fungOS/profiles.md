@@ -144,6 +144,12 @@ passwords. The existing SSH reconciler owns account creation, principals, KRL
 validation and trust-file rollback. Its dedicated timer remains available via
 `mycelium access ssh host-policy install-timer --write`.
 
+Healthy SSH reconciliation preserves the installed trust files and does not
+reload SSH or create a rollback copy. OpenSSH validates both revocation lists
+before comparison ignores their creation timestamp; every other byte remains
+significant, including CA binding, revoked serials, KRL version and extensions.
+Missing or invalid installed revocation data is not considered converged.
+
 The common execution receipt records success or failure under the node's
 Mycelium state. This is **not** a cross-domain atomic transaction: desired policy
 can persist and a hostname can change before a later package/access operation
@@ -197,10 +203,18 @@ forward, with agent authentication disabled. This does not grant sudo;
 unchanged, `sshd -t` passed, and the existing application PIDs were retained.
 These are finite test credentials, not a proof of automatic renewal.
 
-The existing two-minute SSH-policy timer was installed and exercised, but
-then disabled on this guest: regenerated OpenSSH KRL timestamps defeat
-bytewise no-op comparison and unnecessarily reinstall trust files and create
-rollback copies. This is tracked as `mycelium-fwep`. Explicit SSH reconciliation
-works; continuous SSH reconciliation is pending that idempotence fix. The
-software update timer and all edge services remain active. Profile assignment
-still does not mint grants or imply authorization.
+The existing two-minute SSH-policy timer exposed a KRL timestamp comparison
+bug and was temporarily disabled. The `mycelium-fwep` fix passed all 56 CLI
+tests, including real OpenSSH KRL validation, timestamp-only equality, changed
+revocations, missing files and malformed bodies. Signed musl Mycelium `0.1.14`
+was installed through the guest-only `fungos-qemu-test` channel after manifest
+gossip and explicit artifact seeding. Installed SHA-256:
+`05211d03f13282ff98bac4c922620f10e18f71533544e36dd426498bc3d01e7f`.
+
+Live explicit and systemd-service reconciliation reported already converged,
+retaining the installed KRL/configuration inodes and modification times and
+the three existing rollback copies. Certificate SSH still authenticated;
+the recovery-key hash, Unibus PID 22089 and Canvas PID 253 were unchanged.
+The SSH-policy timer was re-enabled. The software update timer and all edge
+services remain active. Profile assignment still does not mint grants or
+imply authorization.
