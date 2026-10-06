@@ -103,7 +103,7 @@ host policy. For example, create the local intent from a reviewed package policy
 
 ```sh
 export MYCELIUM_HOME=/var/lib/mycelium
-node_id=$(mycelium node status --json | jq -r '.node.hello.node_id')
+node_id=$(sudo --preserve-env=MYCELIUM_HOME mycelium node status --json | jq -r '.node.hello.node_id')
 jq --arg id "$node_id" '{
   node_id: $id,
   profile: "edge",
@@ -112,10 +112,10 @@ jq --arg id "$node_id" '{
   reconcile_ssh: false
 }' reviewed-software-policy.json > node-intent.json
 
-mycelium node plan node-intent.json --json > node-plan.json
-mycelium node apply --plan node-plan.json --dry-run --json
+sudo --preserve-env=MYCELIUM_HOME mycelium node plan node-intent.json --json > node-plan.json
+sudo --preserve-env=MYCELIUM_HOME mycelium node apply --plan node-plan.json --dry-run --json
 sudo --preserve-env=MYCELIUM_HOME mycelium node apply --plan node-plan.json --write --json
-mycelium node status --json
+sudo --preserve-env=MYCELIUM_HOME mycelium node status --json
 ```
 
 Use `node.PEER_ID` in software selectors instead of `host.OLD_HOSTNAME` when
@@ -158,3 +158,32 @@ policy set/reconcile, `hostnamectl`, node observation refresh through apply, and
 SSH host-policy reconcile. Neither Fab, Unibus nor a central controller is
 required. This first adapter supports Linux/systemd; Darwin remains read-only
 for node status until it has its own hostname/service adapter.
+
+### QEMU verification, 2026-10-06
+
+Clean-source type checking and 142 tests passed on Agora (54 CLI, 88 daemon).
+Signed Mycelium `0.1.13` was published on `fungos-qemu-test`, received through
+manifest gossip, explicitly byte-seeded and installed through signed self-update.
+Installed SHA-256:
+`f537b400ec078b48d205a2859257c43a0b0a664928d781228d5e834c43063c22`.
+
+The persistent guest was renamed from `fungos-qemu-01` to
+`fungos-edge-qemu-01` and assigned `edge`. Its existing edge and manual cloud
+test packages remained current after replacing hostname selectors with the
+stable peer-ID selector. Dry-run left hostname and desired-state files untouched;
+apply produced a succeeded common receipt. Neo received the new hostname and
+`profile.edge` through signed gossip, under the same node identity.
+
+The old plan was correctly rejected after apply changed its preconditions.
+A freshly planned repeat retained Unibus PID 22089 and Canvas PID 253. Restarting
+only Mycelium retained the profile and hostname; machine-id and peer-key hashes
+were unchanged. The transport certificate hash also remained unchanged across
+that daemon restart. All five edge units and the update timer remained active.
+No VM reboot, networking, DNS, account or authority changes were made.
+
+The SSH-enabled intent was rejected before mutation because this guest has no
+SSH host policy. Read-only assessment also found no configured access-authority
+keys or converged grants. Existing SSH account/grant tests pass, but **positive
+live SSH reconciliation is not yet verified on this guest**. Configure its
+existing fleet SSH authority and authorized grants explicitly before enabling
+that part of the intent; profile assignment does not mint them.
