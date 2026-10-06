@@ -19,6 +19,8 @@ case "$mode" in
     install -m 0644 "$theme_dir/undergrowth.toml" "$config_dir/packs/undergrowth.toml"
     install -m 0644 "$theme_dir/dock.txt" "$config_dir/selections/dock.txt"
     install -m 0644 "$theme_dir/../qemu/canvas-compositor.service.d/30-undergrowth.conf" "$service_dir/30-undergrowth.conf"
+    mkdir -p "$root/etc/systemd/system/canvas.service.d"
+    install -m 0644 "$theme_dir/../qemu/canvas.service.d/30-undergrowth.conf" "$root/etc/systemd/system/canvas.service.d/30-undergrowth.conf"
     ;;
   render)
     width=${2:?}; height=${3:?}; output=${4:?}

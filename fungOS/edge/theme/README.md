@@ -38,6 +38,7 @@ Use a backed-up compositor service drop-in:
 
 ```ini
 [Service]
+StateDirectoryMode=0700
 Environment=CANVAS_WALLPAPER=/etc/fungos-edge/theme/undergrowth.ppm
 ```
 
