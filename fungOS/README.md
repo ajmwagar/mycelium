@@ -1,5 +1,9 @@
 # fungOS
 
+First-party Debian package delivery is being qualified separately from native
+binary updates. See [signed APT qualification](packages/README.md) for verified
+install/upgrade/recovery and persistent QEMU reboot evidence.
+
 `fungOS` is the working strategy map for the open FPL computing ecosystem: a
 mesh-oriented substrate that helps people discover, trust, provision, operate,
 and safely automate heterogeneous devices.
