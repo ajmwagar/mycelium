@@ -48,12 +48,19 @@ severely delayed by concurrent system load (approximately 430, CPU fully busy).
 A process sample showed cached signed-envelope verification during daemon boot.
 Use `MYCELIUM_NO_AUTOSTART=1` while restarting a managed publisher: an immediate
 CLI call must not spawn another daemon while its supervisor is starting.
-Superseding the fault fixture and restoring the guest updater are separate final
-checks; record their live outcome before treating the channel as rollout-ready.
-The subsequent guest reboot retained identity and all six units were active.
-The main update timer is restored, but the Unibus assignment alone is temporarily
-manual to prevent automatic retries of the fault fixture while its healthy
-superseding publication is delayed. Canvas and Mycelium remain automatic.
+The delayed healthy Unibus `0.1.7` publication ultimately completed; the catalog
+was checked before retrying that immutable version. Its signed manifest reached
+the guest and the native `mycelium-update.service` successfully activated it
+through the automatic-policy runner. The temporary Unibus manual hold was
+removed: Mycelium, Canvas and Unibus automatic updates are enabled again, with
+the original minimum-age, rollout and retry gates unchanged. The deliberately
+failing `0.1.6` fixture is superseded on the isolated channel. No unrelated local
+build/test jobs were paused or stopped to finish this check.
+The final settled-policy reboot retained all four recorded identity hashes,
+Mycelium `0.1.21`, Canvas `0.1.9`, and Unibus `0.1.7`. All six edge/update units
+were active, the timer was enabled, and both automatic-policy runners reported
+current with no further activation. Unibus's final activation record had no
+error and `verified_service: true`.
 Compositor automatic activation remains gated and unrelated cloud assignments
 remain manual. This evidence is not a fleet rollout or a Pi 3B+ qualification.
 
