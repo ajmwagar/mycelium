@@ -23,6 +23,16 @@ trap 'rm -rf "$work_dir"' EXIT INT TERM
 
 tar -xf "$rootfs_tar" -C "$work_dir"
 cp -a "$overlay_dir/." "$work_dir/"
+# Display fixtures require the cursor shipped by the tracked edge profile.
+# Reject stale runtime archives before producing an image that cannot start.
+compositor_unit="$work_dir/etc/systemd/system/canvas-compositor.service"
+if [ -f "$compositor_unit" ]; then
+  cursor=$(sed -n 's/^Environment=XCURSOR_THEME=//p' "$compositor_unit")
+  [ -n "$cursor" ] && [ -f "$work_dir/usr/share/icons/$cursor/cursors/left_ptr" ] || {
+    echo 'edge runtime is missing its configured cursor; rebuild the tracked edge profile' >&2
+    exit 1
+  }
+fi
 # First boot establishes a fresh machine identity; subsequent disk boots retain it.
 rm -f "$work_dir/etc/machine-id"
 if [ -n "${MYCELIUM_BINARY:-}" ]; then

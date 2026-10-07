@@ -26,6 +26,7 @@ grep -q "trap .*umount.*EXIT" \
 compositor_unit="$base_dir/../edge/qemu/canvas-compositor.service"
 grep -q '^Environment=HOME=/run/fungos-compositor$' "$compositor_unit"
 grep -q '^RuntimeDirectory=fungos-compositor$' "$compositor_unit"
+grep -q '^Environment=XCURSOR_THEME=whiteglass$' "$compositor_unit"
 grep -q '^ExecStartPre=/usr/bin/install -d -m 0700 /run/fungos-compositor/.local/state/dock$' "$compositor_unit"
 
 # Exercise dispatch through the managed path, including argument boundaries and
