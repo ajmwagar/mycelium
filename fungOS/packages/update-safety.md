@@ -1,5 +1,40 @@
 # Update safety
 
+## Rebuilt runtime boot qualification, 2026-10-07
+
+The rebuilt edge runtime (`0ff4db1c182e47a06ed812b09e10b1235db26af9fb7f8979590ded84696cec32`)
+booted its own previously unused root disk as `fungos-edge-rebuilt-01`.
+`xcursor-themes 1.0.5-1` was already installed; no package repair was needed.
+The one-use claim generated a distinct peer identity, and stable node-ID policy
+selected the same four signed edge packages. Their artifacts downloaded through
+the authenticated temporary cache peer; native activation verified Canvas and
+Unibus readiness, and the compositor reported active DRM output on card0.
+
+Interactive provisioning exposed a second startup race: a CLI called just after
+systemd restart could autostart an unsupervised daemon first. The home lock
+prevented corruption, but then rejected the supervised process. The fungOS
+wrapper now defaults to `MYCELIUM_NO_AUTOSTART=1` once enrolled; standalone
+Mycelium CLI behavior is unchanged. The exact stray guest process was removed,
+and systemd recovered. A live regression stopped the supervised guest service,
+confirmed the CLI failed without spawning any daemon, then restarted it.
+The wrapper patch was applied to this guest after its first boot; this is not
+an assertion that the earlier initrd already contained that fix.
+
+After shutdown, the claim media and temporary cache seed were removed and the
+cache peer stopped. Restarting the persistent guest retained all four identity
+hashes; Mycelium, Canvas, Unibus, compositor, adapter and update timer were active,
+and all package observations were current. Boot ID changed from
+`6fbc87e6-3a41-4c68-8a25-4d592375c7d6` to
+`51ae1b32-5fb6-4f5c-84ca-09db54be8535`.
+A VNC capture showed the compositor background and cursor, not a populated
+desktop. No fleet rollout, physical installer, display-seat hardening or Discord
+deployment is implied by this qualification.
+The rebuilt image's existing `0.1.24` bootstrap executable was locally seeded
+against its trusted signed manifest and explicitly activated, establishing the
+first signed update record. Automatic policy is enabled on the guest-only
+channel with the same age/rollout gates. This is not another fresh self-update
+download proof; the preceding clean guest qualified that separately.
+
 ## Clean edge boot and peer download, 2026-10-07
 
 A separate QEMU guest, `fungos-edge-clean-01`, booted a new empty 8 GiB root
