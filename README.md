@@ -916,6 +916,12 @@ packages, open cloud firewalls, or enable global forwarding. Gateway forwarding
 and return paths must be explicit before declaring a site link live; it never
 changes default routes. A workload's revision-specific source IP must be
 re-derived on redeployment rather than assumed stable.
+Use `wireguard restart TARGET CONFIG.json --write` to test reconnect after an
+owned-unit restart. `wireguard stop TARGET CONFIG.json --write` disables the unit
+and removes its interface and forwarding chains, retaining key/config files for
+`apply` to restore it. `wireguard stopped TARGET CONFIG.json` verifies retirement.
+Both lifecycle mutations require the exact running intent to pass verification
+first and support `--dry-run`; neither controls unowned units or other routes.
 
 Each peer periodically publishes a signed, bounded hardware graph covering
 PCIe, USB, storage, and accelerators. Stable identities derive from the peer

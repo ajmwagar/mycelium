@@ -5,6 +5,9 @@ use std::net::{Ipv4Addr, SocketAddr};
 
 pub const ID_WIREGUARD_ENSURE: &str = "net.wireguard.ensure";
 pub const ID_WIREGUARD_VERIFY: &str = "net.wireguard.verify";
+pub const ID_WIREGUARD_RESTART: &str = "net.wireguard.restart";
+pub const ID_WIREGUARD_STOP: &str = "net.wireguard.stop";
+pub const ID_WIREGUARD_STOPPED: &str = "net.wireguard.stopped";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -182,6 +182,8 @@ usage:
   mycelium wireguard bindings [--json]
   mycelium wireguard apply TARGET CONFIG.json --write|--dry-run
   mycelium wireguard verify TARGET CONFIG.json
+  mycelium wireguard restart|stop TARGET CONFIG.json --write|--dry-run
+  mycelium wireguard stopped TARGET CONFIG.json
   mycelium egress list [--json]
   mycelium egress probe --server HOST:PORT... [--bind IP] [--port PORT] [--json]
   mycelium dns zone [--suffix DOMAIN] [--json]
@@ -1705,7 +1707,7 @@ fn observed_prefixes(
 
 async fn wireguard_command(args: &[String]) -> Result<Vec<String>, ClientError> {
     let action = args.first().map(String::as_str).unwrap_or("bindings");
-    if matches!(action, "apply" | "verify") {
+    if matches!(action, "apply" | "verify" | "restart" | "stop" | "stopped") {
         let target = args
             .get(1)
             .ok_or_else(|| err_usage("wireguard apply/verify needs TARGET CONFIG.json"))?;
@@ -1722,12 +1724,13 @@ async fn wireguard_command(args: &[String]) -> Result<Vec<String>, ClientError> 
         }
         let write = args.iter().any(|arg| arg == "--write");
         let dry_run = args.iter().any(|arg| arg == "--dry-run");
-        if action == "apply" && write == dry_run {
+        let readonly = matches!(action, "verify" | "stopped");
+        if !readonly && write == dry_run {
             return Err(err_usage(
                 "wireguard apply requires exactly one of --write or --dry-run",
             ));
         }
-        if action == "verify" && (write || dry_run) {
+        if readonly && (write || dry_run) {
             return Err(err_usage("wireguard verify is read-only"));
         }
         let metadata = std::fs::metadata(path).map_err(|error| err_usage(&error.to_string()))?;
@@ -1752,10 +1755,12 @@ async fn wireguard_command(args: &[String]) -> Result<Vec<String>, ClientError> 
         let value = client
             .call(&Request::DeviceCall {
                 id: target.clone(),
-                capability: if action == "apply" {
-                    mycelium_core::wireguard::ID_WIREGUARD_ENSURE
-                } else {
-                    mycelium_core::wireguard::ID_WIREGUARD_VERIFY
+                capability: match action {
+                    "apply" => mycelium_core::wireguard::ID_WIREGUARD_ENSURE,
+                    "restart" => mycelium_core::wireguard::ID_WIREGUARD_RESTART,
+                    "stop" => mycelium_core::wireguard::ID_WIREGUARD_STOP,
+                    "stopped" => mycelium_core::wireguard::ID_WIREGUARD_STOPPED,
+                    _ => mycelium_core::wireguard::ID_WIREGUARD_VERIFY,
                 }
                 .into(),
                 params,
@@ -1853,7 +1858,7 @@ async fn wireguard_command(args: &[String]) -> Result<Vec<String>, ClientError> 
     }
     if action != "plan" {
         return Err(err_usage(
-            "wireguard supports `bindings`, `init`, `plan`, `apply`, and `verify`",
+            "wireguard supports `bindings`, `init`, `plan`, `apply`, `verify`, `restart`, `stop`, and `stopped`",
         ));
     }
     let left_selector = args

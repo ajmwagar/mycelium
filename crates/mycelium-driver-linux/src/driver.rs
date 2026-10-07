@@ -3,7 +3,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use mycelium_core::wireguard::{ID_WIREGUARD_ENSURE, ID_WIREGUARD_VERIFY};
+use mycelium_core::wireguard::{
+    ID_WIREGUARD_ENSURE, ID_WIREGUARD_RESTART, ID_WIREGUARD_STOP, ID_WIREGUARD_STOPPED,
+    ID_WIREGUARD_VERIFY,
+};
 use mycelium_core::{
     host_target, required_str, stable_slug, CapResult, CapSpec, CredentialSet, Device, DeviceId,
     DeviceKind, DeviceMeta, Driver, ExecContext, Inventory, LinkState, MyceliumError, Observation,
@@ -233,6 +236,14 @@ impl Device for LinuxDevice {
 
     fn capabilities(&self) -> BTreeMap<String, CapSpec> {
         BTreeMap::from_iter([
+            (ID_WIREGUARD_RESTART.into(), CapSpec::mutation("restart an exactly verified owned tunnel and restore its forwarding rules")
+                .param("config", mycelium_core::ParamType::Str, "same WireGuardTunnel JSON")
+                .verified_by(mycelium_core::ActionRisk::Disruptive, ID_WIREGUARD_VERIFY).verify_param("config")),
+            (ID_WIREGUARD_STOP.into(), CapSpec::mutation("disable an exactly verified owned tunnel; keep configuration and keys for reapply")
+                .param("config", mycelium_core::ParamType::Str, "same WireGuardTunnel JSON")
+                .verified_by(mycelium_core::ActionRisk::Disruptive, ID_WIREGUARD_STOPPED).verify_param("config")),
+            (ID_WIREGUARD_STOPPED.into(), CapSpec::readonly("verify an owned tunnel is disabled, absent and has no managed forwarding rules")
+                .param("config", mycelium_core::ParamType::Str, "same WireGuardTunnel JSON")),
             (ID_WIREGUARD_ENSURE.into(), CapSpec::mutation("persist an identity-key-bound scoped WireGuard tunnel using wg-quick/systemd")
                 .param("config", mycelium_core::ParamType::Str, "WireGuardTunnel JSON; private key reference only")
                 .verified_by(mycelium_core::ActionRisk::Disruptive, ID_WIREGUARD_VERIFY)
@@ -283,18 +294,21 @@ impl Device for LinuxDevice {
 
     async fn exec(&self, ctx: &ExecContext, cap: &str, params: Params) -> Result<CapResult> {
         match cap {
-            ID_WIREGUARD_ENSURE | ID_WIREGUARD_VERIFY => {
+            ID_WIREGUARD_ENSURE | ID_WIREGUARD_VERIFY | ID_WIREGUARD_RESTART
+            | ID_WIREGUARD_STOP | ID_WIREGUARD_STOPPED => {
                 let config = crate::wireguard::config(&params)?;
-                if ctx.dry_run && cap == ID_WIREGUARD_ENSURE {
+                if ctx.dry_run && !matches!(cap, ID_WIREGUARD_VERIFY | ID_WIREGUARD_STOPPED) {
                     return Ok(CapResult::dry_run(Value::Str(
                         serde_json::to_string(&config)
                             .map_err(|error| MyceliumError::Parse(error.to_string()))?,
                     )));
                 }
-                let command = if cap == ID_WIREGUARD_ENSURE {
-                    crate::wireguard::apply_command(&config)
-                } else {
-                    crate::wireguard::status_command(&config)
+                let command = match cap {
+                    ID_WIREGUARD_ENSURE => crate::wireguard::apply_command(&config),
+                    ID_WIREGUARD_RESTART => crate::wireguard::restart_command(&config),
+                    ID_WIREGUARD_STOP => crate::wireguard::stop_command(&config),
+                    ID_WIREGUARD_STOPPED => crate::wireguard::stopped_command(&config),
+                    _ => crate::wireguard::status_command(&config),
                 };
                 let result = self.session.exec(&command).await?;
                 if !result.success() {
