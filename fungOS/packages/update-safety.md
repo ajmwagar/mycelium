@@ -57,6 +57,25 @@ systemd PID and socket inode remained unchanged; all identity hashes and native
 edge services remained healthy. This is not a claim that first enrollment
 bypasses the existing bootstrap authorization gate.
 
+Next, the automatic-policy runner fetched and activated `0.1.24` after the
+unchanged 60-second age gate and deterministic five-minute rollout window.
+Its SHA-256 is
+`1c0f784fae8b7bf5648edc41968f1693d192477504d0bf199a4bff2524fb14fb`.
+This payload is the same tested build stripped on Agora, not new application
+features; its different bytes exercised fresh peer download and replacement.
+An intermediate `0.1.23` manifest contains the unstripped `0.1.22` bytes and
+was not activated. The first automatic invocation staged the downloaded
+candidate; later invocations respected the gate, then activated it without
+`update apply`. This qualifies the policy runner, not timer-triggered activation.
+
+The cache peer was stopped and its temporary seed removed. A further reboot
+retained `0.1.24`, all four recorded identity hashes, current application health
+and the active update timer (boot ID
+`d81b53f1-9314-41c7-bcfc-66b61af8df0f`). A fresh tracked `amd64 edge` runtime
+archive was also rebuilt successfully on Agora, including the missing cursor.
+The newly rebuilt archive is separate from the already-qualified corrected
+guest root; do not describe it as separately boot-tested.
+
 ## Edge guest qualification, 2026-10-07
 
 The persistent edge QEMU guest on Agora completed a signed Mycelium bootstrap
