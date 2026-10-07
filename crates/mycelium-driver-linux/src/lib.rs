@@ -6,6 +6,7 @@
 
 mod driver;
 mod ipfs;
+mod host_route;
 mod parsers;
 mod wireguard;
 

@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use mycelium_core::host_route::{ID_HOST_ROUTE_ENSURE, ID_HOST_ROUTE_VERIFY};
 use mycelium_core::wireguard::{
     ID_WIREGUARD_ENSURE, ID_WIREGUARD_RESTART, ID_WIREGUARD_STOP, ID_WIREGUARD_STOPPED,
     ID_WIREGUARD_VERIFY,
@@ -236,6 +237,11 @@ impl Device for LinuxDevice {
 
     fn capabilities(&self) -> BTreeMap<String, CapSpec> {
         BTreeMap::from_iter([
+            (ID_HOST_ROUTE_ENSURE.into(), CapSpec::mutation("add a private host route to the active NetworkManager profile without disconnecting the link")
+                .param("config",mycelium_core::ParamType::Str,"HostRoute JSON")
+                .verified_by(mycelium_core::ActionRisk::Disruptive,ID_HOST_ROUTE_VERIFY).verify_param("config")),
+            (ID_HOST_ROUTE_VERIFY.into(), CapSpec::readonly("verify active and persistent private host route")
+                .param("config",mycelium_core::ParamType::Str,"HostRoute JSON")),
             (ID_WIREGUARD_RESTART.into(), CapSpec::mutation("restart an exactly verified owned tunnel and restore its forwarding rules")
                 .param("config", mycelium_core::ParamType::Str, "same WireGuardTunnel JSON")
                 .verified_by(mycelium_core::ActionRisk::Disruptive, ID_WIREGUARD_VERIFY).verify_param("config")),
@@ -294,6 +300,14 @@ impl Device for LinuxDevice {
 
     async fn exec(&self, ctx: &ExecContext, cap: &str, params: Params) -> Result<CapResult> {
         match cap {
+            ID_HOST_ROUTE_ENSURE | ID_HOST_ROUTE_VERIFY => {
+                let route=crate::host_route::config(&params)?;
+                if ctx.dry_run && cap==ID_HOST_ROUTE_ENSURE { return Ok(CapResult::dry_run(Value::Str(serde_json::to_string(&route).map_err(|e|MyceliumError::Parse(e.to_string()))?))); }
+                let command=if cap==ID_HOST_ROUTE_ENSURE {crate::host_route::apply_command(&route)} else {crate::host_route::verify_command(&route)};
+                let result=self.session.exec(&command).await?;
+                if !result.success() { return Err(MyceliumError::Device{exit_code:result.exit_code,stderr:result.stderr}); }
+                Ok(CapResult::ok(crate::wireguard::output(&result.stdout)?))
+            }
             ID_WIREGUARD_ENSURE | ID_WIREGUARD_VERIFY | ID_WIREGUARD_RESTART
             | ID_WIREGUARD_STOP | ID_WIREGUARD_STOPPED => {
                 let config = crate::wireguard::config(&params)?;

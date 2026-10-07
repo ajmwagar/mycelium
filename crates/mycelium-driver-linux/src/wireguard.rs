@@ -39,24 +39,35 @@ test "$(wg pubkey < "$key" 2>/dev/null)" = '{public}'
 
 // Private chains only: never save/restore the machine's entire firewall.
 fn firewall_rules(config: &WireGuardTunnel) -> Vec<(String, String)> {
-    let Some(flow) = &config.forward else {
+    if config.forwards.is_empty() {
         return vec![];
-    };
+    }
     let chain = format!("MCWG_{}", config.interface.replace('-', "_"));
     let nat = format!("{chain}_N");
-    vec![
-        (chain.clone(), format!("-i {} -o {} -s {}/32 -d {}/32 -p tcp --dport {} -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT", flow.ingress, flow.egress, flow.source, flow.destination, flow.tcp_port)),
-        (chain.clone(), format!("-i {} -o {} -s {}/32 -d {}/32 -p tcp --sport {} -m conntrack --ctstate ESTABLISHED -j ACCEPT", flow.egress, flow.ingress, flow.destination, flow.source, flow.tcp_port)),
-        (chain.clone(), format!("-i {} -j DROP", config.interface)),
-        (chain, format!("-o {} -j DROP", config.interface)),
-        (nat, format!("-o {} -s {}/32 -d {}/32 -p tcp --dport {} -j SNAT --to-source {}", flow.egress, flow.source, flow.destination, flow.tcp_port, flow.source_nat)),
-    ]
+    let mut rules = Vec::new();
+    for flow in &config.forwards {
+        rules.push((chain.clone(), format!("-i {} -o {} -s {}/32 -d {}/32 -p tcp --dport {} -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT", flow.ingress, flow.egress, flow.source, flow.destination, flow.tcp_port)));
+        rules.push((chain.clone(), format!("-i {} -o {} -s {}/32 -d {}/32 -p tcp --sport {} -m conntrack --ctstate ESTABLISHED -j ACCEPT", flow.egress, flow.ingress, flow.destination, flow.source, flow.tcp_port)));
+    }
+    rules.push((chain.clone(), format!("-i {} -j DROP", config.interface)));
+    rules.push((chain, format!("-o {} -j DROP", config.interface)));
+    for flow in &config.forwards {
+        rules.push((
+            nat.clone(),
+            format!(
+                "-o {} -s {}/32 -d {}/32 -p tcp --dport {} -j SNAT --to-source {}",
+                flow.egress, flow.source, flow.destination, flow.tcp_port, flow.source_nat
+            ),
+        ));
+    }
+    rules
 }
 
 fn forwarding_script(config: &WireGuardTunnel) -> String {
-    let Some(flow) = &config.forward else {
+    if config.forwards.is_empty() {
         return "#!/bin/sh\n# Mycelium owned WireGuard\nset -eu\nexit 0\n".into();
-    };
+    }
+    let preconditions = config.forwards.iter().map(|flow| format!("  ip -o -4 address show dev {} | grep -Fq ' {}/'\n  ip -4 route get {} | grep -Fq ' dev {} '\n", flow.egress, flow.source_nat, flow.destination, flow.egress)).collect::<String>();
     let chain = format!("MCWG_{}", config.interface.replace('-', "_"));
     let nat = format!("{chain}_N");
     let rules = firewall_rules(config)
@@ -79,8 +90,7 @@ down)
   ;;
 up)
   test "$(cat /proc/sys/net/ipv4/ip_forward)" = 1
-  ip -o -4 address show dev {egress} | grep -Fq ' {snat}/'
-  ip -4 route get {destination} | grep -Fq ' dev {egress} '
+{preconditions}
   "$0" down
   iptables -w 5 -N {chain}
   iptables -w 5 -t nat -N {nat}
@@ -91,9 +101,6 @@ up)
 *) exit 2 ;;
 esac
 "#,
-        egress = flow.egress,
-        snat = flow.source_nat,
-        destination = flow.destination
     )
 }
 
@@ -107,9 +114,13 @@ fn forwarding_verify(config: &WireGuardTunnel) -> String {
     let chain = format!("MCWG_{}", config.interface.replace('-', "_"));
     let nat = format!("{chain}_N");
     let mut checks = String::new();
-    if let Some(flow) = &config.forward {
-        checks.push_str(&format!("test \"$(cat /proc/sys/net/ipv4/ip_forward)\" = 1\nip -o -4 address show dev {} | grep -Fq ' {}/'\n", flow.egress, flow.source_nat));
-        checks.push_str(&format!("iptables -w 5 -C FORWARD -j {chain}\niptables -w 5 -t nat -C POSTROUTING -j {nat}\ntest \"$(iptables -w 5 -S {chain} | wc -l)\" -eq 5\ntest \"$(iptables -w 5 -t nat -S {nat} | wc -l)\" -eq 2\n"));
+    if !config.forwards.is_empty() {
+        for flow in &config.forwards {
+            checks.push_str(&format!("test \"$(cat /proc/sys/net/ipv4/ip_forward)\" = 1\nip -o -4 address show dev {} | grep -Fq ' {}/'\n", flow.egress, flow.source_nat));
+        }
+        let filter_count = config.forwards.len() * 2 + 3;
+        let nat_count = config.forwards.len() + 1;
+        checks.push_str(&format!("iptables -w 5 -C FORWARD -j {chain}\niptables -w 5 -t nat -C POSTROUTING -j {nat}\ntest \"$(iptables -w 5 -S {chain} | wc -l)\" -eq {filter_count}\ntest \"$(iptables -w 5 -t nat -S {nat} | wc -l)\" -eq {nat_count}\n"));
         for (name, rule) in firewall_rules(config) {
             let table = if name == nat { "nat" } else { "filter" };
             checks.push_str(&format!("iptables -w 5 -t {table} -C {name} {rule}\n"));
@@ -369,7 +380,7 @@ mod tests {
             allowed_ips: vec!["192.168.1.48/32".into()],
             endpoint: Some("165.227.93.206:51820".parse().unwrap()),
             keepalive_seconds: 25,
-            forward: None,
+            forwards: vec![],
         }
     }
     #[test]
@@ -400,16 +411,58 @@ mod tests {
         }
     }
     #[test]
+    fn bidirectional_flows_precede_deny_rules_and_verify_exact_counts() {
+        let mut value = fixture();
+        value.allowed_ips.push("10.253.180.2/32".into());
+        value.forwards = vec![
+            mycelium_core::wireguard::WireGuardForward {
+                ingress: "sh-br0".into(),
+                egress: "mc-lab".into(),
+                source: "172.16.0.104".parse().unwrap(),
+                destination: "192.168.1.48".parse().unwrap(),
+                tcp_port: 8717,
+                source_nat: "10.253.180.1".parse().unwrap(),
+            },
+            mycelium_core::wireguard::WireGuardForward {
+                ingress: "mc-lab".into(),
+                egress: "sh-br0".into(),
+                source: "10.253.180.2".parse().unwrap(),
+                destination: "172.16.0.104".parse().unwrap(),
+                tcp_port: 8080,
+                source_nat: "172.16.0.1".parse().unwrap(),
+            },
+        ];
+        value.validate().unwrap();
+        let rules = firewall_rules(&value);
+        assert_eq!(rules.len(), 8);
+        assert!(rules[..4].iter().all(|(_, r)| r.ends_with("-j ACCEPT")));
+        assert!(rules[4].1.ends_with("-j DROP"));
+        assert!(rules[5].1.ends_with("-j DROP"));
+        assert!(forwarding_verify(&value).contains("-eq 7"));
+        assert!(forwarding_verify(&value).contains("-eq 3"));
+        for script in [
+            forwarding_script(&value),
+            status_command(&value),
+            apply_command(&value),
+        ] {
+            assert!(std::process::Command::new("sh")
+                .args(["-n", "-c", &script])
+                .status()
+                .unwrap()
+                .success());
+        }
+    }
+    #[test]
     fn forwarding_is_narrow_persistent_and_blocks_other_tunnel_flows() {
         let mut value = fixture();
-        value.forward = Some(mycelium_core::wireguard::WireGuardForward {
+        value.forwards = vec![mycelium_core::wireguard::WireGuardForward {
             ingress: "sh-br0".into(),
             egress: "mc-lab".into(),
             source: "172.16.0.101".parse().unwrap(),
             destination: "192.168.1.48".parse().unwrap(),
             tcp_port: 8717,
             source_nat: "10.253.180.1".parse().unwrap(),
-        });
+        }];
         value.validate().unwrap();
         for script in [
             forwarding_script(&value),
@@ -431,7 +484,7 @@ mod tests {
         assert!(rules[2].1.ends_with("-j DROP"));
         assert!(rules[4].1.contains("SNAT --to-source 10.253.180.1"));
         assert!(drop_in(&value).contains("ExecStopPost="));
-        value.forward.as_mut().unwrap().destination = "192.168.1.49".parse().unwrap();
+        value.forwards[0].destination = "192.168.1.49".parse().unwrap();
         assert!(value.validate().is_err());
     }
     #[test]
@@ -462,11 +515,11 @@ mod tests {
         struct Lab {
             names: Vec<String>,
             helper: std::path::PathBuf,
-            server: Option<std::process::Child>,
+            servers: Vec<std::process::Child>,
         }
         impl Drop for Lab {
             fn drop(&mut self) {
-                if let Some(server) = &mut self.server {
+                for server in &mut self.servers {
                     let _ = server.kill();
                     let _ = server.wait();
                 }
@@ -497,7 +550,7 @@ mod tests {
         let mut lab = Lab {
             names: vec![],
             helper: std::env::temp_dir().join(format!("mcwt-{pid}.sh")),
-            server: None,
+            servers: vec![],
         };
         for name in [&client, &router, &server] {
             run(&["ip", "netns", "add", name]);
@@ -553,19 +606,41 @@ mod tests {
             &server,
             &["ip", "addr", "add", "192.168.1.48/32", "dev", "lo"],
         );
+        ns(
+            &server,
+            &[
+                "ip",
+                "route",
+                "add",
+                "172.16.0.101/32",
+                "via",
+                "10.253.180.1",
+            ],
+        );
         ns(&router, &["sysctl", "-w", "net.ipv4.ip_forward=1"]);
         ns(&router, &["iptables", "-P", "FORWARD", "DROP"]);
         ns(&router, &["iptables", "-N", "UNRELATED"]);
         ns(&router, &["iptables", "-A", "FORWARD", "-j", "UNRELATED"]);
         let mut value = fixture();
-        value.forward = Some(mycelium_core::wireguard::WireGuardForward {
+        value.forwards = vec![mycelium_core::wireguard::WireGuardForward {
             ingress: "sh-br0".into(),
             egress: "mc-lab".into(),
             source: "172.16.0.101".parse().unwrap(),
             destination: "192.168.1.48".parse().unwrap(),
             tcp_port: 8717,
             source_nat: "10.253.180.1".parse().unwrap(),
-        });
+        }];
+        value
+            .forwards
+            .push(mycelium_core::wireguard::WireGuardForward {
+                ingress: "mc-lab".into(),
+                egress: "sh-br0".into(),
+                source: "192.168.1.48".parse().unwrap(),
+                destination: "172.16.0.101".parse().unwrap(),
+                tcp_port: 8788,
+                source_nat: "172.16.0.1".parse().unwrap(),
+            });
+        value.validate().unwrap();
         std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -580,7 +655,7 @@ mod tests {
         ns(&router, &[helper, "up"]);
         ns(&router, &["sh", "-c", &forwarding_verify(&value)]);
         // The isolated child runs the same Rust test executable, not a new daemon.
-        lab.server = Some(
+        lab.servers.push(
             std::process::Command::new("ip")
                 .args(["netns", "exec", &server])
                 .arg(std::env::current_exe().unwrap())
@@ -605,6 +680,51 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(25));
         }
         assert!(ready);
+        lab.servers.push(
+            std::process::Command::new("ip")
+                .args(["netns", "exec", &client])
+                .arg(std::env::current_exe().unwrap())
+                .args([
+                    "--ignored",
+                    "--exact",
+                    "wireguard::tests::namespace_http_server",
+                    "--nocapture",
+                ])
+                .env("MYCELIUM_WG_SERVER", "1")
+                .env("MYCELIUM_WG_SERVER_BIND", "172.16.0.101:8788")
+                .env("MYCELIUM_WG_SERVER_PEER", "172.16.0.1")
+                .spawn()
+                .unwrap(),
+        );
+        let mut ready = false;
+        for _ in 0..40 {
+            if String::from_utf8_lossy(&ns(&client, &["ss", "-Hln", "sport", "=", ":8788"]).stdout)
+                .contains("8788")
+            {
+                ready = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        assert!(ready);
+        assert_eq!(
+            ns(
+                &server,
+                &[
+                    "curl",
+                    "--interface",
+                    "192.168.1.48",
+                    "--noproxy",
+                    "*",
+                    "-fsS",
+                    "--max-time",
+                    "2",
+                    "http://172.16.0.101:8788"
+                ]
+            )
+            .stdout,
+            b"ok"
+        );
         let response = ns(
             &client,
             &[
@@ -705,10 +825,16 @@ mod tests {
     fn namespace_http_server() {
         assert_eq!(std::env::var("MYCELIUM_WG_SERVER").as_deref(), Ok("1"));
         use std::io::{Read, Write};
-        let listener = std::net::TcpListener::bind("192.168.1.48:8717").unwrap();
+        let listener = std::net::TcpListener::bind(
+            std::env::var("MYCELIUM_WG_SERVER_BIND").unwrap_or_else(|_| "192.168.1.48:8717".into()),
+        )
+        .unwrap();
         for stream in listener.incoming() {
             let mut stream = stream.unwrap();
-            assert_eq!(stream.peer_addr().unwrap().ip().to_string(), "10.253.180.1");
+            assert_eq!(
+                stream.peer_addr().unwrap().ip().to_string(),
+                std::env::var("MYCELIUM_WG_SERVER_PEER").unwrap_or_else(|_| "10.253.180.1".into())
+            );
             stream
                 .set_read_timeout(Some(std::time::Duration::from_secs(2)))
                 .unwrap();

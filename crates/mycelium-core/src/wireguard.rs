@@ -21,9 +21,31 @@ pub struct WireGuardTunnel {
     pub allowed_ips: Vec<String>,
     pub endpoint: Option<SocketAddr>,
     pub keepalive_seconds: u16,
-    /// One explicit routed workload flow. Not a blanket LAN trust grant.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub forward: Option<WireGuardForward>,
+    /// Bounded explicit workload flows, never a blanket LAN trust grant.
+    /// Read the former singular `forward` input, emit only canonical `forwards`.
+    #[serde(
+        default,
+        alias = "forward",
+        deserialize_with = "deserialize_flows",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub forwards: Vec<WireGuardForward>,
+}
+
+fn deserialize_flows<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<WireGuardForward>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Input {
+        Many(Vec<WireGuardForward>),
+        One(WireGuardForward),
+    }
+    Ok(match Option::<Input>::deserialize(deserializer)? {
+        Some(Input::Many(flows)) => flows,
+        Some(Input::One(flow)) => vec![flow],
+        None => vec![],
+    })
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -103,7 +125,20 @@ impl WireGuardTunnel {
                 return Err("duplicate routed prefix".into());
             }
         }
-        if let Some(flow) = &self.forward {
+        if self.forwards.len() > 8 {
+            return Err("at most eight explicit forwarded flows are supported".into());
+        }
+        let mut flows = std::collections::BTreeSet::new();
+        for flow in &self.forwards {
+            if !flows.insert((
+                &flow.ingress,
+                &flow.egress,
+                flow.source,
+                flow.destination,
+                flow.tcp_port,
+            )) {
+                return Err("duplicate forwarded flow".into());
+            }
             for name in [&flow.ingress, &flow.egress] {
                 if name.is_empty()
                     || name.len() > 15
@@ -182,12 +217,37 @@ mod tests {
             allowed_ips: vec!["192.168.1.48/32".into()],
             endpoint: Some("165.227.93.206:51820".parse().unwrap()),
             keepalive_seconds: 25,
-            forward: None,
+            forwards: vec![],
         }
     }
     #[test]
     fn accepts_scoped_local_key_reference() {
         tunnel().validate().unwrap();
+    }
+    #[test]
+    fn legacy_flow_input_has_one_canonical_representation() {
+        let flow = WireGuardForward {
+            ingress: "sh-br0".into(),
+            egress: "mc-lab".into(),
+            source: "172.16.0.104".parse().unwrap(),
+            destination: "192.168.1.48".parse().unwrap(),
+            tcp_port: 8717,
+            source_nat: "10.253.180.1".parse().unwrap(),
+        };
+        let mut old = serde_json::to_value(tunnel()).unwrap();
+        old["forward"] = serde_json::to_value(&flow).unwrap();
+        let parsed: WireGuardTunnel = serde_json::from_value(old).unwrap();
+        assert_eq!(parsed.forwards.len(), 1);
+        parsed.validate().unwrap();
+        let canonical = serde_json::to_value(parsed).unwrap();
+        assert!(canonical.get("forward").is_none());
+        assert_eq!(canonical["forwards"].as_array().unwrap().len(), 1);
+        let mut value = tunnel();
+        value.forwards = vec![flow.clone(), flow];
+        assert!(value.validate().is_err());
+        value.forwards.truncate(1);
+        value.forwards[0].tcp_port = 0;
+        assert!(value.validate().is_err());
     }
     #[test]
     fn rejects_default_noncanonical_and_public_routes() {

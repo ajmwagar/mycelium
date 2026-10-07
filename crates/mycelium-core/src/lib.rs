@@ -21,6 +21,7 @@ pub mod driver;
 pub mod error;
 pub mod exec;
 pub mod inspection;
+pub mod host_route;
 pub mod inventory;
 pub mod primitives;
 pub mod reconcile;

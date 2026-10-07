@@ -902,9 +902,11 @@ It atomically writes an owned root-only configuration, enables the wg-quick
 systemd unit, and verifies persisted configuration, runtime keys, addresses and
 routes. Ordinary apply failures restore the previous configuration and service
 state; abrupt host/process loss is not a transactional rollback guarantee.
-An optional `forward` object permits one explicit private TCP flow through the
+An optional `forwards` array permits up to eight explicit private TCP flows through the
 tunnel: `ingress`, `egress`, `source`, `destination`, `tcp_port`, and
-`source_nat`. Dedicated iptables chains accept that flow and established replies,
+`source_nat`. The former singular `forward` input remains readable, but emitted
+intent uses only `forwards`; duplicate flows are rejected. Dedicated iptables
+chains accept the selected flows and established replies,
 then reject other forwarded tunnel traffic. The egress NAT address must already
 exist locally and IPv4 forwarding must already be enabled. The owned systemd
 drop-in restores the rules on start and removes them on stop; it never saves or
@@ -922,6 +924,23 @@ and removes its interface and forwarding chains, retaining key/config files for
 `apply` to restore it. `wireguard stopped TARGET CONFIG.json` verifies retirement.
 Both lifecycle mutations require the exact running intent to pass verification
 first and support `--dry-run`; neither controls unowned units or other routes.
+
+Linux NetworkManager targets also declare `net.route.ensure` and read-only
+`net.route.verify`. Their `config` parameter is a JSON string containing a
+private IPv4 `destination` (always `/32`), private on-link `gateway`, `interface`,
+and the observed active `connection_uuid`. The driver adds only a missing route,
+refuses conflicting kernel/profile routes, checks that IPv4 defaults are
+unchanged, and removes its new route on ordinary failure. It never disconnects
+or reactivates the link. NetworkManager owns persistence; interface/profile
+identity is verified before mutation. No physical reboot qualification is implied.
+When using generic `call --param`, a leading space preserves a JSON document as
+a string rather than triggering the CLI's automatic map coercion:
+
+```sh
+mycelium call DEVICE net.route.ensure --param "config= $(cat route.json)" --dry-run
+mycelium call DEVICE net.route.ensure --param "config= $(cat route.json)" --write
+mycelium call DEVICE net.route.verify --param "config= $(cat route.json)"
+```
 
 Each peer periodically publishes a signed, bounded hardware graph covering
 PCIe, USB, storage, and accelerators. Stable identities derive from the peer
