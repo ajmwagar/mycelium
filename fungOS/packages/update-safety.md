@@ -27,13 +27,31 @@ run), all 59 CLI tests, and the QEMU overlay checks. Agora's default `/tmp`
 quota caused the first full CLI run to fail; rerunning with a fresh cache-local
 `TMPDIR` passed.
 
-**Native Unibus/Canvas automatic activation and failing-candidate rollback are
-not yet requalified.** Their isolated-channel manifests remain absent from the
-guest catalog. Neo has multiple daemon processes sharing one state directory;
-publisher reconciliation needs separate approval. No intentionally failing
-application was published, compositor automatic activation remains gated, and
-unrelated cloud assignments remain manual. This evidence is not a fleet rollout
-or a Pi 3B+ qualification.
+After separately authorized Neo reconciliation, the isolated-channel manifests
+reached the guest. `software auto-run` selected and activated Canvas `0.1.9` and
+Unibus router `0.1.5` through their existing native service bindings. These are
+qualification versions of already-cached known-good application payloads, not
+new upstream builds or proof of downloading fresh application bytes.
+
+A signed Unibus router `0.1.6` fixture deliberately exits with status 42. It was
+manually seeded after its trusted manifest arrived, then explicitly reconciled.
+Native readiness rejected the candidate and restored `0.1.5` with digest
+`792bcfa3b87895b952e96a27060b4812e87dc62f5ed504432d2a2970c40d8319`.
+The Unibus router, Canvas edge adapter, Canvas and compositor were all active;
+the pending activation checkpoint was absent and the failure remained visible
+in `last-activation.json`. This is a live single-application rollback proof, not
+an automatic fault-injection or whole-set transaction proof.
+
+Neo's duplicate shared-home processes were removed without changing enrollment
+identity or stopping a separate EdgeOS test daemon. Publisher startup was then
+severely delayed by concurrent system load (approximately 430, CPU fully busy).
+A process sample showed cached signed-envelope verification during daemon boot.
+Use `MYCELIUM_NO_AUTOSTART=1` while restarting a managed publisher: an immediate
+CLI call must not spawn another daemon while its supervisor is starting.
+Superseding the fault fixture and restoring the guest updater are separate final
+checks; record their live outcome before treating the channel as rollout-ready.
+Compositor automatic activation remains gated and unrelated cloud assignments
+remain manual. This evidence is not a fleet rollout or a Pi 3B+ qualification.
 
 Native binaries retain the existing signed-manifest, digest, immutable-release
 and locally authorized service-binding boundaries. This is not an APT backend;
