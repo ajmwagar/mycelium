@@ -8,15 +8,17 @@ It uses no third-party Shadertoy source. The kernel is rendered once to P6 RGB;
 Canvas uploads the retained image once and composites it behind real windows.
 No wallpaper shader, animation timer, or shader GPU workload remains running.
 
-The current Canvas GUI imports background images into a runtime-only asset cache.
-Its native compositor wallpaper is persistent through the service environment,
-but an opaque Canvas GUI surface needs the image imported again after a GUI
-restart. Do not claim GUI image restoration from saving a workspace alone.
+The qualified Canvas GUI now persists imported image bytes in a private,
+content-addressed store alongside its workspace file. A saved workspace retains
+the image identity; restart verifies and decodes its matching local bytes.
+Missing or corrupt assets fail visibly, without network fetching or repeated
+per-frame retries. Import is bounded to 128 MiB and rejects symlinks.
 
-For the existing guest, use Canvas's owner-local `set_background` command with
-`/etc/fungos-edge/theme/undergrowth.png` after a GUI restart. The theme pack and
-`dock` selection are ordinary persisted configuration. A saved workspace holds
-the actual palette and image identity; it does not restore decoded image bytes.
+Older saved workspaces need one owner-local `set_background` command with
+`/etc/fungos-edge/theme/undergrowth.png`, followed by `workspace_save`, to populate
+the store. The native compositor wallpaper remains independently configured.
+The owner patch is included as `canvas-background-persistence.patch`; it is not
+yet merged upstream. See [restart qualification](restart-qualification.md).
 
 ## Render and refresh
 

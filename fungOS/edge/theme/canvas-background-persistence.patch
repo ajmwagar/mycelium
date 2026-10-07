@@ -1,0 +1,254 @@
+diff --git a/crates/canvas/src/lib.rs b/crates/canvas/src/lib.rs
+index 54aeef7..6aaef1d 100644
+--- a/crates/canvas/src/lib.rs
++++ b/crates/canvas/src/lib.rs
+@@ -2,6 +2,7 @@
+ 
+ pub mod backend;
+ pub mod background_picker;
++pub mod background_store;
+ #[cfg(feature = "lua-scenes")]
+ pub mod briefing;
+ pub mod bus;
+diff --git a/crates/canvas/src/main.rs b/crates/canvas/src/main.rs
+index 9f92a42..d92a38e 100644
+--- a/crates/canvas/src/main.rs
++++ b/crates/canvas/src/main.rs
+@@ -841,6 +841,7 @@ struct App {
+     workspace_store_path: PathBuf,
+     active_project_workspace: Option<String>,
+     background_assets: BTreeMap<String, iced::widget::image::Handle>,
++    background_restore_attempted: BTreeSet<String>,
+     events: Vec<String>,
+     screensaver_settings: ScreensaverSettings,
+     screensaver_clock: screensaver::FrameClock,
+@@ -1269,6 +1270,7 @@ impl App {
+             active_project_workspace,
+             events: store_notes,
+             background_assets: BTreeMap::new(),
++            background_restore_attempted: BTreeSet::new(),
+             screensaver_settings: ScreensaverSettings::default(),
+             screensaver_clock: screensaver::FrameClock::new(
+                 ScreensaverSettings::default().max_fps,
+@@ -5446,7 +5448,13 @@ impl App {
+             }
+             Command::SetBackground { path } => {
+                 let base_document_revision = self.document.revision;
+-                Task::perform(async move { load_background(path) }, move |result| {
++                let store = self.workspace_store_path.with_extension("background-assets");
++                Task::perform(async move {
++                    let loaded = load_background(path.clone())?;
++                    ::canvas::background_store::import(&store, &path, &loaded.asset.sha256)
++                        .map_err(Failure::resource)?;
++                    Ok(loaded)
++                }, move |result| {
+                     Message::BackgroundLoaded {
+                         pending: Box::new(pending),
+                         base_document_revision,
+@@ -7336,14 +7344,17 @@ impl App {
+         Ok(())
+     }
+ 
+-    fn ensure_background_available(&self, document: &WorkspaceDocument) -> Result<(), Failure> {
++    fn ensure_background_available(&mut self, document: &WorkspaceDocument) -> Result<(), Failure> {
+         if let Background::Image { asset, .. } = &document.background
+             && !self.background_assets.contains_key(&asset.sha256)
+         {
+-            return Err(Failure::invalid(format!(
+-                "background asset {} has not been imported into this Canvas runtime",
+-                asset.sha256
+-            )));
++            let store = self.workspace_store_path.with_extension("background-assets");
++            ::canvas::background_store::read(&store, &asset.sha256).map_err(Failure::resource)?;
++            let loaded = load_background(store.join(&asset.sha256))?;
++            if loaded.asset != *asset {
++                return Err(Failure::invalid("persisted background metadata mismatch"));
++            }
++            self.background_assets.insert(asset.sha256.clone(), loaded.handle);
+         }
+         Ok(())
+     }
+@@ -7957,6 +7968,16 @@ impl App {
+     }
+ 
+     fn ensure_scene_decoded(&mut self) {
++        if let Background::Image { asset, .. } = &self.document.background {
++            let asset = asset.clone();
++            if !self.background_assets.contains_key(&asset.sha256)
++                && self.background_restore_attempted.insert(asset.sha256.clone()) {
++                if let Err(error) = self.ensure_background_available(&self.document.clone()) {
++                    self.status = format!("Background unavailable: {}", error.message);
++                    self.emit_event(format!("background_restore_failed {}", error.message));
++                }
++            }
++        }
+         for surface in &self.document.surfaces {
+             if self.decoded.contains_key(&surface.id) {
+                 continue;
+@@ -12892,6 +12913,27 @@ fn assemble_presence(
+ mod tests {
+     use super::*;
+     #[test]
++    fn persisted_background_restores_without_original_source() {
++        let directory = tempfile::tempdir().unwrap();
++        let source = directory.path().join("original.png");
++        image::RgbaImage::from_pixel(2, 2, image::Rgba([40, 61, 49, 255])).save(&source).unwrap();
++        let loaded = load_background(source.clone()).unwrap();
++        let mut app = test_app();
++        app.workspace_store_path = directory.path().join("workspaces.json");
++        let store = app.workspace_store_path.with_extension("background-assets");
++        ::canvas::background_store::import(&store, &source, &loaded.asset.sha256).unwrap();
++        fs::remove_file(source).unwrap();
++        app.document.background = Background::Image { asset: loaded.asset.clone(), fit: BackgroundFit::Cover };
++        app.ensure_scene_decoded();
++        assert!(app.background_assets.contains_key(&loaded.asset.sha256));
++        app.background_assets.clear();
++        let document = app.document.clone();
++        app.ensure_background_available(&document).unwrap();
++        fs::write(store.join(&loaded.asset.sha256), b"corrupt").unwrap();
++        app.background_assets.clear();
++        assert!(app.ensure_background_available(&document).is_err());
++    }
++    #[test]
+     fn launcher_catalog_is_revision_bound_and_rejects_unknown_choices() {
+         let mut app = test_app();
+         let reply = execute(&mut app, "shell-read", Command::ShellCatalog);
+diff --git a/crates/canvas/src/background_store.rs b/crates/canvas/src/background_store.rs
+new file mode 100644
+index 0000000..4ffc04b
+--- /dev/null
++++ b/crates/canvas/src/background_store.rs
+@@ -0,0 +1,133 @@
++//! Local, content-addressed background bytes. Workspace documents retain identity,
++//! not source filenames; originals can move or disappear after import.
++use sha2::{Digest, Sha256};
++use std::{
++    fs,
++    io::{Read, Write},
++    path::{Path, PathBuf},
++};
++const LIMIT: u64 = 128 * 1024 * 1024;
++fn path(root: &Path, digest: &str) -> Result<PathBuf, String> {
++    if digest.len() != 64
++        || !digest
++            .bytes()
++            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
++    {
++        return Err("invalid background digest".into());
++    }
++    Ok(root.join(digest))
++}
++pub fn read(root: &Path, digest: &str) -> Result<Vec<u8>, String> {
++    let path = path(root, digest)?;
++    let metadata = fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
++    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > LIMIT {
++        return Err("background must be a bounded non-symlink regular file".into());
++    }
++    let mut bytes = Vec::new();
++    fs::File::open(path)
++        .map_err(|e| e.to_string())?
++        .take(LIMIT + 1)
++        .read_to_end(&mut bytes)
++        .map_err(|e| e.to_string())?;
++    if bytes.len() as u64 > LIMIT || format!("{:x}", Sha256::digest(&bytes)) != digest {
++        return Err("background content digest mismatch".into());
++    }
++    Ok(bytes)
++}
++pub fn import(root: &Path, source: &Path, digest: &str) -> Result<(), String> {
++    let destination = path(root, digest)?;
++    let metadata = fs::symlink_metadata(source).map_err(|e| e.to_string())?;
++    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > LIMIT {
++        return Err("background source must be bounded regular file".into());
++    }
++    let mut bytes = Vec::new();
++    fs::File::open(source)
++        .map_err(|e| e.to_string())?
++        .take(LIMIT + 1)
++        .read_to_end(&mut bytes)
++        .map_err(|e| e.to_string())?;
++    if bytes.len() as u64 > LIMIT || format!("{:x}", Sha256::digest(&bytes)) != digest {
++        return Err("background changed during import".into());
++    }
++    fs::create_dir_all(root).map_err(|e| e.to_string())?;
++    if !fs::symlink_metadata(root)
++        .map_err(|e| e.to_string())?
++        .is_dir()
++    {
++        return Err("background store must be a non-symlink directory".into());
++    }
++    #[cfg(unix)]
++    {
++        use std::os::unix::fs::PermissionsExt;
++        fs::set_permissions(root, fs::Permissions::from_mode(0o700)).map_err(|e| e.to_string())?;
++    }
++    if destination.exists() {
++        read(root, digest)?;
++        return Ok(());
++    }
++    let temporary = root.join(format!(
++        ".import-{}-{}",
++        std::process::id(),
++        std::time::SystemTime::now()
++            .duration_since(std::time::UNIX_EPOCH)
++            .map_err(|e| e.to_string())?
++            .as_nanos()
++    ));
++    let mut options = fs::OpenOptions::new();
++    options.write(true).create_new(true);
++    #[cfg(unix)]
++    {
++        use std::os::unix::fs::OpenOptionsExt;
++        options.mode(0o600);
++    }
++    let result = (|| {
++        let mut file = options.open(&temporary).map_err(|e| e.to_string())?;
++        file.write_all(&bytes).map_err(|e| e.to_string())?;
++        file.sync_all().map_err(|e| e.to_string())?;
++        // Never replace an existing object, even during racing imports.
++        match fs::hard_link(&temporary, &destination) {
++            Ok(()) => {}
++            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
++                read(root, digest)?;
++            }
++            Err(e) => return Err(e.to_string()),
++        }
++        #[cfg(unix)]
++        fs::File::open(root)
++            .and_then(|file| file.sync_all())
++            .map_err(|e| e.to_string())?;
++        Ok(())
++    })();
++    let cleanup = fs::remove_file(&temporary);
++    result?;
++    cleanup.map_err(|e| e.to_string())
++}
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn survives_source_removal_and_rejects_corruption() {
++        let dir = tempfile::tempdir().unwrap();
++        let source = dir.path().join("original");
++        let root = dir.path().join("assets");
++        fs::write(&source, b"image bytes").unwrap();
++        let digest = format!("{:x}", Sha256::digest(b"image bytes"));
++        import(&root, &source, &digest).unwrap();
++        import(&root, &source, &digest).unwrap();
++        fs::remove_file(source).unwrap();
++        assert_eq!(read(&root, &digest).unwrap(), b"image bytes");
++        fs::write(root.join(&digest), b"tampered").unwrap();
++        assert!(read(&root, &digest).is_err());
++    }
++    #[test]
++    fn rejects_missing_unsafe_and_symlink_assets() {
++        let dir = tempfile::tempdir().unwrap();
++        assert!(read(dir.path(), "../bad").is_err());
++        assert!(read(dir.path(), &"a".repeat(64)).is_err());
++        #[cfg(unix)]
++        {
++            std::os::unix::fs::symlink("/etc/passwd", dir.path().join("a".repeat(64))).unwrap();
++            assert!(read(dir.path(), &"a".repeat(64)).is_err());
++        }
++    }
++}
