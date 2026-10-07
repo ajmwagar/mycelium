@@ -1,8 +1,13 @@
 #!/bin/sh
 set -eu
 
+pairing_log=false
+if [ "${1:-}" = "--pairing-log" ]; then
+  pairing_log=true
+  shift
+fi
 [ "$#" -eq 2 ] || {
-  echo "usage: $0 CLAIM_FILE OUTPUT_IMAGE" >&2
+  echo "usage: $0 [--pairing-log] CLAIM_FILE OUTPUT_IMAGE" >&2
   exit 2
 }
 claim=$1
@@ -13,7 +18,18 @@ command -v mkfs.ext4 >/dev/null || { echo "mkfs.ext4 is required" >&2; exit 1; }
 
 work_dir=$(mktemp -d)
 trap 'rm -rf "$work_dir"' EXIT INT TERM
-install -m 0600 "$claim" "$work_dir/claim"
+umask 077
+if [ "$pairing_log" = true ]; then
+  # Consume generated CLI output without echoing its one-use secret. Refuse
+  # absent/ambiguous claims rather than selecting an arbitrary line.
+  awk '/^Pairing claim: / { count++; sub(/^Pairing claim: /, ""); print }
+       END { if (count != 1) exit 1 }' "$claim" > "$work_dir/claim" || {
+    echo "pairing log must contain exactly one claim" >&2
+    exit 1
+  }
+else
+  install -m 0600 "$claim" "$work_dir/claim"
+fi
 printf '%s\n' 'PROFILE=fungos-qemu' > "$work_dir/first-contact.env"
 chmod 0600 "$work_dir/first-contact.env"
 
