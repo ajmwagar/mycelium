@@ -108,12 +108,19 @@ impl Mesh {
     }
 
     pub async fn local_hello(&self) -> PeerHello {
-        self.observations.lock().await.values().find_map(|envelope| {
-            if envelope.origin == self.node_id() {
-                if let PeerEvent::Hello(hello) = &envelope.event { return Some(hello.clone()); }
-            }
-            None
-        }).unwrap_or_else(|| self.hello.clone())
+        self.observations
+            .lock()
+            .await
+            .values()
+            .find_map(|envelope| {
+                if envelope.origin == self.node_id() {
+                    if let PeerEvent::Hello(hello) = &envelope.event {
+                        return Some(hello.clone());
+                    }
+                }
+                None
+            })
+            .unwrap_or_else(|| self.hello.clone())
     }
 
     /// Refresh public observations after a locally authorized rename/profile
@@ -122,14 +129,23 @@ impl Mesh {
         let mut hello = self.local_hello().await;
         let previous = hello.clone();
         let intent = crate::node_profile::read()?;
-        if intent.as_ref().is_some_and(|intent| intent.node_id != self.node_id()) {
+        if intent
+            .as_ref()
+            .is_some_and(|intent| intent.node_id != self.node_id())
+        {
             return Err("local profile belongs to another peer".into());
         }
         hello.hostname = tokio::task::spawn_blocking(|| output("hostname", &["-s"]))
-            .await??.trim().to_owned();
-        hello.capabilities.retain(|fact| !fact.starts_with("profile."));
+            .await??
+            .trim()
+            .to_owned();
+        hello
+            .capabilities
+            .retain(|fact| !fact.starts_with("profile."));
         if let Some(intent) = intent {
-            hello.capabilities.push(format!("profile.{}", intent.profile));
+            hello
+                .capabilities
+                .push(format!("profile.{}", intent.profile));
         }
         if hello != previous {
             self.publish(PeerEvent::Hello(hello.clone())).await?;
@@ -1366,8 +1382,10 @@ impl Mesh {
     async fn preferred_release(&self) -> Result<Option<ReleaseManifest>, AnyError> {
         let targets = local_compatible_targets();
         let fallback = std::env::var("MYCELIUM_UPDATE_CHANNEL").unwrap_or_else(|_| "canary".into());
-        let channel = crate::update_policy::distribution_channel(&crate::update_policy_path(), &fallback)?;
-        Ok(self.releases()
+        let channel =
+            crate::update_policy::distribution_channel(&crate::update_policy_path(), &fallback)?;
+        Ok(self
+            .releases()
             .await
             .into_iter()
             .filter(|release| targets.contains(&release.target) && release.channel == channel)
@@ -2032,14 +2050,35 @@ fn accept_artifact_chunk(
         })
         .ok_or("artifact has no trusted release or package manifest")?;
     let data = decode_hex(encoded).map_err(|error| format!("artifact chunk: {error}"))?;
-    if data.len() > 65_536 || offset + data.len() as u64 > signed_bounds {
+    let destination = artifact_path(digest)?;
+    store_artifact_chunk(&destination, digest, signed_bounds, offset, &data, complete)
+}
+
+fn store_artifact_chunk(
+    destination: &std::path::Path,
+    digest: &str,
+    signed_bounds: u64,
+    offset: u64,
+    data: &[u8],
+    complete: bool,
+) -> Result<(), AnyError> {
+    if data.len() > 65_536
+        || offset
+            .checked_add(data.len() as u64)
+            .is_none_or(|end| end > signed_bounds)
+    {
         return Err("artifact chunk exceeds signed bounds".into());
     }
-    std::fs::create_dir_all(crate::artifacts_dir())?;
-    let partial = partial_artifact_path(digest)?;
-    let current = std::fs::metadata(&partial)
-        .map(|metadata| metadata.len())
-        .unwrap_or(0);
+    let directory = destination
+        .parent()
+        .ok_or("artifact has no parent directory")?;
+    std::fs::create_dir_all(directory)?;
+    let partial = destination.with_extension("part");
+    let current = match std::fs::metadata(&partial) {
+        Ok(metadata) => metadata.len(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(error) => return Err(error.into()),
+    };
     if current != offset {
         return Ok(());
     }
@@ -2047,14 +2086,17 @@ fn accept_artifact_chunk(
         .create(true)
         .append(true)
         .open(&partial)?;
-    file.write_all(&data)?;
+    file.write_all(data)?;
     file.sync_data()?;
+    // Persist both the newly-created partial and final rename across reboot.
+    std::fs::File::open(directory)?.sync_all()?;
     if complete {
         let bytes = std::fs::read(&partial)?;
         if bytes.len() as u64 != signed_bounds || sha256_hex(&bytes) != digest {
             return Err("completed artifact does not match signed size and digest".into());
         }
-        std::fs::rename(partial, artifact_path(digest)?)?;
+        std::fs::rename(partial, destination)?;
+        std::fs::File::open(directory)?.sync_all()?;
     }
     Ok(())
 }
@@ -2501,6 +2543,56 @@ mod tests {
         assert!(!seed_artifact_file(&source, &destination, &digest, bytes.len() as u64).unwrap());
         assert!(seed_artifact_file(&source, &destination, &digest, bytes.len() as u64).unwrap());
         assert_eq!(std::fs::read(&destination).unwrap(), bytes);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn interrupted_download_resumes_from_disk_and_only_promotes_verified_bytes() {
+        let dir = test_dir("download-resume");
+        let bytes = b"authorized binary bytes";
+        let digest = sha256_hex(bytes);
+        let destination = dir.join(&digest);
+        store_artifact_chunk(
+            &destination,
+            &digest,
+            bytes.len() as u64,
+            0,
+            &bytes[..8],
+            false,
+        )
+        .unwrap();
+        assert!(!destination.exists());
+        // A new invocation has no retained in-memory progress, just like restart.
+        store_artifact_chunk(
+            &destination,
+            &digest,
+            bytes.len() as u64,
+            8,
+            &bytes[8..],
+            true,
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(&destination).unwrap(), bytes);
+        assert!(!destination.with_extension("part").exists());
+        assert!(store_artifact_chunk(
+            &destination,
+            &digest,
+            bytes.len() as u64,
+            u64::MAX,
+            b"x",
+            false
+        )
+        .is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn corrupt_completed_download_is_never_promoted() {
+        let dir = test_dir("download-corrupt");
+        let digest = sha256_hex(b"good");
+        let destination = dir.join(&digest);
+        assert!(store_artifact_chunk(&destination, &digest, 4, 0, b"evil", true).is_err());
+        assert!(!destination.exists());
         std::fs::remove_dir_all(dir).unwrap();
     }
 
