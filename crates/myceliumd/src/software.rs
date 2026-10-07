@@ -75,6 +75,9 @@ pub struct DesiredPackage {
     pub channel: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub updates: Option<UpdatePolicy>,
+    /// Locally declared exact compatibility requirements, not publisher commands.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub requires: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -85,6 +88,7 @@ pub struct SoftwareAssignment {
     pub channel: String,
     pub updates: UpdatePolicy,
     pub rules: BTreeSet<String>,
+    pub requires: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -184,6 +188,13 @@ impl SoftwarePolicy {
             for package in &rule.packages {
                 validate_label("package", &package.name)?;
                 validate_label("channel", &package.channel)?;
+                for (dependency, version) in &package.requires {
+                    validate_label("dependency", dependency)?;
+                    validate_label("dependency version", version)?;
+                    if dependency == &package.name {
+                        return Err("package cannot depend on itself".into());
+                    }
+                }
                 validate_update_policy(package.updates.as_ref().unwrap_or(&self.defaults.updates))?;
             }
         }
@@ -218,11 +229,18 @@ pub fn plan(
                             .clone()
                             .unwrap_or_else(|| policy.defaults.updates.clone()),
                         rules: BTreeSet::new(),
+                        requires: package.requires.clone(),
                     });
                 if assignment.channel != package.channel {
                     return Err(format!(
                         "conflicting channels for package `{}` on `{}`: `{}` and `{}`",
                         package.name, hello.hostname, assignment.channel, package.channel
+                    ));
+                }
+                if assignment.requires != package.requires {
+                    return Err(format!(
+                        "conflicting dependencies for package `{}`",
+                        package.name
                     ));
                 }
                 let updates = package
@@ -296,8 +314,49 @@ pub fn reconcile(
     targets: &[String],
     write: bool,
 ) -> Result<Vec<PackageStatus>, AnyError> {
+    let ordered = dependency_order(assignments)?;
+    if write {
+        for assignment in &ordered {
+            let directory = crate::software_dir().join(&assignment.package);
+            if std::fs::symlink_metadata(directory.join("activation-pending.json")).is_ok() {
+                let _lock = activation_lock(&directory)?;
+                let binding = crate::software_service::binding(&assignment.package)?;
+                recover_activation(
+                    &directory,
+                    &assignment.package,
+                    binding
+                        .as_ref()
+                        .map(|binding| binding as &dyn crate::software_service::Lifecycle),
+                )?;
+            }
+        }
+    }
+    // A dependent update set must be fully staged before touching any member.
+    // Exact requirements intentionally fail rather than guessing ABI compatibility.
+    if assignments.iter().any(|item| !item.requires.is_empty()) {
+        for assignment in &ordered {
+            let manifest = select(manifests, &assignment.package, &assignment.channel, targets)
+                .ok_or_else(|| format!("update set lacks manifest for {}", assignment.package))?;
+            manifest.verify()?;
+            check_required_versions(assignment, &ordered, manifests, targets)?;
+            let bytes = std::fs::read(crate::artifacts_dir().join(&manifest.artifact_digest))
+                .map_err(|error| {
+                    format!("update set not fully staged: {}: {error}", manifest.name)
+                })?;
+            if bytes.len() as u64 != manifest.artifact_size
+                || sha256_hex(&bytes) != manifest.artifact_digest
+            {
+                return Err("update set contains corrupt cached bytes".into());
+            }
+            if write && crate::software_service::binding(&manifest.name)?.is_none() {
+                return Err(
+                    "dependent update set requires native health bindings for every member".into(),
+                );
+            }
+        }
+    }
     let mut statuses = Vec::new();
-    for assignment in assignments {
+    for assignment in ordered {
         let installed_version = installed_version(&assignment.package);
         let Some(manifest) = select(manifests, &assignment.package, &assignment.channel, targets)
         else {
@@ -371,6 +430,69 @@ pub fn reconcile(
     Ok(statuses)
 }
 
+fn check_required_versions(
+    assignment: &SoftwareAssignment,
+    ordered: &[&SoftwareAssignment],
+    manifests: &[PackageManifest],
+    targets: &[String],
+) -> Result<(), AnyError> {
+    for (name, version) in &assignment.requires {
+        let dependency = ordered
+            .iter()
+            .find(|item| item.package == *name)
+            .ok_or_else(|| format!("dependency {name} is not assigned on this node"))?;
+        let selected = select(manifests, name, &dependency.channel, targets)
+            .ok_or_else(|| format!("update set lacks dependency {name}"))?;
+        if selected.version != *version {
+            return Err(format!(
+                "{} requires {name}={version}, selected {}",
+                assignment.package, selected.version
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
+fn dependency_order(
+    assignments: &[SoftwareAssignment],
+) -> Result<Vec<&SoftwareAssignment>, AnyError> {
+    let mut pending = BTreeMap::new();
+    for assignment in assignments {
+        if assignments
+            .first()
+            .is_some_and(|first| first.node_id != assignment.node_id)
+        {
+            return Err("reconcile cannot mix nodes".into());
+        }
+        if pending
+            .insert(assignment.package.clone(), assignment)
+            .is_some()
+        {
+            return Err("reconcile requires one node and unique package assignments".into());
+        }
+    }
+    for assignment in assignments {
+        for name in assignment.requires.keys() {
+            if !pending.contains_key(name) {
+                return Err(format!("dependency {name} is not assigned on this node").into());
+            }
+        }
+    }
+    let mut ordered = Vec::new();
+    let mut done = BTreeSet::new();
+    while !pending.is_empty() {
+        let name = pending
+            .iter()
+            .find(|(_, item)| item.requires.keys().all(|name| done.contains(name)))
+            .map(|(name, _)| name.clone())
+            .ok_or("cyclic package dependencies")?;
+        ordered.push(pending.remove(&name).unwrap());
+        done.insert(name);
+    }
+    Ok(ordered)
+}
+
 fn status(
     assignment: &SoftwareAssignment,
     installed_version: Option<String>,
@@ -401,6 +523,15 @@ fn current_health(
         .map_err(|error| format!("package signature: {error}"))?;
     validate_label("package", &manifest.name)?;
     validate_label("version", &manifest.version)?;
+    if std::fs::symlink_metadata(
+        software
+            .join(&manifest.name)
+            .join("activation-pending.json"),
+    )
+    .is_ok()
+    {
+        return Err("interrupted activation requires explicit recovery".into());
+    }
     let current = software.join(&manifest.name).join("current");
     if std::fs::read_link(&current)? != Path::new("releases").join(&manifest.version) {
         return Err("current package link is not the desired internal release".into());
@@ -458,9 +589,22 @@ pub fn automatic_assignments(
     now: u64,
     state: &mut AutomaticState,
 ) -> Vec<SoftwareAssignment> {
+    // Until update-set rollback is qualified, dependency-linked components are
+    // explicit reconcile only. Do not let filtering split a provider from its
+    // dependent and accidentally bypass compatibility admission.
+    let mut linked = BTreeSet::new();
+    for assignment in &assignments {
+        if !assignment.requires.is_empty() {
+            linked.insert(assignment.package.clone());
+            linked.extend(assignment.requires.keys().cloned());
+        }
+    }
     assignments
         .into_iter()
         .filter(|assignment| {
+            if linked.contains(&assignment.package) {
+                return false;
+            }
             let UpdatePolicy::Automatic {
                 minimum_cache_age_secs,
                 rollout_window_secs,
@@ -599,14 +743,8 @@ fn activate_transaction(
     validate_label("version", &manifest.version)?;
     let package_dir = software.join(&manifest.name);
     std::fs::create_dir_all(&package_dir)?;
-    let lock = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(package_dir.join(".activation.lock"))?;
-    lock.try_lock()
-        .map_err(|_| "another activation is already running for this package")?;
+    let _lock = activation_lock(&package_dir)?;
+    recover_activation(&package_dir, &manifest.name, lifecycle)?;
     let current = package_dir.join("current");
     let previous = match std::fs::read_link(&current) {
         Ok(previous) => Some(previous),
@@ -654,7 +792,10 @@ fn activate_transaction(
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o755))?;
         }
+        std::fs::File::open(&temporary)?.sync_all()?;
         std::fs::rename(&temporary, &executable)?;
+        sync_directory(&release_dir)?;
+        sync_directory(&package_dir.join("releases"))?;
     }
     let previous_digest = previous
         .as_ref()
@@ -671,6 +812,13 @@ fn activate_transaction(
     };
     if let Some(lifecycle) = lifecycle {
         lifecycle.preflight(&current.join(&manifest.name))?;
+        persist_activation(
+            &package_dir,
+            &PendingActivation {
+                previous: previous.clone(),
+                previous_digest: previous_digest.clone(),
+            },
+        )?;
         lifecycle.stop()?;
         let applied = advance()
             .and_then(|()| lifecycle.start())
@@ -686,8 +834,10 @@ fn activate_transaction(
                 lifecycle.start().and_then(|()| lifecycle.verify(&digest))
                     .map_err(|rollback| format!("activation failed: {error}; previous link restored but recovery failed: {rollback}"))?;
             }
+            clear_activation(&package_dir)?;
             return Err(format!("activation failed and previous version restored: {error}").into());
         }
+        clear_activation(&package_dir)?;
     } else {
         advance()?;
     }
@@ -700,11 +850,162 @@ fn activate_transaction(
     })
 }
 
+/// Written and synced before any disruptive action. Recovery deliberately
+/// restores the prior release, never guesses whether an unverified candidate
+/// completed successfully. A failed recovery retains the checkpoint.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PendingActivation {
+    previous: Option<PathBuf>,
+    previous_digest: Option<String>,
+}
+
+fn activation_lock(directory: &Path) -> Result<std::fs::File, AnyError> {
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(directory.join(".activation.lock"))?;
+    lock.try_lock()
+        .map_err(|_| "another activation is already running for this package")?;
+    Ok(lock)
+}
+
+/// Resume only locally checkpointed, previously authorized operations. Never
+/// select or install a new release on startup. Return every failure visibly;
+/// leave its checkpoint for an explicit retry rather than masking uncertainty.
+pub fn recover_interrupted_activations() -> Result<Vec<String>, AnyError> {
+    let entries = match std::fs::read_dir(crate::software_dir()) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut recovered = Vec::new();
+    let mut errors = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let directory = entry.path();
+        if std::fs::symlink_metadata(directory.join("activation-pending.json")).is_err() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let result = (|| -> Result<(), AnyError> {
+            validate_label("package", &name)?;
+            let _lock = activation_lock(&directory)?;
+            let binding = crate::software_service::binding(&name)?;
+            recover_activation(
+                &directory,
+                &name,
+                binding
+                    .as_ref()
+                    .map(|binding| binding as &dyn crate::software_service::Lifecycle),
+            )
+        })();
+        match result {
+            Ok(()) => recovered.push(name),
+            Err(error) => errors.push(format!("{name}: {error}")),
+        }
+    }
+    if errors.is_empty() {
+        Ok(recovered)
+    } else {
+        Err(format!(
+            "interrupted activation recovery failed: {}",
+            errors.join("; ")
+        )
+        .into())
+    }
+}
+
+fn persist_activation(directory: &Path, pending: &PendingActivation) -> Result<(), AnyError> {
+    use std::io::Write;
+    let temporary = directory.join(".activation-pending.tmp");
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    // A stale unpublished temporary is safe to discard under the package lock.
+    if std::fs::symlink_metadata(&temporary).is_ok() {
+        std::fs::remove_file(&temporary)?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&temporary)?;
+    file.write_all(&serde_json::to_vec(pending)?)?;
+    file.sync_all()?;
+    std::fs::rename(temporary, directory.join("activation-pending.json"))?;
+    sync_directory(directory)
+}
+
+fn sync_directory(directory: &Path) -> Result<(), AnyError> {
+    #[cfg(unix)]
+    std::fs::File::open(directory)?.sync_all()?;
+    Ok(())
+}
+
+fn clear_activation(directory: &Path) -> Result<(), AnyError> {
+    std::fs::remove_file(directory.join("activation-pending.json"))?;
+    sync_directory(directory)
+}
+
+fn recover_activation(
+    directory: &Path,
+    name: &str,
+    lifecycle: Option<&dyn crate::software_service::Lifecycle>,
+) -> Result<(), AnyError> {
+    let path = directory.join("activation-pending.json");
+    let metadata = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    if !metadata.is_file() || metadata.len() > 4096 {
+        return Err("invalid activation recovery checkpoint".into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            return Err("activation recovery checkpoint must be owner-only".into());
+        }
+    }
+    let pending: PendingActivation = serde_json::from_slice(&std::fs::read(path)?)?;
+    let lifecycle = lifecycle.ok_or("interrupted activation lost its native service binding")?;
+    match (&pending.previous, &pending.previous_digest) {
+        (Some(previous), Some(digest)) => {
+            let components: Vec<_> = previous.components().collect();
+            if components.len() != 2
+                || components[0].as_os_str() != "releases"
+                || !matches!(components[1], std::path::Component::Normal(_))
+                || sha256_hex(&std::fs::read(directory.join(previous).join(name))?) != *digest
+            {
+                return Err("previous release failed recovery integrity check".into());
+            }
+        }
+        (None, None) => {}
+        _ => return Err("inconsistent activation recovery checkpoint".into()),
+    }
+    lifecycle.preflight(&directory.join("current").join(name))?;
+    lifecycle.stop()?;
+    switch_current(directory, pending.previous.as_deref())?;
+    if let Some(digest) = pending.previous_digest {
+        lifecycle.start()?;
+        lifecycle.verify(&digest)?;
+    }
+    clear_activation(directory)
+}
+
 fn switch_current(package_dir: &Path, target: Option<&Path>) -> Result<(), AnyError> {
     let current = package_dir.join("current");
     let Some(target) = target else {
         if current.exists() || std::fs::symlink_metadata(&current).is_ok() {
             std::fs::remove_file(current)?;
+            sync_directory(package_dir)?;
         }
         return Ok(());
     };
@@ -717,6 +1018,7 @@ fn switch_current(package_dir: &Path, target: Option<&Path>) -> Result<(), AnyEr
     #[cfg(not(unix))]
     return Err("package activation requires Unix".into());
     std::fs::rename(temporary, current)?;
+    sync_directory(package_dir)?;
     Ok(())
 }
 
@@ -799,6 +1101,7 @@ mod tests {
                         name: "unibus".into(),
                         channel: "stable".into(),
                         updates: None,
+                        requires: BTreeMap::new(),
                     }],
                 },
                 PlacementRule {
@@ -811,6 +1114,7 @@ mod tests {
                         name: "isochrone".into(),
                         channel: "stable".into(),
                         updates: None,
+                        requires: BTreeMap::new(),
                     }],
                 },
             ],
@@ -842,6 +1146,7 @@ mod tests {
                         name: "unibus".into(),
                         channel: "stable".into(),
                         updates: None,
+                        requires: BTreeMap::new(),
                     }],
                 },
                 PlacementRule {
@@ -851,6 +1156,7 @@ mod tests {
                         name: "unibus".into(),
                         channel: "canary".into(),
                         updates: None,
+                        requires: BTreeMap::new(),
                     }],
                 },
             ],
@@ -1113,14 +1419,18 @@ mod tests {
     }
 
     fn activation_fixture() -> (PathBuf, PathBuf, PathBuf, PackageManifest, PackageManifest) {
-        let root = std::env::temp_dir().join(format!(
-            "mycelium-native-update-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let root = std::env::var_os("MYCELIUM_TEST_CRASH_ROOT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                std::env::temp_dir().join(format!(
+                    "mycelium-native-update-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos()
+                ))
+            });
         let artifacts = root.join("artifacts");
         let software = root.join("software");
         std::fs::create_dir_all(&artifacts).unwrap();
@@ -1141,6 +1451,298 @@ mod tests {
         std::fs::write(artifacts.join(&previous.artifact_digest), b"good").unwrap();
         std::fs::write(artifacts.join(&candidate.artifact_digest), b"bad").unwrap();
         (root, artifacts, software, previous, candidate)
+    }
+
+    #[test]
+    fn interrupted_activation_restores_before_retry_and_keeps_failed_recovery() {
+        let (root, artifacts, software, previous, candidate) = activation_fixture();
+        activate_from(&previous, &artifacts, &software).unwrap();
+        let directory = software.join("unibus");
+        persist_activation(
+            &directory,
+            &PendingActivation {
+                previous: Some(PathBuf::from("releases/1.0.0")),
+                previous_digest: Some(previous.artifact_digest.clone()),
+            },
+        )
+        .unwrap();
+        // Persisted state after a process died following the pointer switch.
+        activate_from(&candidate, &artifacts, &software).unwrap_err();
+        std::fs::create_dir_all(directory.join("releases/1.1.0")).unwrap();
+        std::fs::write(directory.join("releases/1.1.0/unibus"), b"bad").unwrap();
+        switch_current(&directory, Some(Path::new("releases/1.1.0"))).unwrap();
+        assert!(current_health(&candidate, &software, None)
+            .unwrap_err()
+            .to_string()
+            .contains("interrupted"));
+        let unhealthy = NativeProbe {
+            healthy_digest: "none".into(),
+            calls: Default::default(),
+        };
+        assert!(recover_activation(&directory, "unibus", Some(&unhealthy)).is_err());
+        assert!(directory.join("activation-pending.json").exists());
+        let native = NativeProbe {
+            healthy_digest: previous.artifact_digest.clone(),
+            calls: Default::default(),
+        };
+        recover_activation(&directory, "unibus", Some(&native)).unwrap();
+        assert!(!directory.join("activation-pending.json").exists());
+        current_health(&previous, &software, None).unwrap();
+        assert_eq!(
+            *native.calls.borrow(),
+            ["preflight", "stop", "start", "verify"]
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn recovery_rejects_corrupt_previous_release_before_stopping_service() {
+        let (root, artifacts, software, previous, _) = activation_fixture();
+        activate_from(&previous, &artifacts, &software).unwrap();
+        let directory = software.join("unibus");
+        persist_activation(
+            &directory,
+            &PendingActivation {
+                previous: Some(PathBuf::from("releases/1.0.0")),
+                previous_digest: Some(previous.artifact_digest.clone()),
+            },
+        )
+        .unwrap();
+        std::fs::write(directory.join("current/unibus"), b"tampered").unwrap();
+        let native = NativeProbe {
+            healthy_digest: previous.artifact_digest,
+            calls: Default::default(),
+        };
+        assert!(recover_activation(&directory, "unibus", Some(&native)).is_err());
+        assert!(native.calls.borrow().is_empty());
+        assert!(directory.join("activation-pending.json").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn dependency_order_rejects_missing_and_cyclic_assignments() {
+        let policy: SoftwarePolicy = serde_json::from_str(r#"{"schema_version":1,"rules":[{"name":"edge","packages":[{"name":"canvas","requires":{"unibus":"1.0.0"}},{"name":"unibus"}]}]}"#).unwrap();
+        let mut assignments =
+            plan(&policy, &[peer("qemu", Platform::Linux, "x86_64", &[])]).unwrap();
+        let ordered = dependency_order(&assignments).unwrap();
+        assert_eq!(
+            ordered
+                .iter()
+                .map(|item| item.package.as_str())
+                .collect::<Vec<_>>(),
+            ["unibus", "canvas"]
+        );
+        assert!(dependency_order(&assignments[..1]).is_err());
+        assignments
+            .iter_mut()
+            .find(|item| item.package == "unibus")
+            .unwrap()
+            .requires
+            .insert("canvas".into(), "1.0.0".into());
+        assert!(dependency_order(&assignments)
+            .unwrap_err()
+            .to_string()
+            .contains("cyclic"));
+    }
+
+    #[test]
+    fn exact_dependency_versions_fail_closed_and_auto_cannot_split_sets() {
+        let (root, _, _, previous, candidate) = activation_fixture();
+        let policy: SoftwarePolicy = serde_json::from_str(r#"{"schema_version":1,"rules":[{"name":"edge","packages":[{"name":"canvas","channel":"test","requires":{"unibus":"1.0.0"}},{"name":"unibus","channel":"test"}]}]}"#).unwrap();
+        let assignments = plan(&policy, &[peer("qemu", Platform::Linux, "x86_64", &[])]).unwrap();
+        let ordered = dependency_order(&assignments).unwrap();
+        let canvas = assignments
+            .iter()
+            .find(|item| item.package == "canvas")
+            .unwrap();
+        let targets = [previous.target.clone()];
+        check_required_versions(canvas, &ordered, &[previous.clone()], &targets).unwrap();
+        assert!(
+            check_required_versions(canvas, &ordered, &[previous, candidate], &targets)
+                .unwrap_err()
+                .to_string()
+                .contains("selected 1.1.0")
+        );
+        let mut automatic = assignments;
+        for assignment in &mut automatic {
+            assignment.updates = UpdatePolicy::Automatic {
+                minimum_cache_age_secs: 60,
+                rollout_window_secs: 300,
+                retry_backoff_secs: 300,
+            };
+        }
+        let mut state = AutomaticState::default();
+        assert!(
+            automatic_assignments(automatic, &[], &targets, "qemu", u64::MAX, &mut state)
+                .is_empty()
+        );
+        assert!(state.last_attempts.is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn interrupted_first_install_removes_unverified_link() {
+        let (root, artifacts, software, previous, candidate) = activation_fixture();
+        activate_from(&candidate, &artifacts, &software).unwrap();
+        let directory = software.join("unibus");
+        persist_activation(
+            &directory,
+            &PendingActivation {
+                previous: None,
+                previous_digest: None,
+            },
+        )
+        .unwrap();
+        let native = NativeProbe {
+            healthy_digest: previous.artifact_digest,
+            calls: Default::default(),
+        };
+        recover_activation(&directory, "unibus", Some(&native)).unwrap();
+        assert!(std::fs::symlink_metadata(directory.join("current")).is_err());
+        assert_eq!(*native.calls.borrow(), ["preflight", "stop"]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn killed_activation_child() {
+        if std::env::var_os("MYCELIUM_TEST_CRASH_ROOT").is_none() {
+            return;
+        }
+        struct Killed;
+        impl crate::software_service::Lifecycle for Killed {
+            fn preflight(&self, _: &Path) -> Result<(), AnyError> {
+                Ok(())
+            }
+            fn stop(&self) -> Result<(), AnyError> {
+                Ok(())
+            }
+            fn start(&self) -> Result<(), AnyError> {
+                std::process::Command::new("kill")
+                    .args(["-KILL", &std::process::id().to_string()])
+                    .status()?;
+                Err("kill failed".into())
+            }
+            fn verify(&self, _: &str) -> Result<(), AnyError> {
+                unreachable!()
+            }
+        }
+        let (_, artifacts, software, _, candidate) = activation_fixture();
+        activate_transaction(&candidate, &artifacts, &software, Some(&Killed)).unwrap();
+        panic!("child survived interruption");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn sigkill_after_switch_recovers_previous_verified_release() {
+        use std::os::unix::process::ExitStatusExt;
+        let (root, artifacts, software, previous, _) = activation_fixture();
+        activate_from(&previous, &artifacts, &software).unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "software::tests::killed_activation_child",
+                "--nocapture",
+            ])
+            .env("MYCELIUM_TEST_CRASH_ROOT", &root)
+            .status()
+            .unwrap();
+        assert_eq!(status.signal(), Some(9));
+        let directory = software.join("unibus");
+        assert_eq!(
+            std::fs::read_link(directory.join("current")).unwrap(),
+            Path::new("releases/1.1.0")
+        );
+        assert!(directory.join("activation-pending.json").exists());
+        let native = NativeProbe {
+            healthy_digest: previous.artifact_digest,
+            calls: Default::default(),
+        };
+        recover_activation(&directory, "unibus", Some(&native)).unwrap();
+        assert_eq!(
+            std::fs::read(directory.join("current/unibus")).unwrap(),
+            b"good"
+        );
+        assert!(!directory.join("activation-pending.json").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Booted only by the disposable qualification unit. This exercises the
+    /// production checkpoint/link code across SIGKILL and an actual disk reboot;
+    /// NativeProbe is a lifecycle fixture, not an application health claim.
+    #[test]
+    #[ignore = "requires marked disposable QEMU and performs guest reboot/poweroff"]
+    #[cfg(target_os = "linux")]
+    fn qemu_interrupted_activation_reboot() {
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!(
+            std::fs::read_to_string("/sys/class/dmi/id/product_name")
+                .unwrap()
+                .trim(),
+            "unibus-package-validation"
+        );
+        assert_eq!(
+            std::fs::read_to_string("/run/unibus-package-validation")
+                .unwrap()
+                .trim(),
+            "unibus-package-validation"
+        );
+        assert_eq!(
+            std::env::var("MYCELIUM_TEST_CRASH_ROOT").unwrap(),
+            "/var/lib/fungos-update-safety-proof"
+        );
+        let (root, artifacts, software, previous, _) = activation_fixture();
+        let directory = software.join("unibus");
+        if !directory.join("activation-pending.json").exists() {
+            activate_from(&previous, &artifacts, &software).unwrap();
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "software::tests::killed_activation_child",
+                    "--nocapture",
+                ])
+                .env("MYCELIUM_TEST_CRASH_ROOT", &root)
+                .status()
+                .unwrap();
+            assert_eq!(status.signal(), Some(9));
+            assert!(directory.join("activation-pending.json").exists());
+            println!("FUNGOS_UPDATE_SIGKILL_CHECKPOINTED");
+            assert!(std::process::Command::new("sync")
+                .status()
+                .unwrap()
+                .success());
+            assert!(std::process::Command::new("systemctl")
+                .args(["--no-block", "reboot"])
+                .status()
+                .unwrap()
+                .success());
+            std::thread::sleep(std::time::Duration::from_secs(15));
+            panic!("guest did not reboot");
+        }
+        assert_eq!(
+            std::fs::read_link(directory.join("current")).unwrap(),
+            Path::new("releases/1.1.0")
+        );
+        let native = NativeProbe {
+            healthy_digest: previous.artifact_digest,
+            calls: Default::default(),
+        };
+        recover_activation(&directory, "unibus", Some(&native)).unwrap();
+        assert_eq!(
+            std::fs::read(directory.join("current/unibus")).unwrap(),
+            b"good"
+        );
+        assert!(!directory.join("activation-pending.json").exists());
+        assert_eq!(
+            *native.calls.borrow(),
+            ["preflight", "stop", "start", "verify"]
+        );
+        println!("FUNGOS_UPDATE_REBOOT_RECOVERY_VERIFIED");
+        assert!(std::process::Command::new("systemctl")
+            .args(["--no-block", "poweroff"])
+            .status()
+            .unwrap()
+            .success());
     }
 
     #[test]
