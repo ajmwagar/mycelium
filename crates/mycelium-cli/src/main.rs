@@ -180,6 +180,8 @@ usage:
   mycelium wireguard init --subnet CIDR... [--endpoint HOST:PORT]
     [--probe-server HOST:PORT... --bind IP] [--listen-port PORT] --write [--dry-run] [--json]
   mycelium wireguard bindings [--json]
+  mycelium wireguard apply TARGET CONFIG.json --write|--dry-run
+  mycelium wireguard verify TARGET CONFIG.json
   mycelium egress list [--json]
   mycelium egress probe --server HOST:PORT... [--bind IP] [--port PORT] [--json]
   mycelium dns zone [--suffix DOMAIN] [--json]
@@ -1703,6 +1705,66 @@ fn observed_prefixes(
 
 async fn wireguard_command(args: &[String]) -> Result<Vec<String>, ClientError> {
     let action = args.first().map(String::as_str).unwrap_or("bindings");
+    if matches!(action, "apply" | "verify") {
+        let target = args
+            .get(1)
+            .ok_or_else(|| err_usage("wireguard apply/verify needs TARGET CONFIG.json"))?;
+        let path = args
+            .get(2)
+            .ok_or_else(|| err_usage("wireguard apply/verify needs TARGET CONFIG.json"))?;
+        if args[3..]
+            .iter()
+            .any(|arg| arg != "--write" && arg != "--dry-run")
+        {
+            return Err(err_usage(
+                "wireguard apply supports only --write or --dry-run",
+            ));
+        }
+        let write = args.iter().any(|arg| arg == "--write");
+        let dry_run = args.iter().any(|arg| arg == "--dry-run");
+        if action == "apply" && write == dry_run {
+            return Err(err_usage(
+                "wireguard apply requires exactly one of --write or --dry-run",
+            ));
+        }
+        if action == "verify" && (write || dry_run) {
+            return Err(err_usage("wireguard verify is read-only"));
+        }
+        let metadata = std::fs::metadata(path).map_err(|error| err_usage(&error.to_string()))?;
+        if !metadata.is_file() || metadata.len() > 8192 {
+            return Err(err_usage(
+                "WireGuard intent must be a bounded regular JSON file",
+            ));
+        }
+        let config: mycelium_core::wireguard::WireGuardTunnel = serde_json::from_slice(
+            &std::fs::read(path).map_err(|error| err_usage(&error.to_string()))?,
+        )
+        .map_err(|error| err_usage(&error.to_string()))?;
+        config.validate().map_err(|error| err_usage(&error))?;
+        let mut params = serde_json::Map::new();
+        params.insert(
+            "config".into(),
+            serde_json::Value::String(
+                serde_json::to_string(&config).map_err(|error| err_usage(&error.to_string()))?,
+            ),
+        );
+        let mut client = connect().await?;
+        let value = client
+            .call(&Request::DeviceCall {
+                id: target.clone(),
+                capability: if action == "apply" {
+                    mycelium_core::wireguard::ID_WIREGUARD_ENSURE
+                } else {
+                    mycelium_core::wireguard::ID_WIREGUARD_VERIFY
+                }
+                .into(),
+                params,
+                write,
+                dry_run,
+            })
+            .await?;
+        return Ok(render_call(&value));
+    }
     if action == "bindings" {
         let mut client = connect().await?;
         let bindings = client.call(&Request::WireGuardBindingList).await?;
@@ -1791,7 +1853,7 @@ async fn wireguard_command(args: &[String]) -> Result<Vec<String>, ClientError> 
     }
     if action != "plan" {
         return Err(err_usage(
-            "wireguard supports `bindings`, `init`, and `plan`",
+            "wireguard supports `bindings`, `init`, `plan`, `apply`, and `verify`",
         ));
     }
     let left_selector = args

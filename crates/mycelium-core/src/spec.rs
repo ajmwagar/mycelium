@@ -8,6 +8,25 @@ pub struct MutationVerification {
     pub capability: String,
     #[serde(default)]
     pub params: Params,
+    /// Explicit action parameter names to copy into the read-only verifier.
+    /// No implicit forwarding: credentials or vendor arguments must not leak.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub forward_params: Vec<String>,
+}
+
+impl MutationVerification {
+    pub fn params_for(&self, action: &Params) -> Result<Params, String> {
+        let mut params = self.params.clone();
+        for name in &self.forward_params {
+            let value = action
+                .get(name)
+                .ok_or_else(|| format!("missing verification parameter `{name}`"))?;
+            if params.insert(name.clone(), value.clone()).is_some() {
+                return Err(format!("duplicate verification parameter `{name}`"));
+            }
+        }
+        Ok(params)
+    }
 }
 
 /// Result of a capability invocation.
@@ -24,11 +43,21 @@ pub struct CapResult {
 
 impl CapResult {
     pub fn ok(output: Value) -> Self {
-        Self { ok: true, output, message: None, dry_run: false }
+        Self {
+            ok: true,
+            output,
+            message: None,
+            dry_run: false,
+        }
     }
 
     pub fn dry_run(output: Value) -> Self {
-        Self { ok: true, output, message: None, dry_run: true }
+        Self {
+            ok: true,
+            output,
+            message: None,
+            dry_run: true,
+        }
     }
 
     pub fn with_message(mut self, msg: impl Into<String>) -> Self {
@@ -79,7 +108,10 @@ impl CapSpec {
     }
 
     pub fn mutation(description: impl Into<String>) -> Self {
-        Self { mutation: true, ..Self::readonly(description) }
+        Self {
+            mutation: true,
+            ..Self::readonly(description)
+        }
     }
 
     pub fn verified_by(mut self, risk: ActionRisk, capability: impl Into<String>) -> Self {
@@ -87,12 +119,29 @@ impl CapSpec {
             risk,
             capability: capability.into(),
             params: Params::new(),
+            forward_params: Vec::new(),
         });
         self
     }
 
-    pub fn param(mut self, name: impl Into<String>, ty: ParamType, docs: impl Into<String>) -> Self {
-        self.params.push(ParamSpec { name: name.into(), ty, docs: docs.into() });
+    pub fn verify_param(mut self, name: impl Into<String>) -> Self {
+        if let Some(verification) = &mut self.verification {
+            verification.forward_params.push(name.into());
+        }
+        self
+    }
+
+    pub fn param(
+        mut self,
+        name: impl Into<String>,
+        ty: ParamType,
+        docs: impl Into<String>,
+    ) -> Self {
+        self.params.push(ParamSpec {
+            name: name.into(),
+            ty,
+            docs: docs.into(),
+        });
         self
     }
 
@@ -102,7 +151,11 @@ impl CapSpec {
         ty: ParamType,
         docs: impl Into<String>,
     ) -> Self {
-        self.optional.push(ParamSpec { name: name.into(), ty, docs: docs.into() });
+        self.optional.push(ParamSpec {
+            name: name.into(),
+            ty,
+            docs: docs.into(),
+        });
         self
     }
 
@@ -122,8 +175,11 @@ impl CapSpec {
             }
         }
         for (name, _v) in params {
-            let known =
-                self.params.iter().chain(&self.optional).any(|p| &p.name == name);
+            let known = self
+                .params
+                .iter()
+                .chain(&self.optional)
+                .any(|p| &p.name == name);
             if !known {
                 return Err(format!("unknown param `{name}`"));
             }
@@ -181,6 +237,38 @@ mod tests {
     use super::*;
     use crate::value::Params;
 
+    #[test]
+    fn verification_forwards_only_explicit_action_parameters() {
+        let spec = CapSpec::mutation("ensure tunnel")
+            .verified_by(ActionRisk::Disruptive, "verify")
+            .verify_param("config");
+        let action = Params::from_iter([
+            ("config".into(), Value::Str("public intent".into())),
+            ("secret".into(), Value::Str("do not copy".into())),
+        ]);
+        let verification = spec.verification.unwrap();
+        let params = verification.params_for(&action).unwrap();
+        assert_eq!(params.len(), 1);
+        assert_eq!(params.get("config"), action.get("config"));
+        assert!(verification.params_for(&Params::new()).is_err());
+    }
+
+    #[test]
+    fn verification_rejects_colliding_parameter_sources() {
+        let verification = MutationVerification {
+            risk: ActionRisk::Low,
+            capability: "verify".into(),
+            params: Params::from_iter([("config".into(), Value::Str("fixed".into()))]),
+            forward_params: vec!["config".into()],
+        };
+        assert!(verification
+            .params_for(&Params::from_iter([(
+                "config".into(),
+                Value::Str("action".into())
+            )]))
+            .is_err());
+    }
+
     fn spec() -> CapSpec {
         CapSpec::mutation("create a vlan")
             .param("id", ParamType::Int, "802.1q id")
@@ -196,13 +284,19 @@ mod tests {
 
     #[test]
     fn rejects_missing_typed_and_unknown() {
-        assert!(spec().validate(&Params::new()).unwrap_err().contains("missing required"));
+        assert!(spec()
+            .validate(&Params::new())
+            .unwrap_err()
+            .contains("missing required"));
         let mut wrong = Params::new();
         wrong.insert("id".into(), Value::Str("x".into()));
         assert!(spec().validate(&wrong).unwrap_err().contains("expects int"));
         let mut extra = Params::new();
         extra.insert("id".into(), Value::Int(2));
         extra.insert("bogus".into(), Value::Bool(true));
-        assert!(spec().validate(&extra).unwrap_err().contains("unknown param"));
+        assert!(spec()
+            .validate(&extra)
+            .unwrap_err()
+            .contains("unknown param"));
     }
 }

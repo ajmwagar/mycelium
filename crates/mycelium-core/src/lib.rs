@@ -27,6 +27,7 @@ pub mod reconcile;
 pub mod spec;
 pub mod topology;
 pub mod value;
+pub mod wireguard;
 
 pub use allocation::{
     AllocationBasis, AllocationReceipt, AllocationStrategy, AllocationValue, DhcpScopeIntent,

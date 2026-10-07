@@ -7,5 +7,6 @@
 mod driver;
 mod ipfs;
 mod parsers;
+mod wireguard;
 
 pub use driver::{LinuxDevice, LinuxDriver, DRIVER_NAME};

@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use mycelium_core::wireguard::{ID_WIREGUARD_ENSURE, ID_WIREGUARD_VERIFY};
 use mycelium_core::{
     host_target, required_str, stable_slug, CapResult, CapSpec, CredentialSet, Device, DeviceId,
     DeviceKind, DeviceMeta, Driver, ExecContext, Inventory, LinkState, MyceliumError, Observation,
@@ -27,7 +28,14 @@ const PASSIVE_ADVERTISEMENTS_COMMAND: &str = "if command -v nc >/dev/null 2>&1 &
 
 fn parse_health(text: &str) -> Result<Value> {
     const SECTIONS: [&str; 8] = [
-        "UPTIME", "LOAD", "MEMORY", "DISK", "PRESSURE", "SOCKETS", "SSH", "PROCESSES",
+        "UPTIME",
+        "LOAD",
+        "MEMORY",
+        "DISK",
+        "PRESSURE",
+        "SOCKETS",
+        "SSH",
+        "PROCESSES",
     ];
     let mut output = Params::new();
     for (index, name) in SECTIONS.iter().enumerate() {
@@ -41,7 +49,10 @@ fn parse_health(text: &str) -> Result<Value> {
             .and_then(|next| text[start..].find(&format!("__{next}__\n")))
             .map(|offset| start + offset)
             .unwrap_or(text.len());
-        output.insert(name.to_ascii_lowercase(), Value::Str(text[start..end].trim().into()));
+        output.insert(
+            name.to_ascii_lowercase(),
+            Value::Str(text[start..end].trim().into()),
+        );
     }
     Ok(Value::Map(output))
 }
@@ -222,6 +233,14 @@ impl Device for LinuxDevice {
 
     fn capabilities(&self) -> BTreeMap<String, CapSpec> {
         BTreeMap::from_iter([
+            (ID_WIREGUARD_ENSURE.into(), CapSpec::mutation("persist an identity-key-bound scoped WireGuard tunnel using wg-quick/systemd")
+                .param("config", mycelium_core::ParamType::Str, "WireGuardTunnel JSON; private key reference only")
+                .verified_by(mycelium_core::ActionRisk::Disruptive, ID_WIREGUARD_VERIFY)
+                .verify_param("config")
+                .returns("interface, persistent, active, configuration_matches, public keys, handshake timestamp")),
+            (ID_WIREGUARD_VERIFY.into(), CapSpec::readonly("verify persistent WireGuard runtime against exact public intent")
+                .param("config", mycelium_core::ParamType::Str, "same WireGuardTunnel JSON")
+                .returns("interface, persistent, active, configuration_matches, public keys, handshake timestamp")),
             (
                 ID_IDENTIFY.into(),
                 CapSpec::readonly("Linux SSH vantage-point identity"),
@@ -264,6 +283,28 @@ impl Device for LinuxDevice {
 
     async fn exec(&self, ctx: &ExecContext, cap: &str, params: Params) -> Result<CapResult> {
         match cap {
+            ID_WIREGUARD_ENSURE | ID_WIREGUARD_VERIFY => {
+                let config = crate::wireguard::config(&params)?;
+                if ctx.dry_run && cap == ID_WIREGUARD_ENSURE {
+                    return Ok(CapResult::dry_run(Value::Str(
+                        serde_json::to_string(&config)
+                            .map_err(|error| MyceliumError::Parse(error.to_string()))?,
+                    )));
+                }
+                let command = if cap == ID_WIREGUARD_ENSURE {
+                    crate::wireguard::apply_command(&config)
+                } else {
+                    crate::wireguard::status_command(&config)
+                };
+                let result = self.session.exec(&command).await?;
+                if !result.success() {
+                    return Err(MyceliumError::Device {
+                        exit_code: result.exit_code,
+                        stderr: result.stderr,
+                    });
+                }
+                Ok(CapResult::ok(crate::wireguard::output(&result.stdout)?))
+            }
             ID_IDENTIFY => Ok(CapResult::ok(Value::Map(Params::from_iter([
                 ("vendor".into(), Value::Str("Linux".into())),
                 ("hostname".into(), Value::Str(self.site.clone())),

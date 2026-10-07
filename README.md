@@ -889,6 +889,25 @@ Source NAT is an explicit compatibility choice (`--left-translation` or
 1:1 translation remains a future intent because it requires an explicit mapped
 prefix rather than a boolean switch.
 
+Linux gateways expose persistent `net.wireguard.ensure` and read-only
+`net.wireguard.verify` capabilities. Run `mycelium wireguard apply TARGET
+CONFIG.json --dry-run` before `--write`, then `mycelium wireguard verify TARGET
+CONFIG.json`. The bounded JSON matches `mycelium_core::wireguard::WireGuardTunnel`:
+an owned `mc-` interface, private IPv4 address, listen port, local private-key
+file reference, both public keys, explicit allowed prefixes, optional numeric
+endpoint, and keepalive interval. Private keys stay on the gateway.
+
+Apply requires installed WireGuard tools and passwordless privileged execution.
+It atomically writes an owned root-only configuration, enables the wg-quick
+systemd unit, and verifies persisted configuration, runtime keys, addresses and
+routes. Ordinary apply failures restore the previous configuration and service
+state; abrupt host/process loss is not a transactional rollback guarantee.
+An active unit is **not** evidence of a working link: separately verify a fresh
+handshake and traffic from the actual workload. This capability does not install
+packages, open cloud firewalls, enable forwarding, or apply NAT. Site gateway
+forwarding and return paths must be explicitly provisioned before declaring a
+site link live; it never changes default routes.
+
 Each peer periodically publishes a signed, bounded hardware graph covering
 PCIe, USB, storage, and accelerators. Stable identities derive from the peer
 identity plus the platform locator; raw device serial numbers are never

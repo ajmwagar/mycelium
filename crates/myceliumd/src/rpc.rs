@@ -845,12 +845,26 @@ impl Daemon {
         use serde_json::to_value;
         match req {
             Request::NodeObserve => {
-                let intent = crate::node_profile::read().map_err(|error| MyceliumError::Validation(error.to_string()))?;
-                to_value(serde_json::json!({ "hello": self.mesh.local_hello().await, "intent": intent })).map_err(json_err)
+                let intent = crate::node_profile::read()
+                    .map_err(|error| MyceliumError::Validation(error.to_string()))?;
+                to_value(
+                    serde_json::json!({ "hello": self.mesh.local_hello().await, "intent": intent }),
+                )
+                .map_err(json_err)
             }
             Request::NodeRefresh { write } => {
-                if !write { return Err(MyceliumError::WritesNotPermitted("node observation refresh requires --write".into())); }
-                to_value(self.mesh.refresh_local_hello().await.map_err(|error| MyceliumError::Validation(error.to_string()))?).map_err(json_err)
+                if !write {
+                    return Err(MyceliumError::WritesNotPermitted(
+                        "node observation refresh requires --write".into(),
+                    ));
+                }
+                to_value(
+                    self.mesh
+                        .refresh_local_hello()
+                        .await
+                        .map_err(|error| MyceliumError::Validation(error.to_string()))?,
+                )
+                .map_err(json_err)
             }
             Request::Hello => to_value(serde_json::json!({
                 "version": crate::VERSION,
@@ -1028,6 +1042,9 @@ impl Daemon {
                             }
                         })?;
                     let mut plan = mycelium_core::ActionPlan::new(format!("device:{id}"));
+                    let verification_params = verification
+                        .params_for(&p)
+                        .map_err(MyceliumError::Validation)?;
                     plan.actions.push(mycelium_core::PlannedAction {
                         device: id,
                         capability,
@@ -1038,7 +1055,7 @@ impl Daemon {
                         precondition: None,
                         verification: mycelium_core::VerificationSpec {
                             capability: verification.capability.clone(),
-                            params: verification.params.clone(),
+                            params: verification_params,
                             predicate: mycelium_core::VerificationPredicate::Succeeds,
                         },
                     });
@@ -3187,11 +3204,16 @@ pub async fn serve() -> std::io::Result<()> {
     );
     // Native recovery can wait on systemd/application readiness. Keep it off
     // the control/gossip event loop and never turn boot into an update trigger.
-    tokio::task::spawn_blocking(|| match crate::software::recover_interrupted_activations() {
-        Ok(names) if !names.is_empty() => eprintln!("myceliumd: restored interrupted packages: {}", names.join(", ")),
-        Ok(_) => {},
-        Err(error) => eprintln!("myceliumd: {error}"),
-    });
+    tokio::task::spawn_blocking(
+        || match crate::software::recover_interrupted_activations() {
+            Ok(names) if !names.is_empty() => eprintln!(
+                "myceliumd: restored interrupted packages: {}",
+                names.join(", ")
+            ),
+            Ok(_) => {}
+            Err(error) => eprintln!("myceliumd: {error}"),
+        },
+    );
 
     loop {
         let (stream, _) = listener.accept().await?;
