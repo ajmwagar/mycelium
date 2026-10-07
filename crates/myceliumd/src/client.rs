@@ -19,7 +19,11 @@ impl Client {
                 if std::env::var_os("MYCELIUM_NO_AUTOSTART").is_some() {
                     return Err(e);
                 }
-                Self::spawn_daemon()?;
+                // Installed peers belong to their service manager. A detached
+                // CLI child must not win the home lock during supervisor startup.
+                if !managed_home(&crate::home_dir())? {
+                    Self::spawn_daemon()?;
+                }
                 let deadline = Instant::now() + Duration::from_secs(5);
                 loop {
                     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -41,7 +45,9 @@ impl Client {
         let stream = UnixStream::connect(&socket)
             .await
             .map_err(ClientError::Connect)?;
-        Ok(Self { stream: BufStream::new(stream) })
+        Ok(Self {
+            stream: BufStream::new(stream),
+        })
     }
 
     /// PID of the process answering this Unix socket, when the OS exposes it.
@@ -57,6 +63,11 @@ impl Client {
     /// Runs `self <exe> _serve` so the same binary can host the daemon
     /// (the CLI and daemon ship together; PATH never consulted).
     pub fn spawn_daemon() -> Result<(), ClientError> {
+        if managed_home(&crate::home_dir())? {
+            return Err(ClientError::Spawn(
+                "this home is supervised by systemd/launchd; start or repair its installed service rather than spawning a detached daemon".into(),
+            ));
+        }
         let exe = std::env::current_exe().map_err(|e| ClientError::Spawn(e.to_string()))?;
         let home = crate::home_dir();
         std::fs::create_dir_all(&home).map_err(|e| ClientError::Spawn(e.to_string()))?;
@@ -65,7 +76,9 @@ impl Client {
             .append(true)
             .open(home.join("daemon.log"))
             .map_err(|e| ClientError::Spawn(e.to_string()))?;
-        let log_err = log.try_clone().map_err(|e| ClientError::Spawn(e.to_string()))?;
+        let log_err = log
+            .try_clone()
+            .map_err(|e| ClientError::Spawn(e.to_string()))?;
         use std::os::unix::process::CommandExt;
         let mut cmd = std::process::Command::new(exe);
         cmd.arg("_serve")
@@ -136,9 +149,95 @@ impl Client {
     }
 }
 
+/// Recognize our installed service by its exact home, not merely by a unit
+/// existing on the machine. Isolated publisher/test homes remain standalone.
+fn managed_home(home: &std::path::Path) -> Result<bool, ClientError> {
+    let user = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let mut paths = vec![std::path::PathBuf::from(
+        "/etc/systemd/system/mycelium.service",
+    )];
+    if let Some(user) = &user {
+        paths.push(user.join(".config/systemd/user/mycelium.service"));
+        paths.push(user.join("Library/LaunchAgents/dev.fpl.mycelium.plist"));
+    }
+    for path in paths {
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(ClientError::Io(error)),
+        };
+        if service_matches_home(&text, home, user.as_deref()) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn service_matches_home(
+    text: &str,
+    home: &std::path::Path,
+    user: Option<&std::path::Path>,
+) -> bool {
+    let home = home.to_string_lossy();
+    let env_file = format!("EnvironmentFile={home}/node.env");
+    let default_home = user.map(|user| user.join(".mycelium"));
+    let systemd = text.lines().any(|line| {
+        line.trim() == env_file
+            || (default_home.as_deref() == Some(std::path::Path::new(home.as_ref()))
+                && line.trim() == "EnvironmentFile=%h/.mycelium/node.env")
+    });
+    let escaped = home
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;");
+    systemd
+        || text.contains(&format!(
+            "<key>MYCELIUM_HOME</key><string>{escaped}</string>"
+        ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn supervised_home_detection_is_exact_and_supports_existing_installers() {
+        use std::path::Path;
+        let user = Some(Path::new("/users/avery"));
+        let home = Path::new("/users/avery/.mycelium");
+        assert!(service_matches_home(
+            "EnvironmentFile=%h/.mycelium/node.env\n",
+            home,
+            user
+        ));
+        assert!(service_matches_home(
+            "EnvironmentFile=/users/avery/.mycelium/node.env\n",
+            home,
+            user
+        ));
+        assert!(!service_matches_home(
+            "EnvironmentFile=%h/.mycelium/node.env\n",
+            Path::new("/users/avery/publisher"),
+            user
+        ));
+        assert!(!service_matches_home(
+            "# EnvironmentFile=/users/avery/.mycelium/node.env\n",
+            home,
+            user
+        ));
+        assert!(service_matches_home(
+            "<key>MYCELIUM_HOME</key><string>/users/a&amp;b/peer</string>",
+            Path::new("/users/a&b/peer"),
+            user
+        ));
+        assert!(!service_matches_home(
+            "<key>MYCELIUM_HOME</key><string>/other/peer</string>",
+            home,
+            user
+        ));
+    }
 
     #[tokio::test]
     async fn unresponsive_daemon_has_a_deadline_and_connection_is_not_reused() {
@@ -180,12 +279,20 @@ impl From<std::io::Error> for ClientError {
 impl std::fmt::Display for ClientError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ClientError::Connect(e) => write!(f, "cannot reach myceliumd socket ({}): {e}", crate::socket_path().display()),
+            ClientError::Connect(e) => write!(
+                f,
+                "cannot reach myceliumd socket ({}): {e}",
+                crate::socket_path().display()
+            ),
             ClientError::Io(e) => write!(f, "socket io: {e}"),
             ClientError::Protocol(e) => write!(f, "protocol error: {e}"),
             ClientError::Spawn(e) => write!(f, "could not spawn myceliumd: {e}"),
             ClientError::DaemonUnresponsive => {
-                write!(f, "myceliumd did not come up within 5s (see ~/.mycelium/daemon.log)")
+                write!(
+                    f,
+                    "myceliumd did not come up within 5s; check its installed service and {}",
+                    crate::home_dir().join("daemon.log").display()
+                )
             }
             ClientError::Rpc { message, kind } => write!(f, "[{kind}] {message}"),
         }
