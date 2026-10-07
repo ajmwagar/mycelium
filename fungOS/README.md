@@ -29,6 +29,7 @@ product-level commercial licensing.
 
 ## Documents
 
+- [Install and first boot](INSTALL.md) — supported paths, enrollment, updates and recovery.
 - [Ecosystem map](ecosystem.md) — project ownership, boundaries, and shared contracts.
 - [Repository inventory](repository-inventory.md) — current GitHub ownership, visibility, and licenses.
 - [Community and GTM](community-and-gtm.md) — who this is for and how adoption compounds.

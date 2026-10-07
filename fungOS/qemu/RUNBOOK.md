@@ -122,9 +122,9 @@ attached to that bridge.
 Check the first-contact output in the serial log and verify the new peer from
 the seed. Enrollment success is separate from `FUNGOS_QEMU_BOOT_OK`. Detach and
 delete the envelope image once enrollment is verified. Treat the image as a
-secret until it is deleted, including after a failed boot. Peer state currently
-lives in the RAM root filesystem; disk installation and reboot persistence are
-subsequent steps.
+secret until it is deleted, including after a failed boot. Without the persistent
+root argument below, peer state lives in RAM and is lost on reboot. Use the
+persistent root experiment for enrollment that must survive reboot.
 
 ## TV console streaming on Agora-One
 
@@ -140,7 +140,8 @@ initramfs directly with QEMU `-kernel` and `-initrd`. This is a display test,
 not another PXE or enrollment proof. There is no claim envelope or writable
 system disk attached. Add `console=ttyS0,115200n8 console=tty0` to the kernel
 arguments to show the boot console in VNC while retaining serial evidence.
-The current image is a text-console base, not the future fungOS-edge desktop.
+That initial display image was a text-console base; later edge qualification
+uses the native Canvas Wayland/KMS stack.
 
 On Agora-One, `fungos-qemu-tv.service` is a transient system unit running as
 `ajmwagar` with the supplementary `kvm` group; the user service manager did not
