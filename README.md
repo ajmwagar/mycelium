@@ -380,6 +380,19 @@ mycelium software activate unibus --channel stable --dry-run
 mycelium software activate unibus --channel stable --write
 ```
 
+`software status` reads the installed policy and makes a fresh, read-only
+observation; it does not activate packages. `downloading` includes received
+and signed total bytes. `current` means the signed installed bytes match and
+any configured native service passes its health check; `drifted` includes
+the failure reason. `ready` means staged, not activated or service-healthy.
+Missing or invalid policy is an error, not an empty healthy report.
+
+Installed systemd/launchd peers are owned by their service manager. CLI
+connections wait briefly for that service rather than spawning a competing
+detached daemon. If it remains unavailable, inspect or repair the installed
+service (`mycelium setup --repair`, with `--system-service` for a system unit);
+standalone homes retain CLI autostart.
+
 Selectors consume derived facts such as `platform.linux`, `arch.aarch64`,
 `site.wagar-house`, `resource.gpu`, `metal`, and `node.raspberry-pi`.
 Operational roles that cannot be inferred safely are explicit node facts, for

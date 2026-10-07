@@ -105,6 +105,7 @@ pub struct ActivatedPackage {
 pub enum PackageState {
     AwaitingManifest,
     AwaitingArtifact,
+    Downloading,
     Ready,
     Current,
     Drifted,
@@ -122,6 +123,10 @@ pub struct PackageStatus {
     /// Present only when observed installed bytes or a locally bound service drift.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub drift: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub download_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_bytes: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -411,12 +416,20 @@ pub fn reconcile(
             .join(&manifest.artifact_digest)
             .is_file()
         {
-            statuses.push(status(
+            let progress = download_progress(&crate::artifacts_dir(), manifest)?;
+            let mut observed = status(
                 assignment,
                 installed_version,
                 Some(manifest.version.clone()),
-                PackageState::AwaitingArtifact,
-            ));
+                if progress > 0 {
+                    PackageState::Downloading
+                } else {
+                    PackageState::AwaitingArtifact
+                },
+            );
+            observed.download_bytes = Some(progress);
+            observed.artifact_bytes = Some(manifest.artifact_size);
+            statuses.push(observed);
             continue;
         }
         if write {
@@ -542,6 +555,18 @@ fn status(
         state,
         updates: assignment.updates.clone(),
         drift: None,
+        download_bytes: None,
+        artifact_bytes: None,
+    }
+}
+
+fn download_progress(artifacts: &Path, manifest: &PackageManifest) -> Result<u64, AnyError> {
+    let partial = artifacts.join(format!("{}.part", manifest.artifact_digest));
+    match std::fs::metadata(partial) {
+        Ok(metadata) if metadata.len() <= manifest.artifact_size => Ok(metadata.len()),
+        Ok(_) => Err("partial package artifact exceeds signed size".into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -1087,6 +1112,18 @@ fn validate_update_policy(policy: &UpdatePolicy) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn download_status_reads_disk_progress_and_rejects_oversize_partials() {
+        let (root, artifacts, _, manifest, _) = activation_fixture();
+        let partial = artifacts.join(format!("{}.part", manifest.artifact_digest));
+        assert_eq!(download_progress(&artifacts, &manifest).unwrap(), 0);
+        std::fs::write(&partial, b"go").unwrap();
+        assert_eq!(download_progress(&artifacts, &manifest).unwrap(), 2);
+        std::fs::write(&partial, vec![0; manifest.artifact_size as usize + 1]).unwrap();
+        assert!(download_progress(&artifacts, &manifest).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     use super::*;
     use mycelium_peer_protocol::PeerHello;
 

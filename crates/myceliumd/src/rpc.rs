@@ -845,12 +845,26 @@ impl Daemon {
         use serde_json::to_value;
         match req {
             Request::NodeObserve => {
-                let intent = crate::node_profile::read().map_err(|error| MyceliumError::Validation(error.to_string()))?;
-                to_value(serde_json::json!({ "hello": self.mesh.local_hello().await, "intent": intent })).map_err(json_err)
+                let intent = crate::node_profile::read()
+                    .map_err(|error| MyceliumError::Validation(error.to_string()))?;
+                to_value(
+                    serde_json::json!({ "hello": self.mesh.local_hello().await, "intent": intent }),
+                )
+                .map_err(json_err)
             }
             Request::NodeRefresh { write } => {
-                if !write { return Err(MyceliumError::WritesNotPermitted("node observation refresh requires --write".into())); }
-                to_value(self.mesh.refresh_local_hello().await.map_err(|error| MyceliumError::Validation(error.to_string()))?).map_err(json_err)
+                if !write {
+                    return Err(MyceliumError::WritesNotPermitted(
+                        "node observation refresh requires --write".into(),
+                    ));
+                }
+                to_value(
+                    self.mesh
+                        .refresh_local_hello()
+                        .await
+                        .map_err(|error| MyceliumError::Validation(error.to_string()))?,
+                )
+                .map_err(json_err)
             }
             Request::Hello => to_value(serde_json::json!({
                 "version": crate::VERSION,
@@ -2152,7 +2166,28 @@ impl Daemon {
                         .map_err(|error| MyceliumError::Validation(error.to_string()))?;
                 to_value(activated).map_err(json_err)
             }
-            Request::SoftwareStatus => to_value(crate::software::read_statuses()).map_err(json_err),
+            Request::SoftwareStatus => {
+                let policy = crate::software::read_policy(&crate::software_policy_path())
+                    .map_err(|error| MyceliumError::Validation(error.to_string()))?;
+                let assignments = crate::software::plan(&policy, &self.mesh.views().await)
+                    .map_err(MyceliumError::Validation)?
+                    .into_iter()
+                    .filter(|assignment| assignment.node_id == self.mesh.node_id())
+                    .collect::<Vec<_>>();
+                let manifests = self.mesh.packages().await;
+                let report = tokio::task::spawn_blocking(move || {
+                    crate::software::reconcile(
+                        &assignments,
+                        &manifests,
+                        &mycelium_peer_protocol::local_compatible_targets(),
+                        false,
+                    )
+                })
+                .await
+                .map_err(|error| MyceliumError::Validation(error.to_string()))?
+                .map_err(|error| MyceliumError::Validation(error.to_string()))?;
+                to_value(report).map_err(json_err)
+            }
             Request::SoftwareReconcile { write, dry_run } => {
                 if write == dry_run {
                     return Err(MyceliumError::Validation(
@@ -3191,11 +3226,16 @@ pub async fn serve() -> std::io::Result<()> {
     );
     // Native recovery can wait on systemd/application readiness. Keep it off
     // the control/gossip event loop and never turn boot into an update trigger.
-    tokio::task::spawn_blocking(|| match crate::software::recover_interrupted_activations() {
-        Ok(names) if !names.is_empty() => eprintln!("myceliumd: restored interrupted packages: {}", names.join(", ")),
-        Ok(_) => {},
-        Err(error) => eprintln!("myceliumd: {error}"),
-    });
+    tokio::task::spawn_blocking(
+        || match crate::software::recover_interrupted_activations() {
+            Ok(names) if !names.is_empty() => eprintln!(
+                "myceliumd: restored interrupted packages: {}",
+                names.join(", ")
+            ),
+            Ok(_) => {}
+            Err(error) => eprintln!("myceliumd: {error}"),
+        },
+    );
 
     loop {
         let (stream, _) = listener.accept().await?;
