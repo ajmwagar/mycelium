@@ -1,5 +1,44 @@
 # Isolated QEMU first-boot runbook
 
+## Persistent edge update qualification
+
+For an already disk-installed guest, detach the claim envelope before testing
+reboots. Retain the existing enrollment; do not issue another claim. Record
+hashes of `pki/node.pem`, `peer.key`, `/etc/machine-id`, and the SSH host public
+key beneath the private Mycelium home, then compare them after reboot.
+
+`/usr/local/bin/mycelium` dispatches to `$MYCELIUM_HOME/bin/mycelium` once
+enrolled, with `/usr/libexec/mycelium-bootstrap` reserved for first boot. This
+keeps interactive commands on the same executable as the managed daemon after
+self-updates. The persisted update policy selects the distribution channel;
+`MYCELIUM_UPDATE_CHANNEL` is only the fallback before that policy exists.
+Malformed or unreadable policy is an error, not permission to use a fallback.
+
+Qualify updates on a guest-only channel with a stable node-ID selector. Keep
+unrelated assignments manual and keep compositor updates gated. Publish signed
+metadata with the existing release authority; never move its private key into
+the guest. A self-update proof requires a different installed SHA-256, completed
+peer download, automatic activation, and healthy supervised restart—not merely
+arrival of a manifest. Native application qualification additionally requires
+the package's PID/digest-bound readiness check and verified restoration of the
+previous executable after an intentionally failing candidate.
+
+If bootstrapping an older updater, a verified candidate CLI may run
+`update apply --channel CHANNEL --path /var/lib/mycelium/bin/mycelium --write`
+after signed metadata has arrived and `releases seed` has verified its bytes.
+The explicit destination is essential: without it a candidate CLI would update
+its own temporary path. This bootstrap is not an automatic-distribution proof.
+
+During activation, the complete daemon readiness probe retries within ten
+seconds, including transient failures after connection, and bounds a silent RPC.
+It still requires the socket PID to match the supervisor. Failed candidates
+restore the previous executable; the reported error retains the failing probe.
+
+After qualification, confirm `mycelium-update.timer` is enabled and active,
+the enrolled identity is unchanged, and the edge units recover. Record failures
+and pending checks explicitly. Do not clean up unrelated publisher daemons or
+change fleet update policy to make an isolated guest check pass.
+
 ## Prerequisites
 
 Use an x86_64 Linux KVM host with QEMU, OVMF, dnsmasq, iPXE, `jq`, `cpio`, a
