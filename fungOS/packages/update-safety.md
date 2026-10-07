@@ -50,6 +50,10 @@ Use `MYCELIUM_NO_AUTOSTART=1` while restarting a managed publisher: an immediate
 CLI call must not spawn another daemon while its supervisor is starting.
 Superseding the fault fixture and restoring the guest updater are separate final
 checks; record their live outcome before treating the channel as rollout-ready.
+The subsequent guest reboot retained identity and all six units were active.
+The main update timer is restored, but the Unibus assignment alone is temporarily
+manual to prevent automatic retries of the fault fixture while its healthy
+superseding publication is delayed. Canvas and Mycelium remain automatic.
 Compositor automatic activation remains gated and unrelated cloud assignments
 remain manual. This evidence is not a fleet rollout or a Pi 3B+ qualification.
 
