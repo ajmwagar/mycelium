@@ -1,5 +1,62 @@
 # Update safety
 
+## Clean edge boot and peer download, 2026-10-07
+
+A separate QEMU guest, `fungos-edge-clean-01`, booted a new empty 8 GiB root
+disk on Agora. The tracked base/edge overlays were applied to a verified runtime
+archive; no live guest filesystem, application artifacts or enrolled identity
+was cloned. A private one-use claim disk enrolled the guest in `wagar-house`.
+The claim was consumed, the disk detached and its plaintext claim files removed.
+
+The empty application cache fetched Canvas, Canvas Linux, Canvas edge adapter
+and Unibus router through an authenticated peer, with the existing release
+authority, signatures and byte hashes unchanged. Initial activation was explicit:
+Canvas `0.1.6`, Canvas Linux `0.1.1`, Canvas edge `0.1.0` and Unibus `0.1.1`.
+Canvas and Unibus passed their native PID-bound health checks. This qualifies
+fresh application downloading, rather than another activation of preseeded bytes.
+
+Neo's loaded publisher timed out during TLS setup. An attempted tunnel to the
+older QEMU peer was rejected because its certificate had no address SAN; no TLS
+verification was bypassed. A temporary cache peer on Agora was issued its own
+certificate with the correct address SAN and supplied trusted cached artifacts.
+Neither the original QEMU guest nor Agora's running fleet daemon was restarted.
+The enrollment installer rewrote Agora's user unit while installing the
+temporary home; its original managed-home unit was immediately restored before
+daemon reload, and the running fleet PID was preserved.
+
+The verified runtime archive predates the tracked `xcursor-themes` addition.
+The first compositor start failed visibly, and Canvas activation was rejected.
+Installing that package from the pinned Debian snapshot and selecting
+`whiteglass` corrected the guest. Image construction now rejects a display
+overlay whose configured cursor is absent. This guest is therefore a qualified
+runtime plus an explicit package correction, not proof that the older archive
+alone is boot-ready. Rebuild the tracked edge profile before distributing it.
+
+After power-off and restart without the claim disk, all four identity hashes
+(peer key, enrollment certificate, machine ID and SSH host key) matched, all
+five edge/peer units and the update timer were active, and native reconciliation
+reported all four applications current. Boot IDs changed from
+`f434e2c7-2871-4623-b486-7a53649882c1` to
+`9ceefbde-fbd6-47ec-b3ef-f881cd977f74`.
+VNC capture confirmed framebuffer delivery but showed an empty compositor
+background, not a populated desktop or a visual application acceptance test.
+
+The daemon now takes a kernel file lock on its state directory before inspecting
+or removing its socket. Competing owners fail; independent homes remain allowed;
+crash releases the lock without unlinking the lock file. Agora passed daemon and
+CLI tests, including a real subprocess crash/reacquire regression, and produced
+the musl release binary. Claim-envelope checks reject missing/duplicate claims,
+protect the envelope with mode `0600` and refuse an existing output. The display
+runtime regression proves rejection before any root image or initrd is created.
+
+The clean guest fetched Mycelium `0.1.22` through that peer and performed its
+required first explicit signed bootstrap activation. Installed SHA-256:
+`7c16d9990baac8e471cf8014c4ad79ec8360843e41eb36ee768917f3d4a7109e`.
+A live competing `_serve` invocation was rejected by the new lock while the
+systemd PID and socket inode remained unchanged; all identity hashes and native
+edge services remained healthy. This is not a claim that first enrollment
+bypasses the existing bootstrap authorization gate.
+
 ## Edge guest qualification, 2026-10-07
 
 The persistent edge QEMU guest on Agora completed a signed Mycelium bootstrap
