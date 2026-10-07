@@ -45,4 +45,10 @@ if MYCELIUM_HOME="$scratch" sh "$base_dir/rootfs-overlay/usr/local/bin/mycelium"
   echo "managed CLI ignored replacement" >&2
   exit 1
 fi
+rm -f "$scratch/bin/mycelium"
+ln -s /usr/bin/env "$scratch/bin/mycelium"
+MYCELIUM_HOME="$scratch" MYCELIUM_NO_AUTOSTART= sh "$base_dir/rootfs-overlay/usr/local/bin/mycelium" \
+  | grep -qx 'MYCELIUM_NO_AUTOSTART=1'
+MYCELIUM_HOME="$scratch" MYCELIUM_NO_AUTOSTART=0 sh "$base_dir/rootfs-overlay/usr/local/bin/mycelium" \
+  | grep -qx 'MYCELIUM_NO_AUTOSTART=0'
 echo "fungOS QEMU overlay validated"

@@ -6,6 +6,10 @@ set -eu
 MYCELIUM_HOME=${MYCELIUM_HOME:-/var/lib/mycelium}
 export MYCELIUM_HOME
 if [ -x "$MYCELIUM_HOME/bin/mycelium" ]; then
+  # Enrolled fungOS peers are supervised. An interactive call during restart
+  # must not claim the home before systemd can start its configured daemon.
+  MYCELIUM_NO_AUTOSTART=${MYCELIUM_NO_AUTOSTART:-1}
+  export MYCELIUM_NO_AUTOSTART
   exec "$MYCELIUM_HOME/bin/mycelium" "$@"
 fi
 exec /usr/libexec/mycelium-bootstrap "$@"
