@@ -2115,7 +2115,7 @@ async fn update(args: &[String]) -> Result<Vec<String>, ClientError> {
 fn update_policy_command(args: &[String]) -> Result<Vec<String>, ClientError> {
     let action = args.first().map(String::as_str).unwrap_or("status");
     if action == "status" {
-        let policy = myceliumd::read_update_policy();
+        let policy = myceliumd::read_update_policy().map_err(|error| err_usage(&error))?;
         if args.iter().any(|argument| argument == "--json") {
             return Ok(vec![
                 serde_json::to_string(&policy).map_err(|error| err_usage(&error.to_string()))?
@@ -2140,7 +2140,7 @@ fn update_policy_command(args: &[String]) -> Result<Vec<String>, ClientError> {
             kind: "writes_not_permitted".into(),
         });
     }
-    let mut policy = myceliumd::read_update_policy();
+    let mut policy = myceliumd::read_update_policy().map_err(|error| err_usage(&error))?;
     match action {
         "enable" => {
             policy.enabled = true;
@@ -2190,7 +2190,7 @@ fn update_policy_command(args: &[String]) -> Result<Vec<String>, ClientError> {
 }
 
 async fn update_auto_run() -> Result<Vec<String>, ClientError> {
-    let policy = myceliumd::read_update_policy();
+    let policy = myceliumd::read_update_policy().map_err(|error| err_usage(&error))?;
     policy.validate().map_err(|error| err_usage(&error))?;
     if !policy.enabled {
         return Ok(vec!["automatic updates disabled".into()]);

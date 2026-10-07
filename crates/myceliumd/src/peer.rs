@@ -269,7 +269,14 @@ impl Mesh {
             loop {
                 match tokio::task::spawn_blocking(collect_health).await {
                     Ok(Ok(mut health)) => {
-                        if let Some(release) = collector.preferred_release().await {
+                        let release = match collector.preferred_release().await {
+                            Ok(release) => release,
+                            Err(error) => {
+                                eprintln!("myceliumd: update distribution policy: {error}");
+                                None
+                            }
+                        };
+                        if let Some(release) = release {
                             let ready = artifact_path(&release.artifact_digest)
                                 .map(|path| path.is_file())
                                 .unwrap_or(false);
@@ -1335,7 +1342,7 @@ impl Mesh {
                 length: 65_536,
             }));
         }
-        let release = self.preferred_release().await;
+        let release = self.preferred_release().await?;
         let Some(release) = release else {
             return Ok(None);
         };
@@ -1356,10 +1363,11 @@ impl Mesh {
         }))
     }
 
-    async fn preferred_release(&self) -> Option<ReleaseManifest> {
+    async fn preferred_release(&self) -> Result<Option<ReleaseManifest>, AnyError> {
         let targets = local_compatible_targets();
-        let channel = std::env::var("MYCELIUM_UPDATE_CHANNEL").unwrap_or_else(|_| "canary".into());
-        self.releases()
+        let fallback = std::env::var("MYCELIUM_UPDATE_CHANNEL").unwrap_or_else(|_| "canary".into());
+        let channel = crate::update_policy::distribution_channel(&crate::update_policy_path(), &fallback)?;
+        Ok(self.releases()
             .await
             .into_iter()
             .filter(|release| targets.contains(&release.target) && release.channel == channel)
@@ -1370,7 +1378,7 @@ impl Mesh {
                     .map(|index| targets.len() - index)
                     .unwrap_or_default();
                 (release.version.clone(), preference)
-            })
+            }))
     }
 }
 

@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+
+# The image owns bootstrap bytes; signed updates own the enrolled executable.
+# Do not keep invoking the image's stale CLI after the peer has enrolled.
+MYCELIUM_HOME=${MYCELIUM_HOME:-/var/lib/mycelium}
+export MYCELIUM_HOME
+if [ -x "$MYCELIUM_HOME/bin/mycelium" ]; then
+  exec "$MYCELIUM_HOME/bin/mycelium" "$@"
+fi
+exec /usr/libexec/mycelium-bootstrap "$@"

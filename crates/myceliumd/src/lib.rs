@@ -170,11 +170,8 @@ pub fn update_policy_path() -> PathBuf {
     home_dir().join("update-policy.json")
 }
 
-pub fn read_update_policy() -> update_policy::UpdatePolicy {
-    std::fs::read(update_policy_path())
-        .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap_or_default()
+pub fn read_update_policy() -> Result<update_policy::UpdatePolicy, String> {
+    Ok(update_policy::read(&update_policy_path())?.unwrap_or_default())
 }
 
 pub fn write_update_policy(policy: &update_policy::UpdatePolicy) -> std::io::Result<()> {

@@ -30,7 +30,10 @@ if [ -n "${MYCELIUM_BINARY:-}" ]; then
     echo "MYCELIUM_BINARY is not executable: $MYCELIUM_BINARY" >&2
     exit 1
   }
-  install -m 0755 "$MYCELIUM_BINARY" "$work_dir/usr/local/bin/mycelium"
+  mkdir -p "$work_dir/usr/libexec" "$work_dir/usr/local/bin"
+  install -m 0755 "$MYCELIUM_BINARY" "$work_dir/usr/libexec/mycelium-bootstrap"
+  install -m 0755 "$(dirname "$0")/../rootfs-overlay/usr/local/bin/mycelium" \
+    "$work_dir/usr/local/bin/mycelium"
 fi
 cp "$busybox" "$work_dir/busybox"
 chmod 0755 "$work_dir/init"
