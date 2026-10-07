@@ -22,11 +22,12 @@ the updater does not silently choose an older release.
 
 Dependency-linked components are currently explicit-reconcile only. Automatic
 filtering must not activate a provider alone while omitting its dependent.
-This is ordered, fully staged admission, **not an atomic multi-package transaction**:
-an earlier verified package can remain updated if a later member fails. Each
-failed activation restores its own prior version. Whole-set recovery and
-mixed-version compatibility still need qualification before enabling automatic
-linked updates. Independent packages retain their existing automatic gates.
+This is ordered, fully staged admission, **not an atomic multi-package transaction**.
+Write admission currently permits at most one changed or unhealthy member of a
+linked set, using the qualified single-package rollback; multi-member changes
+fail before new activation. Whole-set recovery and mixed-version compatibility
+still need qualification before enabling simultaneous or automatic linked
+updates. Independent packages retain their existing automatic gates.
 
 ## Interrupted activation
 
@@ -80,7 +81,7 @@ builder and qualification guard. It reboots and powers off that guest.
 ## Qualification, 2026-10-06
 
 Agora `cargo check -p myceliumd --tests` passed. The serial daemon suite passed
-95 tests with one explicitly ignored disruptive QEMU test. That test was then
+96 tests with one explicitly ignored disruptive QEMU test. That test was then
 run separately in QEMU/KVM with one CPU, 2 GiB, a fresh persistent ext4 artifact,
 no NIC and no fleet identity. The [raw serial log](update-safety-qualification-20261006.log)
 contains `FUNGOS_UPDATE_SIGKILL_CHECKPOINTED` on the first boot and
@@ -90,7 +91,8 @@ not a whole-set transaction or a live application rollback proof.
 
 Stripped qualification test executable SHA256:
 `287db69cc87391b736739c284c39dedeac7b09c9502e4335f20cfeac650c4ae2`.
-Qualified `software.rs` SHA256:
+QEMU qualification checkpoint source (`software.rs`) SHA256, before the final
+multi-member admission guard:
 `6cb5a521605238e9e5e9b6f4085f99db1d4bf5b8a314a704ce71f56a92a71bd1`.
 Artifacts and the failed first boot are retained on Agora under
 `/home/ajmwagar/.cache/fungos-update-safety-qemu`.

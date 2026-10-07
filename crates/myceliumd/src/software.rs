@@ -333,8 +333,13 @@ pub fn reconcile(
     }
     // A dependent update set must be fully staged before touching any member.
     // Exact requirements intentionally fail rather than guessing ABI compatibility.
-    if assignments.iter().any(|item| !item.requires.is_empty()) {
+    let linked = linked_packages(assignments);
+    if !linked.is_empty() {
+        let mut changing = 0;
         for assignment in &ordered {
+            if !linked.contains(&assignment.package) {
+                continue;
+            }
             let manifest = select(manifests, &assignment.package, &assignment.channel, targets)
                 .ok_or_else(|| format!("update set lacks manifest for {}", assignment.package))?;
             manifest.verify()?;
@@ -348,11 +353,20 @@ pub fn reconcile(
             {
                 return Err("update set contains corrupt cached bytes".into());
             }
-            if write && crate::software_service::binding(&manifest.name)?.is_none() {
-                return Err(
-                    "dependent update set requires native health bindings for every member".into(),
-                );
+            if write {
+                let binding = crate::software_service::binding(&manifest.name)?.ok_or(
+                    "dependent update set requires native health bindings for every member",
+                )?;
+                if current_health(manifest, &crate::software_dir(), Some(&binding)).is_err() {
+                    changing += 1;
+                }
             }
+        }
+        // Do not ship a partial cross-package rollback boundary. A single
+        // changed member uses the qualified transaction; multiple changes need
+        // a durable whole-set transaction, not a sequence of happy-path updates.
+        if write {
+            admit_linked_changes(changing)?;
         }
     }
     let mut statuses = Vec::new();
@@ -428,6 +442,27 @@ pub fn reconcile(
         write_statuses(&statuses)?;
     }
     Ok(statuses)
+}
+
+fn admit_linked_changes(changing: usize) -> Result<(), AnyError> {
+    if changing > 1 {
+        return Err(
+            "linked update set changes multiple packages; whole-set rollback is not yet qualified"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+fn linked_packages(assignments: &[SoftwareAssignment]) -> BTreeSet<String> {
+    let mut linked = BTreeSet::new();
+    for assignment in assignments {
+        if !assignment.requires.is_empty() {
+            linked.insert(assignment.package.clone());
+            linked.extend(assignment.requires.keys().cloned());
+        }
+    }
+    linked
 }
 
 fn check_required_versions(
@@ -592,13 +627,7 @@ pub fn automatic_assignments(
     // Until update-set rollback is qualified, dependency-linked components are
     // explicit reconcile only. Do not let filtering split a provider from its
     // dependent and accidentally bypass compatibility admission.
-    let mut linked = BTreeSet::new();
-    for assignment in &assignments {
-        if !assignment.requires.is_empty() {
-            linked.insert(assignment.package.clone());
-            linked.extend(assignment.requires.keys().cloned());
-        }
-    }
+    let linked = linked_packages(&assignments);
     assignments
         .into_iter()
         .filter(|assignment| {
@@ -1578,6 +1607,16 @@ mod tests {
         );
         assert!(state.last_attempts.is_empty());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn multi_member_linked_changes_remain_blocked_until_atomic_rollback() {
+        admit_linked_changes(0).unwrap();
+        admit_linked_changes(1).unwrap();
+        assert!(admit_linked_changes(2)
+            .unwrap_err()
+            .to_string()
+            .contains("whole-set rollback"));
     }
 
     #[test]
