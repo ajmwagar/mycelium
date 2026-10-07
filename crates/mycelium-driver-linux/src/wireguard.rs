@@ -192,6 +192,28 @@ pub fn output(text: &str) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn fixture() -> WireGuardTunnel {
+        WireGuardTunnel {
+            interface: "mc-lab".into(), address: "10.253.180.1/30".into(),
+            listen_port: 51820, private_key_path: "/home/operator/.mycelium/wireguard/private.key".into(),
+            local_public_key: format!("{}A=", "B".repeat(42)),
+            peer_public_key: format!("{}A=", "C".repeat(42)),
+            allowed_ips: vec!["192.168.1.48/32".into()],
+            endpoint: Some("165.227.93.206:51820".parse().unwrap()), keepalive_seconds: 25,
+        }
+    }
+    #[test]
+    fn generated_commands_are_valid_shell_and_verify_routes_without_private_output() {
+        let value = fixture();
+        value.validate().unwrap();
+        for command in [apply_command(&value), status_command(&value)] {
+            let result = std::process::Command::new("sh").args(["-n", "-c", &command]).output().unwrap();
+            assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+            assert!(command.contains("route show exact 192.168.1.48/32 dev mc-lab"));
+            assert!(!command.contains("wg show mc-lab dump"));
+            assert!(!command.contains("PostUp"));
+        }
+    }
     #[test]
     fn rejects_untyped_or_hook_bearing_configuration() {
         let params = Params::from_iter([(
