@@ -1,5 +1,40 @@
 # Update safety
 
+## Edge guest qualification, 2026-10-07
+
+The persistent edge QEMU guest on Agora completed a signed Mycelium bootstrap
+to `0.1.20`, followed by peer-only download and automatic activation of `0.1.21`.
+The latter's installed SHA-256 is
+`1ad2cc3ed709d3a2718c38546382252533ef44b24c7357a7cf4e561c6ff4193c`.
+No manual artifact seed was used for `0.1.21`. Its partially downloaded artifact
+survived the first reboot and completed through the mesh. A second reboot
+retained that installed digest, enrollment certificate, peer identity, machine
+ID, and SSH host key. The updater timer and Mycelium, Unibus router, Canvas,
+Canvas compositor, and Canvas edge adapter were all active afterward.
+
+The first signed candidate (`0.1.18`) failed the older updater's startup probe;
+the previous daemon was restored. The fixed updater retries the complete
+PID-bound readiness probe with a ten-second deadline, rather than failing on a
+transient first RPC or waiting indefinitely on a silent socket. The guest CLI
+now dispatches to its managed binary. Distribution follows persisted policy
+rather than a stale bootstrap environment channel. Compositor control/status
+sockets now live beneath its private systemd runtime directory; keeping them in
+persistent storage prevented Canvas from starting after reboot. User-facing
+Canvas configuration and workspaces remain persistent.
+
+Checks passed on Agora: 97 daemon tests (one disruptive test ignored in this
+run), all 59 CLI tests, and the QEMU overlay checks. Agora's default `/tmp`
+quota caused the first full CLI run to fail; rerunning with a fresh cache-local
+`TMPDIR` passed.
+
+**Native Unibus/Canvas automatic activation and failing-candidate rollback are
+not yet requalified.** Their isolated-channel manifests remain absent from the
+guest catalog. Neo has multiple daemon processes sharing one state directory;
+publisher reconciliation needs separate approval. No intentionally failing
+application was published, compositor automatic activation remains gated, and
+unrelated cloud assignments remain manual. This evidence is not a fleet rollout
+or a Pi 3B+ qualification.
+
 Native binaries retain the existing signed-manifest, digest, immutable-release
 and locally authorized service-binding boundaries. This is not an APT backend;
 APT and native activation must never both own the same component.
