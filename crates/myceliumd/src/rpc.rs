@@ -3185,6 +3185,13 @@ pub async fn serve() -> std::io::Result<()> {
         crate::VERSION,
         socket.display()
     );
+    // Native recovery can wait on systemd/application readiness. Keep it off
+    // the control/gossip event loop and never turn boot into an update trigger.
+    tokio::task::spawn_blocking(|| match crate::software::recover_interrupted_activations() {
+        Ok(names) if !names.is_empty() => eprintln!("myceliumd: restored interrupted packages: {}", names.join(", ")),
+        Ok(_) => {},
+        Err(error) => eprintln!("myceliumd: {error}"),
+    });
 
     loop {
         let (stream, _) = listener.accept().await?;

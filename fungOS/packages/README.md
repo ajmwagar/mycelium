@@ -75,6 +75,10 @@ qualification DMI product. Do not use a running peer's disk.
 
 ## Ownership boundary
 
+See [native update safety](update-safety.md) for dependency admission, durable
+interruption recovery and application-level health checks. These do not change
+APT's package ownership or imply an APT rollout backend exists.
+
 No Mycelium APT backend is implemented yet. Fleet adoption needs an explicit
 installer choice per component: APT or native binary activation, never both.
 Version selection, staged rollout, drain, health verification and recovery

@@ -1,0 +1,15 @@
+[Unit]
+Description=Disposable fungOS interrupted activation proof (never a fleet unit)
+After=systemd-tmpfiles-setup.service
+
+[Service]
+Type=oneshot
+Environment=MYCELIUM_TEST_CRASH_ROOT=/var/lib/fungos-update-safety-proof
+ExecStartPre=/usr/bin/systemd-tmpfiles --create /opt/unibus-qualification/tmpfiles.conf
+ExecStart=/opt/fungos-update-safety/myceliumd-tests --exact software::tests::qemu_interrupted_activation_reboot --ignored --nocapture
+StandardOutput=journal+console
+StandardError=journal+console
+TimeoutStartSec=60
+
+[Install]
+WantedBy=multi-user.target

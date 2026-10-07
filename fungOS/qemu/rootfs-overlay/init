@@ -1,14 +1,14 @@
 #!/busybox sh
 set -eu
 
-mount -t devtmpfs devtmpfs /dev
-mount -t proc proc /proc
-mount -t sysfs sysfs /sys
-mount -t tmpfs tmpfs /run
+/busybox mount -t devtmpfs devtmpfs /dev
+/busybox mount -t proc proc /proc
+/busybox mount -t sysfs sysfs /sys
+/busybox mount -t tmpfs tmpfs /run
 
-case " $(cat /proc/cmdline) " in
+case " $(/busybox cat /proc/cmdline) " in
   *" fungos.root=LABEL=FUNGOS_ROOT "*)
-    mkdir -p /sysroot
+    /busybox mkdir -p /sysroot
     attempts=0
     while ! root_device=$(/busybox findfs LABEL=FUNGOS_ROOT); do
       attempts=$((attempts + 1))
