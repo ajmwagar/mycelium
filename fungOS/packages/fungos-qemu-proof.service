@@ -1,0 +1,14 @@
+[Unit]
+Description=Disposable fungOS signed APT qualification (never a fleet unit)
+After=systemd-tmpfiles-setup.service unibus-router.service
+
+[Service]
+Type=oneshot
+ExecStartPre=/usr/bin/systemd-tmpfiles --create /opt/unibus-qualification/tmpfiles.conf
+ExecStart=/opt/fungos-apt/apt-smoke
+StandardOutput=journal+console
+StandardError=journal+console
+TimeoutStartSec=180
+
+[Install]
+WantedBy=multi-user.target
