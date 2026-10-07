@@ -2,6 +2,7 @@
 name = "myceliumd"
 version.workspace = true
 edition.workspace = true
+rust-version = "1.89"
 license.workspace = true
 description = "mycelium control-plane daemon: inventory, drivers, scans, topology over a Unix socket"
 

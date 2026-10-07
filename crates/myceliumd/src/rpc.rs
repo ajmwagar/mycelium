@@ -3139,6 +3139,10 @@ pub fn cap_result_json(
 pub async fn serve() -> std::io::Result<()> {
     let home = crate::home_dir();
     std::fs::create_dir_all(&home)?;
+    // Keep this descriptor alive for the complete daemon lifetime. Acquire it
+    // before touching a socket or state: an accepting socket isn't a lock, and
+    // boot may take longer than a client's connection/startup deadline.
+    let _home_lock = crate::daemon_lock::acquire(&home)?;
     crate::load_service_env()?;
     let socket = crate::socket_path();
     if socket.exists() {

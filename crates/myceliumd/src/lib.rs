@@ -21,6 +21,7 @@ pub mod authority;
 pub mod client;
 pub mod credential_map;
 pub mod credential_provider;
+mod daemon_lock;
 mod execution;
 mod hardware;
 pub mod peer;
