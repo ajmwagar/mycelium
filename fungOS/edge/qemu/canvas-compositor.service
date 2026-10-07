@@ -4,9 +4,12 @@ After=systemd-udev-settle.service fungos-qemu-display.service
 Requires=fungos-qemu-display.service
 
 [Service]
+ExecStartPre=/usr/bin/install -d -m 0700 /run/fungos-compositor/.local/state/dock
 ExecStart=/var/lib/mycelium/software/canvas-linux/current/canvas-linux desktop-compositor start
 Environment=XDG_RUNTIME_DIR=/run/fungos-compositor
-Environment=HOME=/var/lib/fungos-edge
+# Compositor status/control sockets are transient, not persistent user data.
+# systemd removes this private runtime directory after stop and on reboot.
+Environment=HOME=/run/fungos-compositor
 Environment=CANVAS_OUTPUT_MODE=1280x720
 RuntimeDirectory=fungos-compositor
 RuntimeDirectoryMode=0700

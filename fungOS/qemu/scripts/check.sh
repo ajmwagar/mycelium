@@ -22,6 +22,12 @@ grep -q 'install -m 0600 "$mountpoint/first-contact.env" "$staging/first-contact
 grep -q "trap .*umount.*EXIT" \
   "$base_dir/rootfs-overlay/usr/libexec/fungos-mount-claim-envelope"
 
+# Compositor control/status files must follow its systemd runtime lifetime.
+compositor_unit="$base_dir/../edge/qemu/canvas-compositor.service"
+grep -q '^Environment=HOME=/run/fungos-compositor$' "$compositor_unit"
+grep -q '^RuntimeDirectory=fungos-compositor$' "$compositor_unit"
+grep -q '^ExecStartPre=/usr/bin/install -d -m 0700 /run/fungos-compositor/.local/state/dock$' "$compositor_unit"
+
 # Exercise dispatch through the managed path, including argument boundaries and
 # a replaced executable. No enrollment or machine-wide binary is changed.
 scratch=$(mktemp -d)
