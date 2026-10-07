@@ -18,6 +18,21 @@ pub struct WireGuardTunnel {
     pub allowed_ips: Vec<String>,
     pub endpoint: Option<SocketAddr>,
     pub keepalive_seconds: u16,
+    /// One explicit routed workload flow. Not a blanket LAN trust grant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forward: Option<WireGuardForward>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WireGuardForward {
+    pub ingress: String,
+    pub egress: String,
+    pub source: Ipv4Addr,
+    pub destination: Ipv4Addr,
+    pub tcp_port: u16,
+    /// Explicit compatibility choice; must be an address on the egress NIC.
+    pub source_nat: Ipv4Addr,
 }
 
 impl WireGuardTunnel {
@@ -85,6 +100,42 @@ impl WireGuardTunnel {
                 return Err("duplicate routed prefix".into());
             }
         }
+        if let Some(flow) = &self.forward {
+            for name in [&flow.ingress, &flow.egress] {
+                if name.is_empty()
+                    || name.len() > 15
+                    || !name
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+                {
+                    return Err("unsafe routed interface".into());
+                }
+            }
+            if flow.ingress == flow.egress
+                || (flow.ingress != self.interface && flow.egress != self.interface)
+                || !flow.source.is_private()
+                || !flow.destination.is_private()
+                || !flow.source_nat.is_private()
+                || flow.tcp_port == 0
+            {
+                return Err(
+                    "forwarding requires a scoped private TCP flow through the tunnel".into(),
+                );
+            }
+            let remote = if flow.egress == self.interface {
+                flow.destination
+            } else {
+                flow.source
+            };
+            if !self.allowed_ips.iter().any(|prefix| {
+                let (network, length) = prefix.split_once('/').unwrap();
+                let network: Ipv4Addr = network.parse().unwrap();
+                let length: u32 = length.parse().unwrap();
+                (u32::from(remote) & (u32::MAX << (32 - length))) == u32::from(network)
+            }) {
+                return Err("forwarded remote address is not in allowed IPs".into());
+            }
+        }
         Ok(())
     }
 }
@@ -128,6 +179,7 @@ mod tests {
             allowed_ips: vec!["192.168.1.48/32".into()],
             endpoint: Some("165.227.93.206:51820".parse().unwrap()),
             keepalive_seconds: 25,
+            forward: None,
         }
     }
     #[test]

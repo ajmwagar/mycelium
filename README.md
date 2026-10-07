@@ -902,11 +902,20 @@ It atomically writes an owned root-only configuration, enables the wg-quick
 systemd unit, and verifies persisted configuration, runtime keys, addresses and
 routes. Ordinary apply failures restore the previous configuration and service
 state; abrupt host/process loss is not a transactional rollback guarantee.
+An optional `forward` object permits one explicit private TCP flow through the
+tunnel: `ingress`, `egress`, `source`, `destination`, `tcp_port`, and
+`source_nat`. Dedicated iptables chains accept that flow and established replies,
+then reject other forwarded tunnel traffic. The egress NAT address must already
+exist locally and IPv4 forwarding must already be enabled. The owned systemd
+drop-in restores the rules on start and removes them on stop; it never saves or
+flushes unrelated firewall rules. Remove a flow by applying intent without it.
+
 An active unit is **not** evidence of a working link: separately verify a fresh
 handshake and traffic from the actual workload. This capability does not install
-packages, open cloud firewalls, enable forwarding, or apply NAT. Site gateway
-forwarding and return paths must be explicitly provisioned before declaring a
-site link live; it never changes default routes.
+packages, open cloud firewalls, or enable global forwarding. Gateway forwarding
+and return paths must be explicit before declaring a site link live; it never
+changes default routes. A workload's revision-specific source IP must be
+re-derived on redeployment rather than assumed stable.
 
 Each peer periodically publishes a signed, bounded hardware graph covering
 PCIe, USB, storage, and accelerators. Stable identities derive from the peer

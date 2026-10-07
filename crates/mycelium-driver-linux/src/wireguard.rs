@@ -37,6 +37,89 @@ test "$(wg pubkey < "$key" 2>/dev/null)" = '{public}'
     )
 }
 
+// Private chains only: never save/restore the machine's entire firewall.
+fn firewall_rules(config: &WireGuardTunnel) -> Vec<(String, String)> {
+    let Some(flow) = &config.forward else {
+        return vec![];
+    };
+    let chain = format!("MCWG_{}", config.interface.replace('-', "_"));
+    let nat = format!("{chain}_N");
+    vec![
+        (chain.clone(), format!("-i {} -o {} -s {}/32 -d {}/32 -p tcp --dport {} -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT", flow.ingress, flow.egress, flow.source, flow.destination, flow.tcp_port)),
+        (chain.clone(), format!("-i {} -o {} -s {}/32 -d {}/32 -p tcp --sport {} -m conntrack --ctstate ESTABLISHED -j ACCEPT", flow.egress, flow.ingress, flow.destination, flow.source, flow.tcp_port)),
+        (chain.clone(), format!("-i {} -j DROP", config.interface)),
+        (chain, format!("-o {} -j DROP", config.interface)),
+        (nat, format!("-o {} -s {}/32 -d {}/32 -p tcp --dport {} -j SNAT --to-source {}", flow.egress, flow.source, flow.destination, flow.tcp_port, flow.source_nat)),
+    ]
+}
+
+fn forwarding_script(config: &WireGuardTunnel) -> String {
+    let Some(flow) = &config.forward else {
+        return "#!/bin/sh\n# Mycelium owned WireGuard\nset -eu\nexit 0\n".into();
+    };
+    let chain = format!("MCWG_{}", config.interface.replace('-', "_"));
+    let nat = format!("{chain}_N");
+    let rules = firewall_rules(config)
+        .into_iter()
+        .map(|(name, rule)| {
+            let table = if name == nat { "nat" } else { "filter" };
+            format!("iptables -w 5 -t {table} -A {name} {rule}\n")
+        })
+        .collect::<String>();
+    format!(
+        r#"#!/bin/sh
+# Mycelium owned WireGuard
+set -eu
+case "${{1:-}}" in
+down)
+  while iptables -w 5 -C FORWARD -j {chain} 2>/dev/null; do iptables -w 5 -D FORWARD -j {chain}; done
+  while iptables -w 5 -t nat -C POSTROUTING -j {nat} 2>/dev/null; do iptables -w 5 -t nat -D POSTROUTING -j {nat}; done
+  if iptables -w 5 -S {chain} >/dev/null 2>&1; then iptables -w 5 -F {chain}; iptables -w 5 -X {chain}; fi
+  if iptables -w 5 -t nat -S {nat} >/dev/null 2>&1; then iptables -w 5 -t nat -F {nat}; iptables -w 5 -t nat -X {nat}; fi
+  ;;
+up)
+  test "$(cat /proc/sys/net/ipv4/ip_forward)" = 1
+  ip -o -4 address show dev {egress} | grep -Fq ' {snat}/'
+  ip -4 route get {destination} | grep -Fq ' dev {egress} '
+  "$0" down
+  iptables -w 5 -N {chain}
+  iptables -w 5 -t nat -N {nat}
+{rules}
+  iptables -w 5 -I FORWARD 1 -j {chain}
+  iptables -w 5 -t nat -I POSTROUTING 1 -j {nat}
+  ;;
+*) exit 2 ;;
+esac
+"#,
+        egress = flow.egress,
+        snat = flow.source_nat,
+        destination = flow.destination
+    )
+}
+
+fn drop_in(config: &WireGuardTunnel) -> String {
+    // Keep a no-op lifecycle helper even without forwarding; this also removes
+    // previously managed forwarding when an explicit new intent drops the flow.
+    format!("# Mycelium owned WireGuard\n[Service]\nExecStartPost=/etc/wireguard/{}-forward up\nExecStopPost=/etc/wireguard/{}-forward down\n", config.interface, config.interface)
+}
+
+fn forwarding_verify(config: &WireGuardTunnel) -> String {
+    let chain = format!("MCWG_{}", config.interface.replace('-', "_"));
+    let nat = format!("{chain}_N");
+    let mut checks = String::new();
+    if let Some(flow) = &config.forward {
+        checks.push_str(&format!("test \"$(cat /proc/sys/net/ipv4/ip_forward)\" = 1\nip -o -4 address show dev {} | grep -Fq ' {}/'\n", flow.egress, flow.source_nat));
+        checks.push_str(&format!("iptables -w 5 -C FORWARD -j {chain}\niptables -w 5 -t nat -C POSTROUTING -j {nat}\ntest \"$(iptables -w 5 -S {chain} | wc -l)\" -eq 5\ntest \"$(iptables -w 5 -t nat -S {nat} | wc -l)\" -eq 2\n"));
+        for (name, rule) in firewall_rules(config) {
+            let table = if name == nat { "nat" } else { "filter" };
+            checks.push_str(&format!("iptables -w 5 -t {table} -C {name} {rule}\n"));
+        }
+    } else {
+        checks.push_str(&format!("if iptables -w 5 -S {chain} >/dev/null 2>&1; then exit 1; fi\nif iptables -w 5 -t nat -S {nat} >/dev/null 2>&1; then exit 1; fi\n"));
+    }
+    checks
+}
+
 fn verify(config: &WireGuardTunnel) -> String {
     let interface = &config.interface;
     let routes = config
@@ -73,6 +156,10 @@ test "$(wg show {interface} allowed-ips | cut -f2 | tr ', ' '\n\n' | sed '/^$/d'
 test "$(wg show {interface} persistent-keepalive | cut -f2)" = '{keepalive}'
 ip -o -4 address show dev {interface} | grep -Fq ' {address} '
 {routes}
+test "$(cat /etc/wireguard/{interface}-forward)" = "$(printf '%s' '{helper}')"
+test "$(stat -c %a /etc/wireguard/{interface}-forward)" = 700
+test "$(cat /etc/systemd/system/wg-quick@{interface}.service.d/50-mycelium.conf)" = "$(printf '%s' '{drop_in}')"
+{forwarding}
 handshake=$(wg show {interface} latest-handshakes | cut -f2)
 printf '{{"interface":"{interface}","persistent":true,"active":true,"configuration_matches":true,"public_key":"{local}","peer_public_key":"{peer}","latest_handshake_unix":%s}}\n' "$handshake"
 "#,
@@ -86,7 +173,10 @@ printf '{{"interface":"{interface}","persistent":true,"active":true,"configurati
             "off".into()
         } else {
             config.keepalive_seconds.to_string()
-        }
+        },
+        helper = forwarding_script(config).replace('\'', "'\\''"),
+        drop_in = drop_in(config),
+        forwarding = forwarding_verify(config),
     )
 }
 
@@ -105,6 +195,7 @@ test "$(id -u)" = 0
 command -v wg >/dev/null
 command -v wg-quick >/dev/null
 command -v flock >/dev/null
+command -v iptables >/dev/null
 umask 077
 test ! -L /etc/wireguard
 if test -e /etc/wireguard; then test "$(stat -c %u /etc/wireguard)" = 0; fi
@@ -122,6 +213,17 @@ systemctl is-active --quiet wg-quick@{interface} && was_active=1 || true
 systemctl is-enabled --quiet wg-quick@{interface} && was_enabled=1 || true
 had_config=0
 if test -f "$path"; then cp -p "$path" "$work/previous.conf"; had_config=1; fi
+helper=/etc/wireguard/{interface}-forward
+unit_dir=/etc/systemd/system/wg-quick@{interface}.service.d
+unit=$unit_dir/50-mycelium.conf
+test ! -L "$helper" && test ! -L "$unit_dir" && test ! -L "$unit"
+had_helper=0
+had_unit=0
+if test -f "$helper"; then grep -Fq '# Mycelium owned WireGuard' "$helper"; cp -p "$helper" "$work/previous.helper"; had_helper=1; fi
+if test -f "$unit"; then test "$(head -n 1 "$unit")" = '# Mycelium owned WireGuard'; cp -p "$unit" "$work/previous.unit"; had_unit=1; fi
+printf '%s' '{helper_body}' > "$work/candidate.helper"
+chmod 700 "$work/candidate.helper"
+printf '%s' '{drop_in}' > "$work/candidate.unit"
 private=$(cat "$key")
 printf '%s' "{body}" > "$work/candidate.conf"
 unset private
@@ -133,6 +235,9 @@ rollback() {{
   if test "$changed" -eq 1; then
     systemctl stop wg-quick@{interface} || exit 1
     if test "$had_config" -eq 1; then cp -p "$work/previous.conf" "$path"; else rm -f "$path"; fi
+    if test "$had_helper" -eq 1; then cp -p "$work/previous.helper" "$helper"; else rm -f "$helper"; fi
+    if test "$had_unit" -eq 1; then cp -p "$work/previous.unit" "$unit"; else rm -f "$unit"; fi
+    systemctl daemon-reload || exit 1
     if test "$was_enabled" -eq 0; then systemctl disable wg-quick@{interface} >/dev/null || exit 1; fi
     if test "$was_active" -eq 1; then systemctl start wg-quick@{interface} || exit 1; fi
   fi
@@ -141,12 +246,17 @@ rollback() {{
 trap rollback EXIT
 trap 'exit 143' TERM
 trap 'exit 130' INT
-if ! test -f "$path" || ! cmp -s "$work/candidate.conf" "$path"; then
+if ! test -f "$path" || ! cmp -s "$work/candidate.conf" "$path" || ! cmp -s "$work/candidate.helper" "$helper" || ! cmp -s "$work/candidate.unit" "$unit"; then
   changed=1
   systemctl stop wg-quick@{interface}
   sync "$work/candidate.conf"
   mv "$work/candidate.conf" "$path"
+  mv "$work/candidate.helper" "$helper"
+  install -d -m 755 "$unit_dir"
+  mv "$work/candidate.unit" "$unit"
   sync /etc/wireguard
+  sync "$unit_dir"
+  systemctl daemon-reload
 fi
 if test "$was_active" -eq 0 || test "$was_enabled" -eq 0; then changed=1; fi
 systemctl enable wg-quick@{interface} >/dev/null
@@ -156,7 +266,9 @@ trap - EXIT
 "#,
         key_check = key_check(config),
         body = body(config),
-        verify = verify(config)
+        verify = verify(config),
+        helper_body = forwarding_script(config).replace('\'', "'\\''"),
+        drop_in = drop_in(config),
     ))
 }
 
@@ -194,12 +306,16 @@ mod tests {
     use super::*;
     fn fixture() -> WireGuardTunnel {
         WireGuardTunnel {
-            interface: "mc-lab".into(), address: "10.253.180.1/30".into(),
-            listen_port: 51820, private_key_path: "/home/operator/.mycelium/wireguard/private.key".into(),
+            interface: "mc-lab".into(),
+            address: "10.253.180.1/30".into(),
+            listen_port: 51820,
+            private_key_path: "/home/operator/.mycelium/wireguard/private.key".into(),
             local_public_key: format!("{}A=", "B".repeat(42)),
             peer_public_key: format!("{}A=", "C".repeat(42)),
             allowed_ips: vec!["192.168.1.48/32".into()],
-            endpoint: Some("165.227.93.206:51820".parse().unwrap()), keepalive_seconds: 25,
+            endpoint: Some("165.227.93.206:51820".parse().unwrap()),
+            keepalive_seconds: 25,
+            forward: None,
         }
     }
     #[test]
@@ -207,12 +323,54 @@ mod tests {
         let value = fixture();
         value.validate().unwrap();
         for command in [apply_command(&value), status_command(&value)] {
-            let result = std::process::Command::new("sh").args(["-n", "-c", &command]).output().unwrap();
-            assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+            let result = std::process::Command::new("sh")
+                .args(["-n", "-c", &command])
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
             assert!(command.contains("route show exact 192.168.1.48/32 dev mc-lab"));
             assert!(!command.contains("wg show mc-lab dump"));
             assert!(!command.contains("PostUp"));
         }
+    }
+    #[test]
+    fn forwarding_is_narrow_persistent_and_blocks_other_tunnel_flows() {
+        let mut value = fixture();
+        value.forward = Some(mycelium_core::wireguard::WireGuardForward {
+            ingress: "sh-br0".into(),
+            egress: "mc-lab".into(),
+            source: "172.16.0.101".parse().unwrap(),
+            destination: "192.168.1.48".parse().unwrap(),
+            tcp_port: 8717,
+            source_nat: "10.253.180.1".parse().unwrap(),
+        });
+        value.validate().unwrap();
+        for script in [
+            forwarding_script(&value),
+            apply_command(&value),
+            status_command(&value),
+        ] {
+            let status = std::process::Command::new("sh")
+                .args(["-n", "-c", &script])
+                .status()
+                .unwrap();
+            assert!(status.success());
+            assert!(!script.contains("iptables -F\n"));
+        }
+        let rules = firewall_rules(&value);
+        assert_eq!(rules.len(), 5);
+        assert!(rules[0].1.contains("-s 172.16.0.101/32 -d 192.168.1.48/32"));
+        assert!(rules[0].1.contains("--dport 8717"));
+        assert!(rules[1].1.contains("--ctstate ESTABLISHED"));
+        assert!(rules[2].1.ends_with("-j DROP"));
+        assert!(rules[4].1.contains("SNAT --to-source 10.253.180.1"));
+        assert!(drop_in(&value).contains("ExecStopPost="));
+        value.forward.as_mut().unwrap().destination = "192.168.1.49".parse().unwrap();
+        assert!(value.validate().is_err());
     }
     #[test]
     fn rejects_untyped_or_hook_bearing_configuration() {
