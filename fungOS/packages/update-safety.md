@@ -75,6 +75,9 @@ and the active update timer (boot ID
 archive was also rebuilt successfully on Agora, including the missing cursor.
 The newly rebuilt archive is separate from the already-qualified corrected
 guest root; do not describe it as separately boot-tested.
+Its rebuilt initrd and empty root image also completed image construction with
+the new dependency guard. These are private qualification artifacts, not a
+published release image.
 
 ## Edge guest qualification, 2026-10-07
 
