@@ -2560,9 +2560,10 @@ async fn activate_update(
         return Err(ClientError::Io(error));
     }
     start_daemon(supervisor, destination)?;
-    if wait_for_daemon(supervisor).await.is_ok() {
-        return Ok(());
-    }
+    let health_error = match wait_for_daemon(supervisor).await {
+        Ok(()) => return Ok(()),
+        Err(error) => error,
+    };
 
     if let Some(supervisor) = supervisor {
         let _ = supervisor.stop();
@@ -2575,9 +2576,9 @@ async fn activate_update(
             "candidate failed health check; rollback daemon also failed to start".into(),
         )
     })?;
-    Err(ClientError::Protocol(
-        "candidate failed health check and was rolled back".into(),
-    ))
+    Err(ClientError::Protocol(format!(
+        "candidate failed health check and was rolled back: {health_error}"
+    )))
 }
 
 #[derive(Clone, Copy)]
@@ -2761,29 +2762,49 @@ fn supervised_peer_matches(supervised_pid: u32, peer_pid: Option<u32>) -> bool {
 }
 
 async fn wait_for_daemon(supervisor: Option<Supervisor>) -> Result<(), ClientError> {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        match Client::try_connect().await {
-            Ok(mut client) => {
-                if let Some(supervisor) = supervisor {
-                    if let Some(pid) = supervisor.systemd_pid()? {
-                        if !supervised_peer_matches(pid, client.peer_pid()?) {
-                            if std::time::Instant::now() >= deadline {
-                                return Err(ClientError::DaemonUnresponsive);
-                            }
-                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                            continue;
-                        }
-                    }
+    wait_for_readiness(std::time::Duration::from_secs(10), || async {
+        let mut client = Client::try_connect().await?;
+        if let Some(supervisor) = supervisor {
+            if let Some(pid) = supervisor.systemd_pid()? {
+                if !supervised_peer_matches(pid, client.peer_pid()?) {
+                    return Err(ClientError::DaemonUnresponsive);
                 }
-                client.call(&Request::PeerList).await?;
-                return Ok(());
             }
-            Err(_) if std::time::Instant::now() >= deadline => {
-                return Err(ClientError::DaemonUnresponsive)
-            }
-            Err(_) => tokio::time::sleep(std::time::Duration::from_millis(100)).await,
         }
+        client.call(&Request::PeerList).await?;
+        Ok(())
+    })
+    .await
+}
+
+// A socket can accept connections before startup has completed, or disappear
+// during a supervised restart. Retry the complete probe, not just connect, and
+// bound the RPC too: an accepted but silent socket must not hang activation.
+async fn wait_for_readiness<F, Fut>(
+    budget: std::time::Duration,
+    mut probe: F,
+) -> Result<(), ClientError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<(), ClientError>>,
+{
+    let deadline = tokio::time::Instant::now() + budget;
+    loop {
+        match tokio::time::timeout_at(deadline, probe()).await {
+            Ok(Ok(())) => return Ok(()),
+            Ok(Err(error)) => {
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(error);
+                }
+                eprintln!("mycelium: waiting for daemon readiness: {error}");
+            }
+            Err(_) => return Err(ClientError::DaemonUnresponsive),
+        }
+        tokio::time::sleep_until(std::cmp::min(
+            deadline,
+            tokio::time::Instant::now() + std::time::Duration::from_millis(100),
+        ))
+        .await;
     }
 }
 
@@ -4971,6 +4992,34 @@ fn render_tunnel_plan(plan: &serde_json::Value) -> Vec<String> {
 #[cfg(test)]
 mod ssh_command_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn update_health_retries_connected_but_not_ready_daemon() {
+        let mut attempts = 0;
+        wait_for_readiness(std::time::Duration::from_secs(1), || {
+            attempts += 1;
+            let ready = attempts == 3;
+            async move {
+                if ready {
+                    Ok(())
+                } else {
+                    Err(ClientError::Protocol("daemon closed the connection".into()))
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(attempts, 3);
+    }
+
+    #[tokio::test]
+    async fn update_health_bounds_a_silent_socket() {
+        let result = wait_for_readiness(std::time::Duration::from_millis(20), || async {
+            std::future::pending::<Result<(), ClientError>>().await
+        })
+        .await;
+        assert!(matches!(result, Err(ClientError::DaemonUnresponsive)));
+    }
 
     #[test]
     fn update_health_rejects_stale_or_unmanaged_socket_daemons() {
