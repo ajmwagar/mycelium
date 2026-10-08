@@ -1163,9 +1163,10 @@ impl Mesh {
         observed_address: Option<IpAddr>,
     ) -> Result<(), AnyError>
     where
-        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
-        let (reader, mut writer) = tokio::io::split(stream);
+        let (reader, writer) = tokio::io::split(stream);
+        let mut writer = PeerWriter::new(writer);
         send(&mut writer, &PeerMessage::Hello(self.local_hello().await)).await?;
         let mut lines = BufReader::new(reader).lines();
         let mut digest_interval = tokio::time::interval(DIGEST_INTERVAL);
@@ -1191,6 +1192,13 @@ impl Mesh {
         let mut endpoint_published = false;
         loop {
             tokio::select! {
+                result = &mut writer.task => {
+                    return match result {
+                        Ok(Ok(())) => Err("peer writer stopped".into()),
+                        Ok(Err(error)) => Err(error.into()),
+                        Err(error) => Err(error.into()),
+                    };
+                }
                 result = lines.next_line() => {
                     let Some(line) = result? else { return Ok(()); };
                     if line.len() > 1_048_576 { return Err("peer message exceeds 1 MiB".into()); }
@@ -1522,14 +1530,58 @@ impl TlsSettings {
     }
 }
 
-async fn send<W: tokio::io::AsyncWrite + Unpin>(
-    writer: &mut W,
+// The receiver must keep draining while this task writes: symmetric gossip
+// bursts otherwise deadlock when both sockets fill. Bound queued bytes, and
+// reconnect rather than waiting for queue capacity inside the receive loop.
+const PEER_WRITE_BUFFER_BYTES: usize = 8 * 1024 * 1024;
+const PEER_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
+
+struct PeerWriter {
+    queue: tokio::sync::mpsc::UnboundedSender<(Vec<u8>, tokio::sync::OwnedSemaphorePermit)>,
+    budget: Arc<tokio::sync::Semaphore>,
+    task: tokio::task::JoinHandle<std::io::Result<()>>,
+}
+
+impl PeerWriter {
+    fn new<W: tokio::io::AsyncWrite + Unpin + Send + 'static>(mut writer: W) -> Self {
+        let (queue, mut receiver) = tokio::sync::mpsc::unbounded_channel::<(
+            Vec<u8>, tokio::sync::OwnedSemaphorePermit,
+        )>();
+        let task = tokio::spawn(async move {
+            while let Some((bytes, _permit)) = receiver.recv().await {
+                tokio::time::timeout(PEER_WRITE_TIMEOUT, async {
+                    writer.write_all(&bytes).await?;
+                    writer.flush().await
+                })
+                .await
+                .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "peer write timed out"))??;
+            }
+            Ok(())
+        });
+        Self { queue, budget: Arc::new(tokio::sync::Semaphore::new(PEER_WRITE_BUFFER_BYTES)), task }
+    }
+
+    fn enqueue(&self, mut bytes: Vec<u8>) -> Result<(), AnyError> {
+        bytes.push(b'\n');
+        let count = u32::try_from(bytes.len())?;
+        let permit = self.budget.clone().try_acquire_many_owned(count)
+            .map_err(|_| "peer write queue exceeds 8 MiB; reconnecting")?;
+        self.queue.send((bytes, permit)).map_err(|_| "peer writer unavailable")?;
+        Ok(())
+    }
+}
+
+impl Drop for PeerWriter {
+    fn drop(&mut self) { self.task.abort(); }
+}
+
+async fn send(
+    writer: &mut PeerWriter,
     message: &PeerMessage,
 ) -> Result<(), AnyError> {
-    writer.write_all(&serde_json::to_vec(message)?).await?;
-    writer.write_all(b"\n").await?;
-    writer.flush().await?;
-    Ok(())
+    let message = message.clone();
+    let bytes = tokio::task::spawn_blocking(move || serde_json::to_vec(&message)).await??;
+    writer.enqueue(bytes)
 }
 
 fn validated_observations(
@@ -2559,6 +2611,46 @@ mod tests {
     #[test]
     fn access_validation_accepts_normalized_oidc_principal() {
         validate_access_statement(&oidc_grant("oidc:https://identity.example#subject-42")).unwrap();
+    }
+
+    #[tokio::test]
+    async fn simultaneous_large_peer_writes_do_not_block_reads() {
+        let (left, right) = tokio::io::duplex(1024);
+        let (left_read, left_write) = tokio::io::split(left);
+        let (right_read, right_write) = tokio::io::split(right);
+        let left_writer = PeerWriter::new(left_write);
+        let right_writer = PeerWriter::new(right_write);
+        let payload = vec![b'x'; 256 * 1024];
+        left_writer.enqueue(payload.clone()).unwrap();
+        right_writer.enqueue(payload.clone()).unwrap();
+        let read = async {
+            let mut left = BufReader::new(left_read);
+            let mut right = BufReader::new(right_read);
+            let mut left_bytes = Vec::new();
+            let mut right_bytes = Vec::new();
+            let (a, b) = tokio::join!(
+                left.read_until(b'\n', &mut left_bytes),
+                right.read_until(b'\n', &mut right_bytes),
+            );
+            assert_eq!(a.unwrap(), payload.len() + 1);
+            assert_eq!(b.unwrap(), payload.len() + 1);
+            assert_eq!(&left_bytes[..payload.len()], payload.as_slice());
+            assert_eq!(left_bytes, right_bytes);
+        };
+        tokio::time::timeout(Duration::from_secs(2), read).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn peer_write_backlog_fails_loudly_and_drop_stops_writer() {
+        let (stream, _undrained_peer) = tokio::io::duplex(1);
+        let writer = PeerWriter::new(stream);
+        let handle = writer.task.abort_handle();
+        writer.enqueue(vec![0; PEER_WRITE_BUFFER_BYTES - 1]).unwrap();
+        let error = writer.enqueue(vec![1]).unwrap_err();
+        assert!(error.to_string().contains("queue exceeds"));
+        drop(writer);
+        tokio::task::yield_now().await;
+        assert!(handle.is_finished());
     }
 
     #[test]
