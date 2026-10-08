@@ -404,6 +404,11 @@ systemd, launchd, or other explicit native adapter may restart the affected
 unit, validate its health, and roll back the selection; Mycelium does not
 become a general process supervisor.
 
+For Debian-owned executables, the manual [APT update path](docs/apt-updates.md)
+uses exact plan digests, stages recovery archives and reuses those local service
+health checks. It is separate from native binary activation and does not yet
+participate in automatic placement or rollout.
+
 Update policy is resolved per package. A document-level `defaults.updates`
 applies when a package has no override; an override may select `manual` or
 `automatic` with its own cache soak, deterministic rollout window, and retry

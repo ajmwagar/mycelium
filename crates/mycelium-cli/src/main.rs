@@ -137,6 +137,10 @@ usage:
   mycelium software status [--json]
   mycelium software reconcile (--write | --dry-run) [--json]
   mycelium software auto-run [--json]
+  mycelium software apt plan PACKAGE VERSION /usr/bin/EXECUTABLE
+  mycelium software apt apply PLAN.json DIGEST --write
+  mycelium software apt recover --write
+  mycelium software apt health PACKAGE /usr/bin/EXECUTABLE
   mycelium node status [--json]
   mycelium node plan INTENT.json [--json]
   mycelium node apply --plan PLAN.json (--write | --dry-run) [--json]
@@ -1194,6 +1198,9 @@ async fn packages(args: &[String]) -> Result<Vec<String>, ClientError> {
 }
 
 async fn software(args: &[String]) -> Result<Vec<String>, ClientError> {
+    if args.first().map(String::as_str) == Some("apt") {
+        return software_apt(&args[1..]);
+    }
     let flags = parse_flags(args);
     let action = flags.rest.first().map(String::as_str).unwrap_or("plan");
     if action == "auto-run" {
@@ -1296,6 +1303,33 @@ async fn software(args: &[String]) -> Result<Vec<String>, ClientError> {
         ));
     }
     Ok(lines)
+}
+
+fn software_apt(args: &[String]) -> Result<Vec<String>, ClientError> {
+    let fail = |error: Box<dyn std::error::Error + Send + Sync>| err_usage(&error.to_string());
+    match args.first().map(String::as_str) {
+        Some("health") if args.len() == 3 => {
+            myceliumd::software_apt::health(&args[1], std::path::Path::new(&args[2])).map_err(fail)?;
+            Ok(vec!["Debian-owned executable and application health verified (not fresh repository admission)".into()])
+        }
+        Some("plan") if args.len() == 4 => {
+            let plan = myceliumd::software_apt::plan(&args[1], &args[2], std::path::Path::new(&args[3])).map_err(fail)?;
+            let digest = myceliumd::software_apt::digest(&plan).map_err(fail)?;
+            Ok(vec![serde_json::to_string_pretty(&serde_json::json!({"digest":digest,"plan":plan})).map_err(|e| err_usage(&e.to_string()))?])
+        }
+        Some("apply") if args.len() == 4 && args[3] == "--write" => {
+            let bytes = std::fs::read(&args[1]).map_err(ClientError::Io)?;
+            let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| err_usage(&e.to_string()))?;
+            let plan: myceliumd::software_apt::AptPlan = serde_json::from_value(value.get("plan").cloned().ok_or(err_usage("missing APT plan"))?).map_err(|e| err_usage(&e.to_string()))?;
+            myceliumd::software_apt::apply(&plan, &args[2]).map_err(fail)?;
+            Ok(vec!["APT candidate installed and local service health verified".into()])
+        }
+        Some("recover") if args.len() == 2 && args[1] == "--write" => {
+            myceliumd::software_apt::recover().map_err(fail)?;
+            Ok(vec!["APT previous package restored and health verified".into()])
+        }
+        _ => Err(err_usage("software apt plan PACKAGE VERSION /usr/bin/EXECUTABLE | apply PLAN.json DIGEST --write | recover --write")),
+    }
 }
 
 async fn egress_command(args: &[String]) -> Result<Vec<String>, ClientError> {
