@@ -91,6 +91,7 @@ pub struct Mesh {
     hello: PeerHello,
     sequence: AtomicU64,
     observations: Mutex<BTreeMap<String, SignedEnvelope>>,
+    persistence: Mutex<()>,
     allowed_origins: Option<BTreeSet<String>>,
     authority_roots: BTreeSet<String>,
     trusted_release_keys: BTreeSet<String>,
@@ -176,6 +177,7 @@ impl Mesh {
             },
             sequence: AtomicU64::new(0),
             observations: Mutex::new(BTreeMap::new()),
+            persistence: Mutex::new(()),
             allowed_origins: None,
             authority_roots: BTreeSet::new(),
             trusted_release_keys: BTreeSet::new(),
@@ -269,6 +271,7 @@ impl Mesh {
             hello,
             sequence: AtomicU64::new(sequence),
             observations: Mutex::new(observations),
+            persistence: Mutex::new(()),
             allowed_origins,
             authority_roots,
             trusted_release_keys,
@@ -1043,6 +1046,10 @@ impl Mesh {
     }
 
     async fn merge(&self, incoming: Vec<SignedEnvelope>) -> Result<(), AnyError> {
+        // Serialize snapshot selection and persistence together. Concurrent
+        // writers otherwise collide on the temporary file, or publish an older
+        // snapshot after a newer one. Readers need only the observations lock.
+        let _persistence = self.persistence.lock().await;
         let mut changed = false;
         let mut observations = self.observations.lock().await;
         let mut incoming = incoming;
@@ -2427,6 +2434,17 @@ fn parse_darwin_swap(text: &str) -> (u64, u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn merge_waits_for_prior_snapshot_persistence() {
+        let mesh = Mesh::ephemeral_for_test();
+        let guard = mesh.persistence.lock().await;
+        let next = mesh.clone();
+        let mut merge = tokio::spawn(async move { next.merge(Vec::new()).await });
+        assert!(tokio::time::timeout(Duration::from_millis(20), &mut merge).await.is_err());
+        drop(guard);
+        tokio::time::timeout(Duration::from_secs(1), merge).await.unwrap().unwrap().unwrap();
+    }
 
     #[test]
     fn observation_batches_are_bounded_by_wire_size() {
