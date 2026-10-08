@@ -42,7 +42,56 @@ Rendezvous export expires after two minutes, refreshed every 30 seconds. Import
 rejects expired/future data. Explicitly imported seeds persist across restarts;
 their old addresses are connection hints, **not fresh availability evidence**.
 Re-export/import when addresses change. Only one side needs an outgoing seed.
-QR enrollment claims and automatic refresh of seed hints are follow-up work.
+For new peers, use the claim flow below. Automatic refresh of seed hints remains
+follow-up work.
+
+## Enroll a new peer using a QR claim
+
+Both machines need the optional `iroh-sync` build. On an existing enrolled
+authority with its enrollment CA and live Iroh sync runtime:
+
+```sh
+mycelium pair --kind peer --iroh --qr \
+  --name new-peer --site your-site \
+  --enrollment-ca "$HOME/.mycelium/authority" \
+  --ttl 15m
+```
+
+Optional `--unix-user USER --role ROLE` uses the existing SSH invitation policy
+and requires the authority's SSH CA (`--ca PATH`). A peer-only claim grants no
+SSH access. No `--gateway`, OIDC login, or TCP `--peer` seed is required.
+Pairing requires the authority's fresh sync rendezvous so the new peer has a
+persistent connection after the short-lived pairing listener closes.
+
+Scan the QR and save its **secret claim** in a private file on the new machine:
+
+```sh
+mycelium setup --claim-file /path/to/private-claim.txt
+mycelium peers --json
+```
+
+The ordinary setup path generates keys locally, redeems the one-use claim,
+installs the existing CA-signed peer identity and daemon service, and saves an
+Iroh sync seed and TLS server name before starting the daemon. It refuses to
+replace an existing peer identity/sync configuration. Consumed claim files are
+removed by the existing setup workflow. Do not post claim QR codes publicly or
+include them in screenshots/logs; unlike `sync export`, they contain a secret.
+
+LAN/direct routing is the default. For relay-assisted enrollment, explicitly
+add `--public-relays`; the new peer will enable public relays for its persistent
+sync connection too. Enable relays on the authority sync runtime separately if
+it also needs them for WAN reachability. Pairing publishes no public DNS record
+and creates no UPnP port mapping. Cross-site NAT/relay qualification is still
+separate from the loopback enrollment tests.
+
+The ephemeral pairing key is pinned by the claim and uses `mycelium/pair/1`,
+separate from persistent `mycelium/sync/1`. Requests still pass through the same
+invitation redemption handler, including TTL/one-use checks. Exchanges have a
+30-second deadline, 128 KiB frames and four concurrent slots; only a peer
+invitation is supported. The listener closes after acknowledged redemption or
+expiry. If transport fails after issuance/consumption, create a new claim after
+checking the enrollment staging directory; one-use claims are not retryable
+after credentials have been issued.
 
 ## Trust and transport
 
@@ -83,6 +132,7 @@ restarting disables the runtime; retain the transport key for stable identity.
 cargo check -p mycelium-cli --features iroh-sync --tests
 cargo test -p myceliumd --features iroh-sync iroh_sync
 cargo test -p myceliumd peer_framing_bounds_and_cancellation
+cargo test -p mycelium-cli --features iroh-sync pair_iroh -- --test-threads=1
 ```
 
 Tests use isolated loopback Iroh endpoints and freshly generated test mTLS

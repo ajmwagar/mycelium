@@ -7,6 +7,25 @@ pub async fn run(args: &[String]) -> Result<Vec<String>, String> {
         "peer" => crate::invite::InvitationKind::Peer,
         value => return Err(format!("unknown pairing kind `{value}`")),
     };
+    let use_iroh = args.iter().any(|argument| argument == "--iroh");
+    if use_iroh && !cfg!(feature = "iroh-sync") {
+        return Err("Iroh enrollment requires a binary built with --features iroh-sync".into());
+    }
+    if use_iroh && (value(args, "--advertise").is_some() || value(args, "--listen").is_some()) {
+        return Err("--iroh uses its own rendezvous; omit HTTP --advertise and --listen".into());
+    }
+    if use_iroh && (kind != crate::invite::InvitationKind::Peer
+        || value(args, "--uses").is_some_and(|uses| uses != "1")) {
+        return Err("Iroh pairing requires --kind peer and a single-use claim".into());
+    }
+    #[cfg(feature = "iroh-sync")]
+    if use_iroh {
+        crate::pair_iroh::fresh_sync()?;
+        let name = value(args, "--name").ok_or("pairing requires --name")?;
+        if !name.bytes().all(|byte| byte.is_ascii_alphanumeric() || b".-".contains(&byte)) {
+            return Err("Iroh peer name must be a DNS name or IP suitable for a TLS SAN".into());
+        }
+    }
     let listen = value(args, "--listen")
         .unwrap_or("0.0.0.0:8788")
         .parse::<SocketAddr>()
@@ -50,6 +69,14 @@ pub async fn run(args: &[String]) -> Result<Vec<String>, String> {
         create_args.push("--write".into());
     }
     let created = crate::invite::create(&create_args)?;
+    #[cfg(feature = "iroh-sync")]
+    if use_iroh {
+        crate::pair_iroh::serve(ca, enrollment_ca, store, created,
+            value(args, "--name").expect("invitation requires name"),
+            args.iter().any(|argument| argument == "--public-relays"),
+            args.iter().any(|argument| argument == "--qr")).await?;
+        return Ok(vec!["peer enrollment complete; Iroh pairing endpoint closed".into()]);
+    }
     let claim = crate::invite::encode_pair_claim(
         &advertise,
         &created.code,

@@ -116,7 +116,8 @@ pub(crate) fn create(args: &[String]) -> Result<CreatedInvitation, String> {
     }
     let site = value(args, "--site").map(str::to_owned);
     let peers = repeated(args, "--peer");
-    if kind == InvitationKind::Peer && (site.is_none() || peers.is_empty()) {
+    let iroh = args.iter().any(|argument| argument == "--iroh") && cfg!(feature = "iroh-sync");
+    if kind == InvitationKind::Peer && (site.is_none() || (peers.is_empty() && !iroh)) {
         return Err("peer invite needs --site and at least one --peer seed".into());
     }
     let now = now()?;
@@ -198,7 +199,7 @@ pub(crate) fn decode_pair_claim(
     let Some(encoded) = claim.strip_prefix("MYC1-") else {
         return Ok(None);
     };
-    if encoded.len() % 2 != 0 || encoded.len() > 4096 {
+    if encoded.len() % 2 != 0 || encoded.len() > 4096 || !encoded.is_ascii() {
         return Err("invalid pairing claim encoding".into());
     }
     let bytes = (0..encoded.len())
@@ -404,6 +405,7 @@ mod tests {
 
     #[test]
     fn pairing_claim_carries_rendezvous_without_changing_secret() {
+        assert!(decode_pair_claim("MYC1-aéa").is_err());
         let encoded = encode_pair_claim(
             "http://192.168.1.2:8788",
             "MYC-SECRET",

@@ -32,6 +32,9 @@ pub async fn run(args: &[String]) -> Result<Vec<String>, String> {
         .or_else(|| value(args, "--gateway").map(str::to_owned))
         .or_else(|| std::env::var("MYCELIUM_GATEWAY").ok())
         .ok_or_else(|| "setup needs a pairing claim or --gateway HTTPS-URL".to_owned())?;
+    if gateway.starts_with("iroh-pair:") && !cfg!(feature = "iroh-sync") {
+        return Err("Iroh enrollment requires a binary built with --features iroh-sync".into());
+    }
     if embedded
         .as_ref()
         .is_some_and(|(_, _, _, kind)| *kind == crate::invite::InvitationKind::Peer)
@@ -157,6 +160,10 @@ async fn setup_peer(
     system_service: bool,
 ) -> Result<Vec<String>, String> {
     let home = home.unwrap_or_else(myceliumd::home_dir);
+    if claim.0.starts_with("iroh-pair:") && (home.join("iroh-sync.json").exists()
+        || home.join("pki/node-key.pem").exists()) {
+        return Err("refusing new-peer enrollment over an existing peer identity/configuration".into());
+    }
     let staging = home.join("enrollment-staging");
     fs::create_dir_all(&staging)
         .map_err(|error| format!("create {}: {error}", staging.display()))?;

@@ -65,7 +65,8 @@ pub(crate) fn sign_csr(
     std::fs::write(&csr, csr_pem).map_err(|error| format!("stage peer CSR: {error}"))?;
     std::fs::write(
         &extensions,
-        "[mycelium_peer]\nextendedKeyUsage=serverAuth,clientAuth\n",
+        format!("[mycelium_peer]\nextendedKeyUsage=serverAuth,clientAuth\n{}\n",
+            subject_alt_name(&std::collections::BTreeSet::from([expected_name]))),
     )
     .map_err(|error| format!("stage peer certificate extensions: {error}"))?;
     openssl_string(&[
@@ -321,8 +322,12 @@ pub(crate) fn install_peer_material(
     site: &str,
     peers: &[String],
     system_service: bool,
+    iroh_server_name: Option<&str>,
 ) -> Result<Vec<String>, String> {
     validate_label("site", site).map_err(|error| error.to_string())?;
+    if let Some(name) = iroh_server_name {
+        validate_label("Iroh server name", name).map_err(|error| error.to_string())?;
+    }
     for peer in peers {
         validate_peer(peer).map_err(|error| error.to_string())?;
     }
@@ -348,7 +353,7 @@ pub(crate) fn install_peer_material(
     let peers = peers.join(",");
     std::fs::write(
         home.join("node.env"),
-        resolved_env(
+        format!("{}{}", resolved_env(
             home,
             site,
             &peers,
@@ -356,7 +361,8 @@ pub(crate) fn install_peer_material(
             &release_keys,
             &access_keys,
         )
-        .map_err(|error| error.to_string())?,
+        .map_err(|error| error.to_string())?, iroh_server_name
+            .map(|name| format!("MYCELIUM_IROH_SERVER_NAME={name}\n")).unwrap_or_default()),
     )
     .map_err(|error| format!("write node environment: {error}"))?;
     let service = write_peer_service(

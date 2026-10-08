@@ -24,6 +24,8 @@ pub mod credential_provider;
 mod execution;
 mod hardware;
 pub mod peer;
+#[cfg(feature = "iroh-sync")]
+pub use iroh as iroh_transport;
 pub mod node_profile;
 pub mod protocol;
 pub mod resources;

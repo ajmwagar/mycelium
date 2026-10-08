@@ -16,7 +16,7 @@ use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone)]
-struct GatewayState {
+pub(crate) struct GatewayState {
     issuer: Arc<str>,
     audience: Arc<str>,
     ca: Arc<PathBuf>,
@@ -161,18 +161,7 @@ pub(crate) async fn serve_pairing(
     let listener = tokio::net::TcpListener::bind(listen)
         .await
         .map_err(|error| format!("bind pairing listener {listen}: {error}"))?;
-    let state = GatewayState {
-        issuer: "pairing".into(),
-        audience: "pairing".into(),
-        ca: Arc::new(ca),
-        enrollment_ca: Some(Arc::new(enrollment_ca)),
-        client_id: "pairing".into(),
-        client_secret: "pairing".into(),
-        callback_url: "pairing".into(),
-        invite_store: Arc::new(invite_store.clone()),
-        invite_lock: Arc::new(Mutex::new(())),
-        pending: Arc::new(Mutex::new(HashMap::new())),
-    };
+    let state = pairing_state(ca, enrollment_ca, invite_store.clone());
     let app = Router::new()
         .route("/health", get(|| async { StatusCode::NO_CONTENT }))
         .route("/v1/invite/redeem", post(redeem_invite))
@@ -185,20 +174,41 @@ pub(crate) async fn serve_pairing(
                 return result.map_err(|error| format!("serve pairing listener: {error}"));
             }
             _ = tokio::time::sleep(std::time::Duration::from_millis(250)) => {
-                let now = crate::invite::now()?;
-                let store = crate::invite::load(&invite_store)?;
-                let consumed = store.invitations.iter()
-                    .find(|invitation| invitation.id == invitation_id)
-                    .is_none_or(|invitation| invitation.remaining_uses == 0);
-                if consumed {
-                    return Ok(());
-                }
-                if now >= expires_at {
-                    return Err("pairing claim expired before redemption".into());
-                }
+                if pairing_finished(&invite_store, &invitation_id, expires_at)? { return Ok(()); }
             }
         }
     }
+}
+
+pub(crate) fn pairing_state(ca: PathBuf, enrollment_ca: PathBuf, invite_store: PathBuf) -> GatewayState {
+    GatewayState {
+        issuer: "pairing".into(),
+        audience: "pairing".into(),
+        ca: Arc::new(ca),
+        enrollment_ca: Some(Arc::new(enrollment_ca)),
+        client_id: "pairing".into(),
+        client_secret: "pairing".into(),
+        callback_url: "pairing".into(),
+        invite_store: Arc::new(invite_store.clone()),
+        invite_lock: Arc::new(Mutex::new(())),
+        pending: Arc::new(Mutex::new(HashMap::new())),
+    }
+}
+
+pub(crate) fn pairing_finished(store: &Path, id: &str, expires_at: u64) -> Result<bool, String> {
+    let store = crate::invite::load(store)?;
+    let consumed = store.invitations.iter().find(|invitation| invitation.id == id)
+        .is_none_or(|invitation| invitation.remaining_uses == 0);
+    if consumed { return Ok(true); }
+    if crate::invite::now()? >= expires_at { return Err("pairing claim expired before redemption".into()); }
+    Ok(false)
+}
+
+#[cfg(feature = "iroh-sync")]
+pub(crate) async fn redeem_pair_request(state: GatewayState, request: crate::invite::RedeemRequest)
+    -> Result<crate::invite::RedeemResponse, String> {
+    redeem_invite(State(state), Json(request)).await.map(|Json(value)| value)
+        .map_err(|(status, Json(error))| format!("claim gateway returned {status}: {}", error.error))
 }
 
 async fn redeem_invite(
@@ -671,7 +681,7 @@ pub async fn join(args: &[String]) -> Result<Vec<String>, String> {
 pub async fn redeem(args: &[String]) -> Result<Vec<String>, String> {
     require_write(args)?;
     let gateway = required(args, "--gateway")?.trim_end_matches('/');
-    validate_gateway_url(gateway)?;
+    if !gateway.starts_with("iroh-pair:") { validate_gateway_url(gateway)?; }
     let claim = required(args, "--claim")?;
     let public_key = value(args, "--public-key")
         .map(fs::read_to_string)
@@ -692,34 +702,57 @@ pub async fn redeem(args: &[String]) -> Result<Vec<String>, String> {
             certificate_path.expect("checked above").display()
         ));
     }
-    let response = reqwest::Client::new()
-        .post(format!("{gateway}/v1/invite/redeem"))
-        .json(&crate::invite::RedeemRequest {
-            claim: claim.to_owned(),
-            public_key,
-            peer_csr,
-        })
-        .send()
-        .await
-        .map_err(|error| format!("redeem Mycelium claim: {error}"))?;
-    if !response.status().is_success() {
-        let status = response.status();
-        let error = response
-            .json::<ErrorResponse>()
-            .await
-            .map(|body| body.error)
-            .unwrap_or_else(|_| "gateway returned an unreadable error".into());
-        return Err(format!("claim gateway returned {status}: {error}"));
+    let request = crate::invite::RedeemRequest { claim: claim.to_owned(), public_key, peer_csr };
+    if gateway.starts_with("iroh-pair:") {
+        let home = value(args, "--home").map(PathBuf::from).unwrap_or_else(myceliumd::home_dir);
+        if home.join("iroh-sync.json").exists() || home.join("pki/node-key.pem").exists() {
+            return Err("refusing to redeem a new-peer claim over an existing peer identity/configuration".into());
+        }
     }
-    let redeemed = response
-        .json::<crate::invite::RedeemResponse>()
-        .await
-        .map_err(|error| format!("decode claim response: {error}"))?;
+    #[cfg(feature = "iroh-sync")]
+    let mut sync_seed = None;
+    let redeemed = if gateway.starts_with("iroh-pair:") {
+        #[cfg(feature = "iroh-sync")]
+        {
+            let (response, seed, relays) = crate::pair_iroh::redeem(gateway, request).await?;
+            sync_seed = Some((seed, relays));
+            response
+        }
+        #[cfg(not(feature = "iroh-sync"))]
+        { return Err("Iroh enrollment requires --features iroh-sync".into()); }
+    } else {
+        let response = reqwest::Client::new()
+            .post(format!("{gateway}/v1/invite/redeem"))
+            .json(&request)
+            .send()
+            .await
+            .map_err(|error| format!("redeem Mycelium claim: {error}"))?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let error = response
+                .json::<ErrorResponse>()
+                .await
+                .map(|body| body.error)
+                .unwrap_or_else(|_| "gateway returned an unreadable error".into());
+            return Err(format!("claim gateway returned {status}: {error}"));
+        }
+        response
+            .json::<crate::invite::RedeemResponse>()
+            .await
+            .map_err(|error| format!("decode claim response: {error}"))?
+    };
     if let Some(peer) = redeemed.peer {
         let home = value(args, "--home")
             .map(PathBuf::from)
             .unwrap_or_else(myceliumd::home_dir);
         let key = Path::new(required(args, "--peer-key")?);
+        #[cfg(feature = "iroh-sync")]
+        let iroh_server_name = if let Some((seed, relays)) = sync_seed {
+            crate::pair_iroh::install_seed(&home, seed, relays)?;
+            Some(redeemed.principal.as_str())
+        } else { None };
+        #[cfg(not(feature = "iroh-sync"))]
+        let iroh_server_name = None;
         let mut lines = crate::enroll::install_peer_material(
             &home,
             key,
@@ -728,6 +761,7 @@ pub async fn redeem(args: &[String]) -> Result<Vec<String>, String> {
             &peer.site,
             &peer.peers,
             args.iter().any(|argument| argument == "--system-service"),
+            iroh_server_name,
         )?;
         if !redeemed.certificate.is_empty() {
             let certificate_path =
