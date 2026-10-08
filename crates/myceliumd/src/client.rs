@@ -192,10 +192,14 @@ fn service_matches_home(
         .replace('>', "&gt;")
         .replace('"', "&quot;")
         .replace('\'', "&apos;");
+    // plutil pretty-prints installed LaunchAgents. Ignore whitespace between
+    // XML elements, never whitespace inside the configured path.
     systemd
-        || text.contains(&format!(
-            "<key>MYCELIUM_HOME</key><string>{escaped}</string>"
-        ))
+        || text.split("<key>MYCELIUM_HOME</key>").skip(1).any(|value| {
+            value
+                .trim_start()
+                .starts_with(&format!("<string>{escaped}</string>"))
+        })
 }
 
 #[cfg(test)]
@@ -207,6 +211,16 @@ mod tests {
         use std::path::Path;
         let user = Some(Path::new("/users/avery"));
         let home = Path::new("/users/avery/.mycelium");
+        assert!(service_matches_home(
+            "\t<key>MYCELIUM_HOME</key>\n\t<string>/users/avery/.mycelium</string>\n",
+            home,
+            user,
+        ));
+        assert!(!service_matches_home(
+            "<key>MYCELIUM_HOME</key>\n<string>/users/avery/.mycelium/other</string>",
+            home,
+            user,
+        ));
         assert!(service_matches_home(
             "EnvironmentFile=%h/.mycelium/node.env\n",
             home,
