@@ -1,5 +1,34 @@
 # fungOS
 
+Bootable Debian-based nodes with Mycelium enrollment and signed software delivery.
+The optional edge profile adds Unibus and the native Canvas Wayland compositor.
+
+![fungOS edge running Canvas with two Wayland terminals in QEMU](https://raw.githubusercontent.com/ajmwagar/fungos-web/main/dist/assets/fungos-workspace.png)
+
+Actual QEMU framebuffer capture, 6 October 2026—not a mockup. The desktop uses
+the original procedural Undergrowth background; the applications are Weston
+Wayland terminals. These are development builds, not a stable distribution release.
+
+## Source layout
+
+- This directory owns the image profiles, boot tooling and integration runbooks:
+  [base](base/README.md), [edge](edge/README.md), and [packages](packages/README.md).
+- [ajmwagar/fungos-web](https://github.com/ajmwagar/fungos-web) owns the public
+  website, documentation pages and screenshot assets. See [fungos.dev](https://fungos.dev).
+- Mycelium, Unibus, Canvas and the compute components remain separately owned
+  projects—not copies of their implementations inside an OS repository.
+
+There is no separate `ajmwagar/fungos` repository today. The build work lives
+here, alongside Mycelium; `fungos-web` is the website, not the OS build repository.
+
+## Desktop
+
+![fungOS edge desktop with the Undergrowth background](https://raw.githubusercontent.com/ajmwagar/fungos-web/main/dist/assets/fungos-desktop.png)
+
+The public website repository retains the [capture provenance and asset notices](https://github.com/ajmwagar/fungos-web/blob/main/ASSET-NOTICES.md).
+
+## Development notes
+
 First-party Debian package delivery is being qualified separately from native
 binary updates. See [signed APT qualification](packages/README.md) for verified
 install/upgrade/recovery and persistent QEMU reboot evidence.
@@ -11,10 +40,9 @@ and safely automate heterogeneous devices.
 The name is provisional. It is memorable and fits Mycelium, but naming should
 not dictate architecture or delay useful work.
 
-This directory is intentionally not an implementation repository or a second
-source of truth for component behavior. Each project owns its contracts and
-documentation. These documents explain how the projects fit together, what FPL
-should standardize, and how an open ecosystem around them can grow.
+This directory owns distribution integration, not component behavior. Each
+project owns its contracts and documentation. The strategy documents below
+explain how the projects fit together and how an open ecosystem can grow.
 
 ## Thesis
 
