@@ -2082,25 +2082,23 @@ async fn update(args: &[String]) -> Result<Vec<String>, ClientError> {
         Some(path) => std::path::PathBuf::from(path),
         None => std::env::current_exe().map_err(ClientError::Io)?,
     };
+    let previous = myceliumd::read_update_state();
     let activation = activate_update(&mut client, &artifact, &destination).await;
-    let mut state = myceliumd::UpdateState {
-        release_version: Some(release.version.clone()),
-        release_digest: Some(release.artifact_digest.clone()),
-        release_target: Some(release.target.clone()),
-        activation_state: if activation.is_ok() {
-            "active"
-        } else {
-            "failed"
-        }
-        .into(),
-        activated_at: activation.is_ok().then(unix_now),
-        last_error: activation.as_ref().err().map(ToString::to_string),
-        staged_digest: Some(release.artifact_digest.clone()),
-        staged_since: Some(unix_now()),
-        last_attempt_at: Some(unix_now()),
-    };
+    let installed_digest = std::fs::read(&destination)
+        .map(|bytes| mycelium_peer_protocol::sha256_hex(&bytes));
+    let activation = activation.and_then(|()| match &installed_digest {
+        Ok(digest) if digest == &release.artifact_digest => Ok(()),
+        Ok(_) => Err(ClientError::Protocol("installed update digest does not match candidate".into())),
+        Err(error) => Err(ClientError::Protocol(format!("cannot verify installed update: {error}"))),
+    });
+    let state = activation_receipt(
+        previous,
+        &release,
+        installed_digest.as_ref().ok().map(String::as_str),
+        activation.as_ref().err().map(ToString::to_string),
+        unix_now(),
+    );
     if let Err(error) = myceliumd::write_update_state(&state) {
-        state.last_error = Some(format!("could not persist update state: {error}"));
         return Err(ClientError::Io(error));
     }
     activation?;
@@ -2110,6 +2108,42 @@ async fn update(args: &[String]) -> Result<Vec<String>, ClientError> {
         release.target,
         artifact.display()
     )])
+}
+
+fn activation_receipt(
+    mut previous: myceliumd::UpdateState,
+    candidate: &mycelium_peer_protocol::ReleaseManifest,
+    installed_digest: Option<&str>,
+    error: Option<String>,
+    now: u64,
+) -> myceliumd::UpdateState {
+    if error.is_none() {
+        previous.release_version = Some(candidate.version.clone());
+        previous.release_digest = Some(candidate.artifact_digest.clone());
+        previous.release_target = Some(candidate.target.clone());
+        previous.activated_at = Some(now);
+        previous.activation_state = "active".into();
+    } else {
+        // A failed attempt is not the active release. Retain its predecessor
+        // only when the actual installed bytes still match that receipt.
+        // Unknown/unrestored binaries require a manual verified bootstrap.
+        if previous.release_digest.as_deref().is_none()
+            || previous.release_digest.as_deref() != installed_digest
+        {
+            previous.release_version = None;
+            previous.release_digest = None;
+            previous.release_target = None;
+            previous.activated_at = None;
+        }
+        previous.activation_state = "failed".into();
+    }
+    previous.last_error = error;
+    if previous.staged_digest.as_deref() != Some(&candidate.artifact_digest) {
+        previous.staged_since = Some(now);
+    }
+    previous.staged_digest = Some(candidate.artifact_digest.clone());
+    previous.last_attempt_at = Some(now);
+    previous
 }
 
 fn update_policy_command(args: &[String]) -> Result<Vec<String>, ClientError> {
@@ -2271,11 +2305,7 @@ async fn update_auto_run() -> Result<Vec<String>, ClientError> {
             eligible_at - now
         )]);
     }
-    if state.last_error.is_some()
-        && state
-            .last_attempt_at
-            .is_some_and(|attempt| now < attempt.saturating_add(policy.retry_backoff_secs))
-    {
+    if retry_in_backoff(&state, policy.retry_backoff_secs, now) {
         return Ok(vec![format!(
             "release {} is in retry backoff",
             release.version
@@ -2328,6 +2358,11 @@ fn node_rollout_offset(window_secs: u64) -> u64 {
         .unwrap_or_else(|_| myceliumd::home_dir().to_string_lossy().as_bytes().to_vec());
     let digest = mycelium_peer_protocol::sha256_hex(&identity);
     u64::from_str_radix(&digest[..16], 16).unwrap_or_default() % window_secs
+}
+
+fn retry_in_backoff(state: &myceliumd::UpdateState, backoff_secs: u64, now: u64) -> bool {
+    state.last_error.is_some()
+        && state.last_attempt_at.is_some_and(|attempt| now < attempt.saturating_add(backoff_secs))
 }
 
 fn automatic_upgrade_allowed(active: Option<&str>, candidate: &str) -> Result<(), String> {
@@ -5170,6 +5205,67 @@ mod ssh_command_tests {
         assert!(automatic_upgrade_allowed(Some("0.2.0"), "0.2.0").is_err());
         assert!(automatic_upgrade_allowed(Some("0.2.0"), "0.1.9").is_err());
         assert!(automatic_upgrade_allowed(Some("0.2.0"), "0.2.1").is_ok());
+    }
+
+    fn retry_fixture() -> (myceliumd::UpdateState, mycelium_peer_protocol::ReleaseManifest) {
+        let previous = myceliumd::UpdateState {
+            release_version: Some("0.1.27".into()),
+            release_digest: Some("previous-digest".into()),
+            release_target: Some("aarch64-apple-darwin".into()),
+            activation_state: "active".into(),
+            activated_at: Some(100),
+            staged_digest: Some("candidate-digest".into()),
+            staged_since: Some(200),
+            ..Default::default()
+        };
+        let candidate = mycelium_peer_protocol::ReleaseManifest {
+            protocol_version: 1,
+            version: "0.1.36".into(),
+            channel: "test".into(),
+            target: "aarch64-apple-darwin".into(),
+            artifact_digest: "candidate-digest".into(),
+            artifact_size: 1,
+            signer: String::new(),
+            signature: String::new(),
+        };
+        (previous, candidate)
+    }
+
+    #[test]
+    fn restored_update_can_retry_same_candidate_only_after_backoff() {
+        let (previous, candidate) = retry_fixture();
+        let failed = activation_receipt(previous, &candidate, Some("previous-digest"), Some("readiness failed".into()), 300);
+        assert_eq!(failed.release_version.as_deref(), Some("0.1.27"));
+        assert_eq!(failed.release_digest.as_deref(), Some("previous-digest"));
+        assert_eq!(failed.activated_at, Some(100));
+        assert_eq!(failed.staged_since, Some(200));
+        assert_eq!(failed.activation_state, "failed");
+        assert!(automatic_upgrade_allowed(failed.release_version.as_deref(), &candidate.version).is_ok());
+        assert!(retry_in_backoff(&failed, 300, 599));
+        assert!(!retry_in_backoff(&failed, 300, 600));
+        let restored: myceliumd::UpdateState = serde_json::from_str(&serde_json::to_string(&failed).unwrap()).unwrap();
+        assert_eq!(restored.release_version, failed.release_version);
+        assert!(!retry_in_backoff(&restored, 300, 600));
+        let successful = activation_receipt(restored, &candidate, Some("candidate-digest"), None, 600);
+        assert_eq!(successful.release_digest.as_deref(), Some("candidate-digest"));
+        assert_eq!(successful.activated_at, Some(600));
+        assert_eq!(successful.activation_state, "active");
+        assert!(successful.last_error.is_none());
+        assert!(automatic_upgrade_allowed(successful.release_version.as_deref(), &candidate.version).is_err());
+    }
+
+    #[test]
+    fn failed_update_without_matching_restored_bytes_requires_manual_bootstrap() {
+        for digest in [None, Some("candidate-digest"), Some("unrelated-digest")] {
+            let (previous, candidate) = retry_fixture();
+            let failed = activation_receipt(previous, &candidate, digest, Some("rollback failed".into()), 300);
+            assert!(failed.release_version.is_none());
+            assert!(failed.release_digest.is_none());
+            assert!(failed.release_target.is_none());
+            assert!(failed.activated_at.is_none());
+            assert_eq!(failed.staged_digest.as_deref(), Some("candidate-digest"));
+            assert!(automatic_upgrade_allowed(failed.release_version.as_deref(), &candidate.version).is_err());
+        }
     }
 
     #[test]

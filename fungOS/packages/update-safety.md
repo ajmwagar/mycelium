@@ -505,5 +505,25 @@ This closes the unseeded distribution plus unaided Darwin timer activation
 qualification. These are isolated development releases, not a production fleet
 rollout. Disable the experimental Studio policy and boot out its updater job
 after verification, retaining the signed artifacts and rollback executable.
-Same-release retry receipt handling remains separately tracked in Marbles as
-`mycelium-native-rollback-retry`; this success does not qualify that failure path.
+The live success above does not qualify the failed-activation retry path.
+
+### Native rollback retry receipts
+
+`release_version`, `release_digest`, `release_target` and `activated_at` describe
+the verified active release, not the most recent candidate. After a failed
+attempt, retain those values only if the installed executable's SHA-256 matches
+the previous receipt. A failed or unverifiable restoration clears the active
+identity, blocking automatic updates until a manual signed bootstrap verifies
+the installation. The error remains visible as `activation_state: failed`.
+
+`staged_digest`, `staged_since` and `last_attempt_at` track the attempted candidate
+independently. A restored predecessor therefore permits a retry of the same
+newer candidate, but only after retry backoff and the existing age/rollout hold.
+A successful candidate becomes active and cannot automatically reinstall itself
+or downgrade. Existing malformed legacy receipts are not silently reinterpreted.
+
+Regression coverage exercises failure/restore/retry/success, receipt JSON
+roundtrip, exact backoff boundaries and missing/wrong installed digests. No
+changes to the receipt schema, signing authority or supervisor health budget.
+Darwin type-check and all 62 CLI tests passed. This receipt repair is source/test
+qualified; it has not yet been deployed or fault-injected on a live peer.
