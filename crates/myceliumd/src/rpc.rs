@@ -1219,7 +1219,13 @@ impl Daemon {
             Request::Resources => to_value(self.converged_resources().await).map_err(json_err),
             Request::Services => {
                 let topology = self.converged_topology().await?;
-                to_value(crate::services::project(&topology)).map_err(json_err)
+                // Projection and JSON encoding can be substantial on a rich
+                // fleet snapshot. Keep both off the control/gossip workers.
+                tokio::task::spawn_blocking(move || {
+                    to_value(crate::services::project(&topology)).map_err(json_err)
+                })
+                .await
+                .map_err(|error| MyceliumError::Validation(format!("service projection task: {error}")))?
             }
             Request::DiscoveryScopeList => {
                 let scopes = self

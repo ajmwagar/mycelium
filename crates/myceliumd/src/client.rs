@@ -91,15 +91,9 @@ impl Client {
     }
 
     pub async fn request(&mut self, req: &Request) -> Result<Response, ClientError> {
-        // Publishing a local artifact must not wait forever behind daemon
-        // startup or mesh work. A timeout is not evidence that a write failed.
-        let deadline = match req {
-            Request::Hello => Some(Duration::from_secs(10)),
-            Request::PackagePublish { .. }
-            | Request::ReleasePublish { .. }
-            | Request::ReleasePublishSet { .. } => Some(Duration::from_secs(60)),
-            _ => None,
-        };
+        // Catalog reads are also used before activation: a bound socket does
+        // not mean the daemon has finished startup or can serve requests.
+        let deadline = request_deadline(req);
         if let Some(deadline) = deadline {
             return self.request_with_deadline(req, deadline).await;
         }
@@ -148,6 +142,18 @@ impl Client {
                 kind: resp.kind.unwrap_or_else(|| "daemon".into()),
             })
         }
+    }
+}
+
+fn request_deadline(req: &Request) -> Option<Duration> {
+    match req {
+        Request::Hello | Request::ReleaseList | Request::PackageList => {
+            Some(Duration::from_secs(10))
+        }
+        Request::PackagePublish { .. }
+        | Request::ReleasePublish { .. }
+        | Request::ReleasePublishSet { .. } => Some(Duration::from_secs(60)),
+        _ => None,
     }
 }
 
@@ -273,6 +279,12 @@ mod tests {
             .request_with_deadline(&Request::Hello, Duration::from_millis(20))
             .await
             .is_err());
+    }
+
+    #[test]
+    fn update_catalog_reads_have_bounded_startup_waits() {
+        assert_eq!(request_deadline(&Request::ReleaseList), Some(Duration::from_secs(10)));
+        assert_eq!(request_deadline(&Request::PackageList), Some(Duration::from_secs(10)));
     }
 }
 

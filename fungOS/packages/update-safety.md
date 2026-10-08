@@ -428,3 +428,27 @@ an isolated development qualification release, not a production fleet rollout.
 Remaining qualification: deploy the publication fix to Neo, demonstrate prompt
 publication under gossip load, and complete unseeded artifact distribution plus
 an unaided timer firing.
+
+### Follow-up automation qualification (2026-10-07)
+
+Bounded launchd bootstrap retry and serialized observation persistence passed
+Darwin qualification and were activated on Neo as signed development release
+0.1.31 (SHA-256
+`27ceeda2ef9ea7ce772830b0d78da400750b50bdc3280599b51469ba2a88a9a3`).
+A subsequent 0.1.34 candidate failed readiness. Native rollback restored the
+0.1.31 executable; launchd eventually recovered and peer RPC returned. Recovery
+was delayed, so this is not a clean automatic activation pass.
+
+Studio received the signed 0.1.32 announcement and began downloading the same
+artifact without manually seeded bytes. The natural launchd timer ran, but the
+download stalled at approximately 5 MiB and never activated. Its experimental
+policy was disabled and updater job booted out; partial bytes were retained.
+
+Follow-up source changes bound release/package catalog RPC waits to ten seconds
+and move service projection/JSON encoding off async workers. These changes are
+not deployed. A live Neo sample showed service projection on an async worker;
+that is diagnostic evidence, not proof that projection explains every stall.
+Darwin daemon qualification passed: 112 tests passed, one child-process fixture
+ignored, and no failures.
+Unseeded download, unaided successful activation, and prompt rollback readiness
+remain unqualified. No production fleet rollout was performed.
