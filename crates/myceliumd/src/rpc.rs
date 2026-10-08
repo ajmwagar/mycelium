@@ -1098,6 +1098,15 @@ impl Daemon {
                     ),
                 };
                 let mut observations = Vec::new();
+                #[cfg(feature = "iroh-discovery")]
+                match mycelium_iroh_discovery::observe_file(
+                    &crate::home_dir().join("iroh-endpoints.json"),
+                    self.mesh.node_id(),
+                    unix_now(),
+                ) {
+                    Ok(local) => observations.extend(local),
+                    Err(error) => warnings.push(format!("Iroh discovery: {error}")),
+                }
                 for dev in self.inventory.devices() {
                     match dev.observe().await {
                         Ok((obs, warns)) => {

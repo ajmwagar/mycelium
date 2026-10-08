@@ -208,6 +208,37 @@ pub struct DiscoveredService {
 }
 
 impl ServiceAdvertisement {
+    /// Newer TXT records supersede previous values rather than retaining stale
+    /// leases or endpoint hints. Equal-time observations can add evidence;
+    /// replayed older snapshots cannot roll current metadata backwards.
+    pub fn merge(&mut self, incoming: Self) {
+        let newer = incoming.last_seen > self.last_seen;
+        let same_time = incoming.last_seen == self.last_seen;
+        if newer {
+            self.txt = incoming.txt;
+        } else if same_time {
+            self.txt.extend(incoming.txt);
+        }
+        if newer || same_time {
+            if incoming.target.is_some() {
+                self.target = incoming.target;
+            }
+            if incoming.port.is_some() {
+                self.port = incoming.port;
+            }
+            if incoming.interface.is_some() {
+                self.interface = incoming.interface;
+            }
+            if incoming.ttl.is_some() {
+                self.ttl = incoming.ttl;
+            }
+        }
+        self.first_seen = self.first_seen.min(incoming.first_seen);
+        self.last_seen = self.last_seen.max(incoming.last_seen);
+        self.addresses.extend(incoming.addresses);
+        self.origins.extend(incoming.origins);
+    }
+
     pub fn key(&self) -> String {
         format!(
             "{}.{}.{}",
@@ -502,12 +533,7 @@ impl Topology {
                     entry.insert(advertisement);
                 }
                 std::collections::btree_map::Entry::Occupied(mut entry) => {
-                    let current = entry.get_mut();
-                    current.first_seen = current.first_seen.min(advertisement.first_seen);
-                    current.last_seen = current.last_seen.max(advertisement.last_seen);
-                    current.addresses.extend(advertisement.addresses);
-                    current.txt.extend(advertisement.txt);
-                    current.origins.extend(advertisement.origins);
+                    entry.get_mut().merge(advertisement);
                 }
             }
         }
@@ -764,23 +790,7 @@ impl Topology {
                 let key = advertisement.key();
                 match self.advertisements.get_mut(&key) {
                     Some(existing) => {
-                        existing.first_seen = existing.first_seen.min(advertisement.first_seen);
-                        existing.last_seen = existing.last_seen.max(advertisement.last_seen);
-                        existing.addresses.extend(advertisement.addresses);
-                        existing.txt.extend(advertisement.txt);
-                        existing.origins.extend(advertisement.origins);
-                        if advertisement.target.is_some() {
-                            existing.target = advertisement.target;
-                        }
-                        if advertisement.port.is_some() {
-                            existing.port = advertisement.port;
-                        }
-                        if advertisement.interface.is_some() {
-                            existing.interface = advertisement.interface;
-                        }
-                        if advertisement.ttl.is_some() {
-                            existing.ttl = advertisement.ttl;
-                        }
+                        existing.merge(advertisement);
                     }
                     None => {
                         self.advertisements.insert(key, advertisement);

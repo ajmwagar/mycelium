@@ -12,6 +12,14 @@ pub fn project(topology: &Topology) -> ServiceCatalog {
         schema_version: SCHEMA_VERSION,
         ..ServiceCatalog::default()
     };
+    #[cfg(feature = "iroh-discovery")]
+    for advertisement in topology.advertisements.values() {
+        match mycelium_iroh_discovery::project(advertisement) {
+            Ok(Some(observation)) => catalog.observations.push(observation),
+            Ok(None) => {}
+            Err(error) => eprintln!("Iroh discovery projection rejected: {error}"),
+        }
+    }
     for (node_id, node) in &topology.nodes {
         for service in node.services.values() {
             let Some((kind, confidence)) = recognize(service) else {

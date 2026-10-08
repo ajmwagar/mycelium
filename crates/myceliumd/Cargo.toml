@@ -9,11 +9,16 @@ description = "mycelium control-plane daemon: inventory, drivers, scans, topolog
 name = "myceliumd"
 path = "src/lib.rs"
 
+[features]
+default = []
+iroh-discovery = ["dep:mycelium-iroh-discovery"]
+
 [[bin]]
 name = "myceliumd"
 path = "src/main.rs"
 
 [dependencies]
+mycelium-iroh-discovery = { path = "../mycelium-iroh-discovery", optional = true }
 mycelium-core.workspace = true
 mycelium-driver-edgeos.workspace = true
 mycelium-driver-darwin.workspace = true
