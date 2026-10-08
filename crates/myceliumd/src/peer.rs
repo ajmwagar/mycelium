@@ -1058,6 +1058,13 @@ impl Mesh {
             if matches!(envelope.event, PeerEvent::Unknown) {
                 continue;
             }
+            let key = event_key(&envelope);
+            // Replays cannot replace an existing observation. Reject them
+            // before serializing large payloads for signature verification.
+            // Every newer envelope still passes all authorization checks below.
+            if observations.get(&key).is_some_and(|current| envelope.sequence <= current.sequence) {
+                continue;
+            }
             let authorized = envelope.origin == self.hello.node_id
                 || self
                     .allowed_origins
@@ -1079,7 +1086,6 @@ impl Mesh {
             {
                 continue;
             }
-            let key = event_key(&envelope);
             let replace = observations
                 .get(&key)
                 .map(|current| envelope.sequence > current.sequence)
@@ -2444,6 +2450,20 @@ mod tests {
         assert!(tokio::time::timeout(Duration::from_millis(20), &mut merge).await.is_err());
         drop(guard);
         tokio::time::timeout(Duration::from_secs(1), merge).await.unwrap().unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn stale_forged_observation_never_replaces_verified_record() {
+        let mesh = Mesh::ephemeral_for_test();
+        let current = SignedEnvelope::sign(&mesh.key, 5, now(), PeerEvent::Hello(mesh.hello.clone())).unwrap();
+        let key = event_key(&current);
+        mesh.observations.lock().await.insert(key.clone(), current.clone());
+        let mut stale = current.clone();
+        stale.sequence = 4;
+        mesh.merge(vec![stale]).await.unwrap();
+        let observations = mesh.observations.lock().await;
+        assert_eq!(observations[&key].sequence, 5);
+        observations[&key].verify().unwrap();
     }
 
     #[test]
