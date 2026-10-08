@@ -1,5 +1,5 @@
 //! Original shader-style distance-field kernel, frozen on the CPU at build time.
-//! No Shadertoy source is used. License: MIT (same as this repository).
+//! No Shadertoy source is used. SPDX-License-Identifier: MIT OR Apache-2.0.
 use std::{
     fs::File,
     io::{BufWriter, Write},
@@ -23,6 +23,9 @@ fn smooth(a: f64, b: f64, v: f64) -> f64 {
     let t = ((v - a) / (b - a)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
 }
+fn growth_warp(theta: f64, phase: f64) -> f64 {
+    (theta * 7.0 + phase).sin() * 0.035 + (theta * 13.0 - phase).cos() * 0.013
+}
 fn pixel(x: f64, y: f64) -> [u8; 3] {
     let n = noise(x * 5.0, y * 5.0) * 0.6
         + noise(x * 17.0, y * 17.0) * 0.3
@@ -39,9 +42,7 @@ fn pixel(x: f64, y: f64) -> [u8; 3] {
         let dy = (y - cy) * 1.24;
         let theta = dy.atan2(dx);
         let r = (dx * dx + dy * dy).sqrt() / scale;
-        let warp = (theta * 7.0 + phase).sin() * 0.035
-            + (theta * 13.0 - phase).cos() * 0.013
-            + noise(x * 23.0, y * 23.0) * 0.045;
+        let warp = growth_warp(theta, phase) + noise(x * 23.0, y * 23.0) * 0.045;
         let d = r + warp;
         let mask = 1.0 - smooth(0.98, 1.015, d);
         let rings = (d * 53.0 + (theta * 4.0).sin() * 0.7).sin() * 0.5 + 0.5;
@@ -60,10 +61,79 @@ fn pixel(x: f64, y: f64) -> [u8; 3] {
     let vignette = 1.0 - 0.24 * ((x - 0.8).powi(2) + (y - 0.5).powi(2));
     c.map(|v| (v * vignette).clamp(0.0, 255.0) as u8)
 }
+// Three overlapping shelves, with the wallpaper's same organic contour field.
+// Sparse, high-contrast contours are deliberately legible at favicon size.
+const MARK_SHELVES: [(f64, f64, f64, f64); 3] = [
+    (0.48, 0.39, 0.30, 1.2),
+    (0.36, 0.61, 0.24, 3.0),
+    (0.65, 0.63, 0.26, 4.8),
+];
+fn mark_pixel(x: f64, y: f64) -> [u8; 3] {
+    let mut c = [20.0, 28.0, 24.0];
+    for (cx, cy, radius, phase) in MARK_SHELVES {
+        let (dx, dy) = (x - cx, (y - cy) * 1.24);
+        let theta = dy.atan2(dx);
+        let d = dx.hypot(dy) / radius + growth_warp(theta, phase);
+        let mask = 1.0 - smooth(0.985, 1.015, d);
+        let ridge = (1.0 - smooth(0.025, 0.055, (d * 4.0).fract().min(1.0 - (d * 4.0).fract())))
+            * smooth(0.2, 0.3, d);
+        let edge = smooth(0.92, 0.97, d);
+        let tone = [
+            66.0 + ridge * 60.0 + edge * 80.0,
+            87.0 + ridge * 63.0 + edge * 84.0,
+            63.0 + ridge * 46.0 + edge * 63.0,
+        ];
+        for i in 0..3 {
+            c[i] = c[i] * (1.0 - mask) + tone[i] * mask;
+        }
+    }
+    c.map(|v| v.clamp(0.0, 255.0) as u8)
+}
+fn write_mark_svg(out: &mut impl Write) -> std::io::Result<()> {
+    writeln!(
+        out,
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><title>fungOS</title><rect width="100" height="100" rx="18" fill="#141c18"/>"##
+    )?;
+    for (cx, cy, radius, phase) in MARK_SHELVES {
+        for level in [1.0, 0.75, 0.5] {
+            let mut path = String::new();
+            for step in 0..=96 {
+                let theta = step as f64 / 96.0 * std::f64::consts::TAU;
+                let r = radius * (level - growth_warp(theta, phase));
+                path.push_str(&format!(
+                    "{} {:.2},{:.2} ",
+                    if step == 0 { "M" } else { "L" },
+                    (cx + r * theta.cos()) * 100.0,
+                    (cy + r * theta.sin() / 1.24) * 100.0
+                ));
+            }
+            writeln!(
+                out,
+                r##"<path d="{path}Z" fill="{}" stroke="{}" stroke-width="2.2" stroke-linejoin="round"/>"##,
+                if level == 1.0 { "#42573f" } else { "none" },
+                if level == 1.0 { "#bbcaa0" } else { "#879e70" }
+            )?;
+        }
+    }
+    writeln!(out, "</svg>")
+}
 fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let args: Vec<_> = std::env::args().collect();
+    let mut args: Vec<_> = std::env::args().collect();
+    if args.len() == 3 && args[1] == "--mark-svg" {
+        let mut out = BufWriter::new(File::create(&args[2])?);
+        write_mark_svg(&mut out)?;
+        out.flush()?;
+        return Ok(());
+    }
+    let mark = args.get(1).is_some_and(|a| a == "--mark");
+    if mark {
+        args.remove(1);
+    }
     if args.len() != 4 {
-        return Err("usage: render-undergrowth WIDTH HEIGHT OUTPUT.ppm".into());
+        return Err(
+            "usage: render-undergrowth [--mark] WIDTH HEIGHT OUTPUT.ppm | --mark-svg OUTPUT.svg"
+                .into(),
+        );
     }
     let w: usize = args[1].parse()?;
     let h: usize = args[2].parse()?;
@@ -74,7 +144,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     write!(out, "P6\n{w} {h}\n255\n")?;
     for y in 0..h {
         for x in 0..w {
-            out.write_all(&pixel(x as f64 / h as f64, y as f64 / h as f64))?;
+            out.write_all(&if mark {
+                mark_pixel(x as f64 / w as f64, y as f64 / h as f64)
+            } else {
+                pixel(x as f64 / h as f64, y as f64 / h as f64)
+            })?;
         }
     }
     out.flush()?;
@@ -105,5 +179,19 @@ mod tests {
         for i in -20..20 {
             assert!((0.0..=1.0).contains(&noise(i as f64 * 0.23, 0.3)));
         }
+    }
+    #[test]
+    fn mark_is_repeatable_and_has_contrast() {
+        assert_eq!(mark_pixel(0.5, 0.4), mark_pixel(0.5, 0.4));
+        assert_ne!(mark_pixel(0.5, 0.4), mark_pixel(0.01, 0.01));
+    }
+    #[test]
+    fn vector_mark_is_finite_and_small() {
+        let mut out = Vec::new();
+        write_mark_svg(&mut out).unwrap();
+        let svg = String::from_utf8(out).unwrap();
+        assert_eq!(svg.matches("<path ").count(), 9);
+        assert!(!svg.contains("NaN"));
+        assert!(svg.len() < 20_000);
     }
 }
