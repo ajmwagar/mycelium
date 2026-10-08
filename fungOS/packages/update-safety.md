@@ -490,4 +490,20 @@ During download the old receiver fell behind and hit the sender's 8 MiB budget;
 the connection closed loudly, reconnected automatically, and resumed the partial.
 The normal 300-second launchd timer staged 0.1.36 at 22:52:32 without kickstart or
 manual `auto-run`/`apply`. Its 60-second minimum age plus identity-derived
-49-second offset remained enforced. Automatic activation is a separate check.
+49-second offset remained enforced.
+
+The fourth, unaided timer run activated 0.1.36 at 22:57:39. Updater exit code
+was zero, launchd daemon PID was 32675, installed SHA-256 matched the signed
+artifact above, and the receipt reported `active` with no error. Mycelium SSH
+from Neo succeeded; Studio returned 21 peer entries (approximately 263 ms) and
+nine service observations (approximately 349 ms). Its peer signing key and
+transport certificate/private-key hashes matched the pre-test baseline. Neo
+remained on the same candidate bytes with peer RPC around 49 ms. No artifact
+copy, manual `auto-run`/`apply`, or updater `kickstart` was used on Studio.
+
+This closes the unseeded distribution plus unaided Darwin timer activation
+qualification. These are isolated development releases, not a production fleet
+rollout. Disable the experimental Studio policy and boot out its updater job
+after verification, retaining the signed artifacts and rollback executable.
+Same-release retry receipt handling remains separately tracked in Marbles as
+`mycelium-native-rollback-retry`; this success does not qualify that failure path.
