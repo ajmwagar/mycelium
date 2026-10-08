@@ -333,6 +333,35 @@ pub fn exec_start_matches(exec_start: &str, executable: &Path) -> bool {
     })
 }
 
+/// Read only top-level fields from `launchctl print` service output. Nested
+/// environment/argument text is not evidence of the supervised process.
+pub fn launchd_service_pid(output: &str) -> Result<u32, String> {
+    let field = |name: &str| -> Result<&str, String> {
+        let prefix = format!("{name} = ");
+        let mut values = output.lines().filter_map(|line| {
+            let root = line.strip_prefix('\t')?;
+            root.strip_prefix(&prefix)
+        });
+        let value = values
+            .next()
+            .ok_or_else(|| format!("launchd service has no {name}"))?;
+        if values.next().is_some() {
+            return Err(format!("launchd service has ambiguous {name}"));
+        }
+        Ok(value)
+    };
+    if field("state")? != "running" {
+        return Err("launchd service is not running".into());
+    }
+    let pid = field("pid")?
+        .parse::<u32>()
+        .map_err(|_| "invalid launchd service PID")?;
+    if pid == 0 {
+        return Err("launchd service PID is zero".into());
+    }
+    Ok(pid)
+}
+
 impl Lifecycle for ServiceBinding {
     fn check(&self, digest: &str) -> Result<(), Error> {
         let pid = self.property("MainPID")?;
@@ -538,6 +567,26 @@ fn json_exchange(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn launchd_pid_requires_unique_running_root_fields() {
+        assert_eq!(
+            super::launchd_service_pid(
+                "gui/501/dev.fpl.test = {\n\tstate = running\n\tpid = 123\n}\n"
+            )
+            .unwrap(),
+            123
+        );
+        assert!(super::launchd_service_pid("\tstate = waiting\n\tpid = 123\n").is_err());
+        assert!(super::launchd_service_pid("\tstate = running\n\tpid = 0\n").is_err());
+        assert!(
+            super::launchd_service_pid("\tstate = running\n\tpid = 123\n\tpid = 456\n").is_err()
+        );
+        assert!(super::launchd_service_pid(
+            "\tstate = running\n\tenvironment = {\n\t\tpid = 123\n\t}\n"
+        )
+        .is_err());
+        assert!(super::launchd_service_pid("\tstate = running\n\tpid = not-a-pid\n").is_err());
+    }
     use super::*;
     #[test]
     fn http_health_checks_json_result_and_rejects_mismatch() {

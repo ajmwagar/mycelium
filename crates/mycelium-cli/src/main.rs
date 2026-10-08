@@ -2539,7 +2539,7 @@ async fn activate_update(
     }
     let supervisor = active_supervisor();
     if let Some(supervisor) = supervisor {
-        if let Some(pid) = supervisor.systemd_pid()? {
+        if let Some(pid) = supervisor.native_pid()? {
             if !supervised_peer_matches(pid, client.peer_pid()?) {
                 return Err(err_usage("socket daemon is not owned by the Mycelium supervisor; reconcile the service before updating"));
             }
@@ -2559,8 +2559,13 @@ async fn activate_update(
         let _ = std::fs::rename(&previous, destination);
         return Err(ClientError::Io(error));
     }
-    start_daemon(supervisor, destination)?;
-    let health_error = match wait_for_daemon(supervisor).await {
+    // Supervisor bootstrap failures are activation failures too; do not leave
+    // the candidate installed merely because readiness was never reached.
+    let readiness = match start_daemon(supervisor, destination) {
+        Ok(()) => wait_for_daemon(supervisor).await,
+        Err(error) => Err(error),
+    };
+    let health_error = match readiness {
         Ok(()) => return Ok(()),
         Err(error) => error,
     };
@@ -2589,11 +2594,19 @@ enum Supervisor {
 }
 
 impl Supervisor {
-    fn systemd_pid(self) -> Result<Option<u32>, ClientError> {
+    fn native_pid(self) -> Result<Option<u32>, ClientError> {
         let system = match self {
             Self::Systemd => false,
             Self::SystemdSystem => true,
-            Self::Launchd => return Ok(None),
+            Self::Launchd => {
+                let output = std::process::Command::new("/bin/launchctl")
+                    .args(["print", &format!("gui/{}/dev.fpl.mycelium", uid()?)])
+                    .output().map_err(ClientError::Io)?;
+                if !output.status.success() { return Err(err_usage("cannot inspect supervised Mycelium launchd PID")); }
+                let text = String::from_utf8(output.stdout).map_err(|_| err_usage("launchd inspection is not UTF-8"))?;
+                return myceliumd::software_service::launchd_service_pid(&text)
+                    .map(Some).map_err(|error| err_usage(&error));
+            }
         };
         let mut command = std::process::Command::new("systemctl");
         if !system {
@@ -2765,7 +2778,7 @@ async fn wait_for_daemon(supervisor: Option<Supervisor>) -> Result<(), ClientErr
     wait_for_readiness(std::time::Duration::from_secs(10), || async {
         let mut client = Client::try_connect().await?;
         if let Some(supervisor) = supervisor {
-            if let Some(pid) = supervisor.systemd_pid()? {
+            if let Some(pid) = supervisor.native_pid()? {
                 if !supervised_peer_matches(pid, client.peer_pid()?) {
                     return Err(ClientError::DaemonUnresponsive);
                 }
