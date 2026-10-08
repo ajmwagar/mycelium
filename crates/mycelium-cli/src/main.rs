@@ -2671,6 +2671,23 @@ impl Supervisor {
     }
 
     fn start(self) -> Result<(), ClientError> {
+        if matches!(self, Self::Launchd) {
+            let domain = format!("gui/{}", uid()?);
+            let path = std::env::var_os("HOME")
+                .map(std::path::PathBuf::from)
+                .ok_or_else(|| err_usage("HOME is not set"))?
+                .join("Library/LaunchAgents/dev.fpl.mycelium.plist");
+            let path = display_path(&path)?;
+            return retry_launchd_bootstrap(
+                || {
+                    let output = std::process::Command::new("/bin/launchctl")
+                        .args(["bootstrap", &domain, &path])
+                        .output().map_err(ClientError::Io)?;
+                    Ok(if output.status.success() { Some(0) } else { output.status.code() })
+                },
+                || std::thread::sleep(std::time::Duration::from_millis(250)),
+            );
+        }
         let status = match self {
             Self::Systemd => std::process::Command::new("systemctl")
                 .args(["--user", "start", "mycelium"])
@@ -2698,6 +2715,25 @@ impl Supervisor {
             Err(err_usage("failed to start the Mycelium service supervisor"))
         }
     }
+}
+
+// bootout may return before launchd permits the label to be registered again.
+// Retry only its transient bootstrap EIO; bad plist/permission errors remain
+// immediate failures. Exhaustion must enter the existing activation rollback.
+fn retry_launchd_bootstrap(
+    mut attempt: impl FnMut() -> Result<Option<i32>, ClientError>,
+    mut pause: impl FnMut(),
+) -> Result<(), ClientError> {
+    for index in 0..40 {
+        match attempt()? {
+            Some(0) => return Ok(()),
+            Some(5) if index < 39 => pause(),
+            code => return Err(err_usage(&format!(
+                "launchd bootstrap failed after {} attempts (exit {code:?})", index + 1
+            ))),
+        }
+    }
+    unreachable!()
 }
 
 fn active_supervisor() -> Option<Supervisor> {
@@ -5109,6 +5145,23 @@ mod ssh_command_tests {
         let first = node_rollout_offset(1800);
         assert_eq!(first, node_rollout_offset(1800));
         assert!(first < 1800);
+    }
+
+    #[test]
+    fn launchd_bootstrap_retries_only_eio_and_is_bounded() {
+        let mut attempts = 0;
+        let mut pauses = 0;
+        retry_launchd_bootstrap(|| {
+            attempts += 1;
+            Ok(Some(if attempts < 3 { 5 } else { 0 }))
+        }, || pauses += 1).unwrap();
+        assert_eq!((attempts, pauses), (3, 2));
+        let mut attempts = 0;
+        assert!(retry_launchd_bootstrap(|| { attempts += 1; Ok(Some(5)) }, || {}).is_err());
+        assert_eq!(attempts, 40);
+        let mut attempts = 0;
+        assert!(retry_launchd_bootstrap(|| { attempts += 1; Ok(Some(13)) }, || {}).is_err());
+        assert_eq!(attempts, 1);
     }
 
     #[test]
