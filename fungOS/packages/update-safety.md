@@ -339,3 +339,33 @@ claim is derived from this qualification run.
 The isolated source export's committed lockfile contained a stale EdgeOS entry
 in the UniFi dependency list. Checks used an offline-regenerated lockfile (only
 that entry removed); the user's main worktree lockfile was not replaced.
+
+## Darwin qualification, 2026-10-07
+
+The Mac Studio accepted a signed, isolated `studio-qual-20261007` release and
+activated it through `update apply --path ~/.mycelium/bin/mycelium --write`.
+The installed SHA-256 was
+`1d47f14c5d3d3e08b9f29d0c040f8f40c899a42045ab64c7267dd2a0defac4a2`.
+Launchd reported the new daemon running (PID 40138); a subsequent authenticated
+SSH command and peer-catalog query succeeded. Peer key, node certificate, node
+private key and SSH host public-key hashes were unchanged. The previous binary
+was retained in the Studio's qualification cache before activation.
+
+This artifact is an unoptimized development build with debug information disabled,
+not a production release. Darwin tests passed: 109 daemon tests (one ignored)
+and 59 CLI tests. Linux passed the same 109 daemon tests (two ignored) and 59 CLI
+tests. Supervisor preflight now checks the actual launchd PID and executable
+ownership; failed candidate startup enters the recovery path.
+
+The legacy daemon rejected observation batches containing newer `topology`
+events and did not support `release_seed`. Its first upgrade therefore required
+an authenticated SSH bootstrap of the already-signed release envelope and
+matching artifact bytes. Existing signer trust and activation digest verification
+remained enabled. A reload initially failed with launchctl error 5; a subsequent
+bootstrap restored the original service before activation. Do not count this
+bootstrap as proof of unattended gossip distribution or automatic activation.
+
+Still outstanding: timer-driven Darwin qualification, a live failed-candidate
+rollback exercise, launchd lifecycle support for application packages, and the
+explicit APT installer backend/testing repository. Application lifecycle remains
+systemd-only; publishing `.deb` files does not yet make Mycelium their installer.
