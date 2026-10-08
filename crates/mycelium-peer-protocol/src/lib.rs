@@ -1,5 +1,7 @@
 //! Symmetric, transport-neutral messages exchanged by Mycelium peers.
 
+pub mod identity;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
 
@@ -410,6 +412,7 @@ pub struct SecurityEventBatch {
 #[serde(rename_all = "snake_case")]
 pub enum TransportKind {
     Mtls,
+    Iroh,
     WireGuard,
     Derp,
     Ssh,
