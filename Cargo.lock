@@ -1780,7 +1780,6 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "mycelium-core",
- "mycelium-driver-edgeos",
  "reqwest",
  "serde",
  "serde_json",
