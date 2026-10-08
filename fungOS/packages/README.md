@@ -1,5 +1,11 @@
 # Signed APT package qualification
 
+The maintained publisher now lives in [`ajmwagar/fungos/packages`](https://github.com/ajmwagar/fungos/tree/main/packages).
+Its migration and signed-generation improvements are committed locally as
+`470591d` in that repository, pending push. This directory retains historical
+qualification tooling and evidence; do not extend this legacy publisher in
+parallel. FPL Cloud preparation lives in `shared-infra/projects/fungos/apt`.
+
 Debian continues to supply the OS. Component owners build their `.deb` payloads;
 this small Rust publisher calls `dpkg-scanpackages`, `apt-ftparchive` and GnuPG
 to create a new signed repository generation. It does not build packages,
