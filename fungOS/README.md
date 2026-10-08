@@ -18,8 +18,9 @@ Wayland terminals. These are development builds, not a stable distribution relea
 - Mycelium, Unibus, Canvas and the compute components remain separately owned
   projects—not copies of their implementations inside an OS repository.
 
-There is no separate `ajmwagar/fungos` repository today. The build work lives
-here, alongside Mycelium; `fungos-web` is the website, not the OS build repository.
+The public distribution repository is [ajmwagar/fungos](https://github.com/ajmwagar/fungos).
+It is being prepared; the build work still lives here until migration.
+`fungos-web` is the website, not the OS build repository.
 
 ## Desktop
 
