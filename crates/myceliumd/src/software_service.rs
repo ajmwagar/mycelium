@@ -362,6 +362,27 @@ pub fn launchd_service_pid(output: &str) -> Result<u32, String> {
     Ok(pid)
 }
 
+/// `Program`, when supplied, overrides argv[0] in a launchd job. Never
+/// mistake an argument mentioning our binary for ownership of that binary.
+pub fn launchd_program(plist: &serde_json::Value, label: &str) -> Result<PathBuf, String> {
+    if plist.get("Label").and_then(serde_json::Value::as_str) != Some(label) {
+        return Err("launchd label does not match the selected service".into());
+    }
+    let program = match plist.get("Program") {
+        Some(value) => value.as_str(),
+        None => plist
+            .get("ProgramArguments")
+            .and_then(|args| args.get(0))
+            .and_then(serde_json::Value::as_str),
+    }
+    .ok_or("launchd service has no executable")?;
+    let path = PathBuf::from(program);
+    if !path.is_absolute() {
+        return Err("launchd executable must be absolute".into());
+    }
+    Ok(path)
+}
+
 impl Lifecycle for ServiceBinding {
     fn check(&self, digest: &str) -> Result<(), Error> {
         let pid = self.property("MainPID")?;
@@ -567,6 +588,25 @@ fn json_exchange(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn launchd_program_checks_label_and_program_override() {
+        let arguments = serde_json::json!({"Label":"dev.fpl.test", "ProgramArguments":["/native/mycelium", "_serve"]});
+        assert_eq!(
+            super::launchd_program(&arguments, "dev.fpl.test").unwrap(),
+            std::path::Path::new("/native/mycelium")
+        );
+        assert!(super::launchd_program(&arguments, "dev.fpl.other").is_err());
+        let wrapper = serde_json::json!({"Label":"dev.fpl.test", "Program":"/native/wrapper", "ProgramArguments":["/native/mycelium"]});
+        assert_eq!(
+            super::launchd_program(&wrapper, "dev.fpl.test").unwrap(),
+            std::path::Path::new("/native/wrapper")
+        );
+        assert!(super::launchd_program(
+            &serde_json::json!({"Label":"dev.fpl.test", "Program":"relative"}),
+            "dev.fpl.test"
+        )
+        .is_err());
+    }
     #[test]
     fn launchd_pid_requires_unique_running_root_fields() {
         assert_eq!(

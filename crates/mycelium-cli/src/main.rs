@@ -2539,6 +2539,9 @@ async fn activate_update(
     }
     let supervisor = active_supervisor();
     if let Some(supervisor) = supervisor {
+        if !supervisor.manages_binary(destination)? {
+            return Err(err_usage("update destination is not the supervisor's configured executable"));
+        }
         if let Some(pid) = supervisor.native_pid()? {
             if !supervised_peer_matches(pid, client.peer_pid()?) {
                 return Err(err_usage("socket daemon is not owned by the Mycelium supervisor; reconcile the service before updating"));
@@ -2594,6 +2597,27 @@ enum Supervisor {
 }
 
 impl Supervisor {
+    fn manages_binary(self, destination: &std::path::Path) -> Result<bool, ClientError> {
+        if matches!(self, Self::Launchd) {
+            let path = std::env::var_os("HOME").map(std::path::PathBuf::from)
+                .ok_or_else(|| err_usage("HOME is not set"))?
+                .join("Library/LaunchAgents/dev.fpl.mycelium.plist");
+            let output = std::process::Command::new("/usr/bin/plutil")
+                .args(["-convert", "json", "-o", "-"]).arg(path).output().map_err(ClientError::Io)?;
+            if !output.status.success() { return Err(err_usage("cannot inspect Mycelium launchd program")); }
+            let plist: serde_json::Value = serde_json::from_slice(&output.stdout)
+                .map_err(|_| err_usage("invalid Mycelium launchd plist"))?;
+            return myceliumd::software_service::launchd_program(&plist, "dev.fpl.mycelium")
+                .map(|program| program == destination).map_err(|error| err_usage(&error));
+        }
+        let mut command = std::process::Command::new("systemctl");
+        if matches!(self, Self::Systemd) { command.arg("--user"); }
+        let output = command.args(["show", "mycelium", "--property=ExecStart", "--value"])
+            .output().map_err(ClientError::Io)?;
+        if !output.status.success() { return Err(err_usage("cannot inspect Mycelium systemd program")); }
+        Ok(system_unit_matches_binary(&String::from_utf8_lossy(&output.stdout), destination))
+    }
+
     fn native_pid(self) -> Result<Option<u32>, ClientError> {
         let system = match self {
             Self::Systemd => false,
@@ -2711,8 +2735,8 @@ fn active_supervisor() -> Option<Supervisor> {
     if cfg!(target_os = "macos")
         && std::process::Command::new("launchctl")
             .args(["print", &format!("gui/{uid}/dev.fpl.mycelium")])
-            .status()
-            .is_ok_and(|status| status.success())
+            .output()
+            .is_ok_and(|output| output.status.success())
     {
         return Some(Supervisor::Launchd);
     }
