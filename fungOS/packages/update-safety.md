@@ -482,3 +482,12 @@ installed digest, supervisor PID, RPC/SSH and retained identity after activation
 If qualification stalls, disable the test policy and boot out only its updater
 job, retaining partial bytes for diagnosis. A timer running or a manifest arriving
 alone does not prove successful automatic activation.
+
+Studio received test-channel release 0.1.36 with that same digest, absent from
+its artifact cache before publication. Unseeded download completed at 22:51:53
+local time with 78,390,560 bytes and an independently confirmed SHA-256 match.
+During download the old receiver fell behind and hit the sender's 8 MiB budget;
+the connection closed loudly, reconnected automatically, and resumed the partial.
+The normal 300-second launchd timer staged 0.1.36 at 22:52:32 without kickstart or
+manual `auto-run`/`apply`. Its 60-second minimum age plus identity-derived
+49-second offset remained enforced. Automatic activation is a separate check.
