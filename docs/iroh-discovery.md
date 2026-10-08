@@ -98,3 +98,9 @@ Iroh handshakes, NAT traversal, relay fallback, cross-site GPU requests, and
 tailnet-free enrollment are not qualified by these discovery checks. Marbles
 task registration was unavailable (HTTP 401); no claim or delivery status was
 fabricated.
+
+The deployment check also found Spark's existing `MYCELIUM_PEERS` is empty:
+its daemon currently sees only itself. Agora and Titan have populated peer
+views. No seed, trust root, or allowlist was changed in this slice. Spark's
+cross-host gossip must be connected/verified before claiming fleet-wide endpoint
+discovery; installing the driver alone does not establish that connection.
