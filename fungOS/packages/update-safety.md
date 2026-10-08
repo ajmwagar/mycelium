@@ -394,3 +394,37 @@ publication process was terminated; successful unattended activation was **not**
 demonstrated. The Studio test policy was disabled and its updater job booted out;
 the verified restored daemon remained running. The next qualification must first
 resolve publication responsiveness, then exercise successful timer-driven update.
+
+### Automation follow-up
+
+Process sampling on Neo showed release hashing occupying an async worker, and
+topology serialization repeatedly copying accumulated provenance. Its saved
+topology contained 32,703 provenance entries for 80 distinct sources. The fix
+normalizes legacy provenance on deserialization, deduplicates observation and
+snapshot merging, moves single-release read/hash/cache work to `spawn_blocking`,
+and gives release publication RPCs the existing 60-second deadline. A timeout
+still reports unknown write outcome; operators must reconcile before retrying.
+These code changes passed Darwin check, 19 topology tests, two client tests and
+the complete daemon suite (109 passed, one ignored); a Darwin binary was built.
+They are not yet deployed to Neo. Neo's original service was restarted after
+compacting saved provenance with a retained backup. Disk exhaustion was also
+confirmed by a publication `No space left on device` error; two reproducible
+temporary artifact copies were removed, not user data or cached signed releases.
+
+The Studio then received version 0.1.27's announcement through gossip. Its
+71,027,728-byte artifact was explicitly seeded through the validated CLI, so
+this does not qualify uninterrupted automatic downloading. Launchd's installed
+updater was triggered using `kickstart` (not a direct `update apply`), staged the
+release, refused early activation, and activated it after the 60-second minimum
+age plus identity-derived offset within a 300-second rollout window. This proves
+the scheduler job/automatic policy path, not a wall-clock timer firing unaided.
+The updater exited zero; installed SHA-256 was
+`ed296594b55e7683d1451229eb0a71d282d5442a843a74c4d687a33af8fa60ef`,
+launchd ran daemon PID 21199, SSH and a 20-entry peer query succeeded, and all four
+identity hashes were unchanged. Activation state was `active` with no error.
+
+The test policy was disabled and updater job booted out afterward. This remains
+an isolated development qualification release, not a production fleet rollout.
+Remaining qualification: deploy the publication fix to Neo, demonstrate prompt
+publication under gossip load, and complete unseeded artifact distribution plus
+an unaided timer firing.
