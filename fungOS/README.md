@@ -11,15 +11,18 @@ Wayland terminals. These are development builds, not a stable distribution relea
 
 ## Source layout
 
-- This directory owns the image profiles, boot tooling and integration runbooks:
+- The public [distribution repository](https://github.com/ajmwagar/fungos) owns
+  the generic base builder and profile declarations. This directory still holds
+  integration and qualification work awaiting migration:
   [base](base/README.md), [edge](edge/README.md), and [packages](packages/README.md).
 - [ajmwagar/fungos-web](https://github.com/ajmwagar/fungos-web) owns the public
   website, documentation pages and screenshot assets. See [fungos.dev](https://fungos.dev).
 - Mycelium, Unibus, Canvas and the compute components remain separately owned
   projects—not copies of their implementations inside an OS repository.
 
-The public distribution repository is [ajmwagar/fungos](https://github.com/ajmwagar/fungos).
-It is being prepared; the build work still lives here until migration.
+The public distribution repository is [ajmwagar/fungos](https://github.com/ajmwagar/fungos),
+licensed `MIT OR Apache-2.0`. Its first import contains the generic base builder,
+profile declarations and real desktop captures; other integration work remains here.
 `fungos-web` is the website, not the OS build repository.
 
 ## Desktop

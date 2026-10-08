@@ -41,8 +41,9 @@ supported host build.
 Mycelium is also the enrollment and update layer for [fungOS](fungOS/README.md),
 a Debian-based distribution integration with optional Canvas/Unibus edge profiles.
 The [public website repository](https://github.com/ajmwagar/fungos-web) contains
-the real QEMU desktop captures; the OS build work currently lives in this
-checkout's `fungOS/` directory, not a separate OS repository.
+the real QEMU desktop captures. The distribution source now lives in
+[ajmwagar/fungos](https://github.com/ajmwagar/fungos); remaining qualification
+and integration work is being migrated from this checkout's `fungOS/` directory.
 
 ## Quick start
 
