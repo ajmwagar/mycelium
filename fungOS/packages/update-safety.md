@@ -369,3 +369,28 @@ Still outstanding: timer-driven Darwin qualification, a live failed-candidate
 rollback exercise, launchd lifecycle support for application packages, and the
 explicit APT installer backend/testing repository. Application lifecycle remains
 systemd-only; publishing `.deb` files does not yet make Mycelium their installer.
+
+### Live Darwin rollback exercise
+
+A separately signed `studio-rollback-20261007` candidate (version 0.1.26,
+SHA-256 `f6bbf37f1338a96ad2dee9e0be209f3fd81194166d2915c9e239d94152f748a1`)
+passed `_self-check` but deliberately exited 78 on `_serve`. Its announcement
+arrived through gossip; artifact bytes were explicitly supplied using the
+validated `releases seed` command. This is not an automatic-download test.
+
+Explicit activation installed the candidate, failed the bounded readiness probe,
+and restored the exact prior SHA-256 listed above. Launchd ran the restored daemon
+(PID 57910); subsequent SSH and peer RPC succeeded with 20 catalog entries.
+All four identity hashes remained unchanged. The failed bytes were retained as
+`.mycelium.failed`, and activation status retained the failure and rollback error.
+The command returned nonzero as expected: recovery does not make activation a
+success. No signing or digest checks were bypassed.
+
+The launchd automatic updater was installed on a separate test channel with a
+60-second minimum age, 300-second rollout window and 300-second retry backoff.
+It ran but found no compatible release. Neo's subsequent publication and routing
+requests stalled while its log repeatedly reported oversized observations. The
+publication process was terminated; successful unattended activation was **not**
+demonstrated. The Studio test policy was disabled and its updater job booted out;
+the verified restored daemon remained running. The next qualification must first
+resolve publication responsiveness, then exercise successful timer-driven update.
