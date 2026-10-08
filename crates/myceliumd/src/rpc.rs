@@ -1098,6 +1098,15 @@ impl Daemon {
                     ),
                 };
                 let mut observations = Vec::new();
+                #[cfg(feature = "iroh-sync")]
+                match mycelium_iroh_discovery::observe_file(
+                    &crate::home_dir().join("iroh-sync-endpoints.json"),
+                    self.mesh.node_id(),
+                    unix_now(),
+                ) {
+                    Ok(local) => observations.extend(local),
+                    Err(error) => warnings.push(format!("Iroh sync discovery: {error}")),
+                }
                 #[cfg(feature = "iroh-discovery")]
                 match mycelium_iroh_discovery::observe_file(
                     &crate::home_dir().join("iroh-endpoints.json"),

@@ -1,6 +1,9 @@
 # Optional Iroh endpoint discovery
 
-Mycelium observes application-published Iroh endpoints. It does not start an
+For Mycelium's own optional authenticated transport, see [Iroh peer sync](iroh-sync.md).
+This discovery adapter remains observation-only and does not link the Iroh runtime.
+
+The discovery adapter observes application-published Iroh endpoints. It does not start an
 Iroh endpoint, manage relays, transfer blobs, grant room admission, enroll GPU
 workers, or replace Tailscale/WireGuard. This slice is discovery, not compute
 transport qualification.

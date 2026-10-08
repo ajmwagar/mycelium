@@ -17,6 +17,7 @@ mod setup;
 mod skills;
 mod ssh_access;
 mod stun;
+mod sync;
 mod wireguard;
 
 use mycelium_core::{
@@ -83,6 +84,7 @@ mycelium — control plane for your network appliances
 
 usage:
   mycelium completions zsh|bash|fish
+  mycelium sync enable --write | export [--qr] | join <rendezvous.json> --write
   mycelium setup [--gateway HTTPS-URL] [--claim CODE|--claim-file PATH] [--system-service] [--ttl 8h] [--key PATH] [--certificate PATH]
   mycelium setup --repair [--site SITE] [--path MYCELIUM-HOME] [--system-service]
   mycelium pair --kind access --name NAME --unix-user USER... [--role ROLE]... [--listen ADDR] [--advertise URL] [--ca PATH] [--ttl 15m] [--credential-ttl 8h]
@@ -475,6 +477,7 @@ async fn run(cmd: &str, args: &[String]) -> Result<Vec<String>, ClientError> {
     match cmd {
         "setup" => setup::run(args).await.map_err(access_error),
         "pair" => pair::run(args).await.map_err(access_error),
+        "sync" => sync::run(args).map_err(access_error),
         "invite" => invite::run(args).map_err(access_error),
         "daemon" => daemon(args).await,
         "skills" => skills::run(args),

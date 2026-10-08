@@ -40,6 +40,11 @@ const MAX_OBSERVATION_MESSAGE_BYTES: usize = 900 * 1024;
 
 type AnyError = Box<dyn Error + Send + Sync>;
 
+#[cfg(feature = "iroh-sync")]
+mod iroh_sync;
+#[cfg(feature = "iroh-sync")]
+pub use iroh_sync::{SyncConfig, SyncRendezvous};
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PeerView {
     pub origin: String,
@@ -340,6 +345,8 @@ impl Mesh {
             ))
             .await?;
             let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+            #[cfg(feature = "iroh-sync")]
+            iroh_sync::start(self.clone(), &tls).await?;
             if let Some(address) = tls.listen.clone() {
                 let mesh = self.clone();
                 let acceptor = TlsAcceptor::from(Arc::new(tls.server_config()?));
@@ -1123,7 +1130,8 @@ impl Mesh {
     {
         let (reader, mut writer) = tokio::io::split(stream);
         send(&mut writer, &PeerMessage::Hello(self.local_hello().await)).await?;
-        let mut lines = BufReader::new(reader).lines();
+        let mut reader = BufReader::new(reader);
+        let mut pending_line = Vec::new();
         let mut digest_interval = tokio::time::interval(DIGEST_INTERVAL);
         digest_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let artifact_request_interval = std::env::var("MYCELIUM_ARTIFACT_REQUEST_SECS")
@@ -1147,7 +1155,7 @@ impl Mesh {
         let mut endpoint_published = false;
         loop {
             tokio::select! {
-                result = lines.next_line() => {
+                result = next_peer_line(&mut reader, &mut pending_line) => {
                     let Some(line) = result? else { return Ok(()); };
                     if line.len() > 1_048_576 { return Err("peer message exceeds 1 MiB".into()); }
                     match serde_json::from_str::<PeerMessage>(line.trim())? {
@@ -1438,7 +1446,11 @@ impl TlsSettings {
             .filter(|value| !value.is_empty())
             .map(str::to_owned)
             .collect::<Vec<_>>();
-        if listen.is_none() && seeds.is_empty() {
+        let iroh_enabled = crate::home_dir().join("iroh-sync.json").exists();
+        if iroh_enabled && !cfg!(feature = "iroh-sync") {
+            return Err("iroh-sync.json exists but this binary lacks the iroh-sync feature".into());
+        }
+        if listen.is_none() && seeds.is_empty() && !iroh_enabled {
             return Ok(None);
         }
         let required = |name| -> Result<String, AnyError> {
@@ -1483,6 +1495,32 @@ async fn send<W: tokio::io::AsyncWrite + Unpin>(
     writer.write_all(b"\n").await?;
     writer.flush().await?;
     Ok(())
+}
+
+/// Cancellation-safe framing: retained partial bytes survive select! ticks,
+/// and the size bound is enforced before extending the buffer.
+async fn next_peer_line<R: tokio::io::AsyncRead + Unpin>(
+    reader: &mut BufReader<R>, pending: &mut Vec<u8>,
+) -> std::io::Result<Option<String>> {
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            if pending.is_empty() { return Ok(None); }
+            break;
+        }
+        let end = available.iter().position(|byte| *byte == b'\n');
+        let count = end.map_or(available.len(), |i| i + 1);
+        if pending.len() + count > 1_048_577 {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "peer message exceeds 1 MiB"));
+        }
+        pending.extend_from_slice(&available[..count]);
+        reader.consume(count);
+        if end.is_some() { break; }
+    }
+    let mut bytes = std::mem::take(pending);
+    if bytes.last() == Some(&b'\n') { bytes.pop(); }
+    String::from_utf8(bytes).map(Some)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
 }
 
 fn validated_observations(
@@ -2429,6 +2467,24 @@ mod tests {
             capabilities: Vec::new(),
             interfaces: Vec::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn peer_framing_bounds_and_cancellation() {
+        let (mut writer, stream) = tokio::io::duplex(64);
+        let mut reader = BufReader::new(stream);
+        let mut pending = Vec::new();
+        writer.write_all(b"partial").await.unwrap();
+        assert!(tokio::time::timeout(Duration::from_millis(10),
+            next_peer_line(&mut reader, &mut pending)).await.is_err());
+        assert_eq!(pending, b"partial");
+        writer.write_all(b" complete\nnext\n").await.unwrap();
+        assert_eq!(next_peer_line(&mut reader, &mut pending).await.unwrap().unwrap(), "partial complete");
+        assert_eq!(next_peer_line(&mut reader, &mut pending).await.unwrap().unwrap(), "next");
+        let oversized = vec![b'x'; 1_048_578];
+        let mut reader = BufReader::new(&oversized[..]);
+        assert!(next_peer_line(&mut reader, &mut pending).await.is_err());
+        assert!(pending.len() <= 1_048_577);
     }
 
     fn test_dir(name: &str) -> std::path::PathBuf {

@@ -11,6 +11,9 @@ The project boundary is documented in [the Unix-style scope audit](docs/scope-au
 Mycelium owns access, trusted self-updates, topology, resource observation, and
 movement detection; adjacent systems remain replaceable adapters.
 
+Optional [Iroh peer sync](docs/iroh-sync.md) carries existing authenticated
+gossip over QUIC, with expiring public rendezvous QR codes for enrolled peers.
+
 Desired state follows one boundary: intent produces read-only proposals, and
 supported proposals lower into the single vendor-neutral `ActionPlan` executor.
 Applied plans have canonical identities and durable per-action receipts. See

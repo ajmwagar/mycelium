@@ -5,11 +5,15 @@ edition.workspace = true
 license.workspace = true
 description = "mycelium control-plane CLI: talks to myceliumd over its Unix socket"
 
+[features]
+iroh-sync = ["myceliumd/iroh-sync", "dep:qrcode"]
+
 [[bin]]
 name = "mycelium"
 path = "src/main.rs"
 
 [dependencies]
+qrcode = { version = "0.14", default-features = false, optional = true }
 mycelium-core.workspace = true
 mycelium-driver-netgear-fastpath = { path = "../mycelium-driver-netgear-fastpath" }
 myceliumd.workspace = true
