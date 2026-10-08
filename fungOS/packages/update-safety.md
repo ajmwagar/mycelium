@@ -452,3 +452,33 @@ Darwin daemon qualification passed: 112 tests passed, one child-process fixture
 ignored, and no failures.
 Unseeded download, unaided successful activation, and prompt rollback readiness
 remain unqualified. No production fleet rollout was performed.
+
+### Peer duplex repair (2026-10-07)
+
+Peer gossip previously awaited socket writes inside its receive loop. Two peers
+sending snapshots at once could fill both socket buffers and stop draining each
+other, stalling artifact requests too. Peer connections now have an independent
+writer task. Queued and in-flight bytes share an 8 MiB budget per connection;
+queue exhaustion or a 30-second write timeout fails the connection explicitly
+and normal reconnect/digest exchange resumes synchronization. Disconnect aborts
+the writer. Signing, authorization, artifact bounds and final hash verification
+are unchanged. This is a transport fix, not a new protocol or update authority.
+
+Darwin qualification passed 114 daemon tests (one child fixture ignored),
+including simultaneous 256 KiB writes through 1 KiB duplex buffers, bounded
+backlog failure and writer cleanup. Signed development release 0.1.35 activated
+on Neo through native `update apply`, with installed SHA-256
+`13be0abcc28c157d834ea61932cd232ebd676a340fcd20d5767bf860742afbb6`.
+Launchd PID 20674 served 21 peers in approximately 50 ms and 17 service
+observations in approximately 42 ms. Peer key, transport certificate/key and
+SSH public-key hashes were unchanged. The existing ten-second readiness budget
+was not extended.
+
+For an unseeded qualification, publish a signed release to a dedicated channel,
+confirm its digest is absent on the recipient, and enable that channel's policy
+with explicit minimum age, rollout window and retry backoff. Observe the partial
+file and `update.log`; do not copy artifacts or kickstart the updater. Verify the
+installed digest, supervisor PID, RPC/SSH and retained identity after activation.
+If qualification stalls, disable the test policy and boot out only its updater
+job, retaining partial bytes for diagnosis. A timer running or a manifest arriving
+alone does not prove successful automatic activation.

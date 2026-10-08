@@ -1545,7 +1545,8 @@ struct PeerWriter {
 impl PeerWriter {
     fn new<W: tokio::io::AsyncWrite + Unpin + Send + 'static>(mut writer: W) -> Self {
         let (queue, mut receiver) = tokio::sync::mpsc::unbounded_channel::<(
-            Vec<u8>, tokio::sync::OwnedSemaphorePermit,
+            Vec<u8>,
+            tokio::sync::OwnedSemaphorePermit,
         )>();
         let task = tokio::spawn(async move {
             while let Some((bytes, _permit)) = receiver.recv().await {
@@ -1554,25 +1555,38 @@ impl PeerWriter {
                     writer.flush().await
                 })
                 .await
-                .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "peer write timed out"))??;
+                .map_err(|_| {
+                    std::io::Error::new(std::io::ErrorKind::TimedOut, "peer write timed out")
+                })??;
             }
             Ok(())
         });
-        Self { queue, budget: Arc::new(tokio::sync::Semaphore::new(PEER_WRITE_BUFFER_BYTES)), task }
+        Self {
+            queue,
+            budget: Arc::new(tokio::sync::Semaphore::new(PEER_WRITE_BUFFER_BYTES)),
+            task,
+        }
     }
 
     fn enqueue(&self, mut bytes: Vec<u8>) -> Result<(), AnyError> {
         bytes.push(b'\n');
         let count = u32::try_from(bytes.len())?;
-        let permit = self.budget.clone().try_acquire_many_owned(count)
+        let permit = self
+            .budget
+            .clone()
+            .try_acquire_many_owned(count)
             .map_err(|_| "peer write queue exceeds 8 MiB; reconnecting")?;
-        self.queue.send((bytes, permit)).map_err(|_| "peer writer unavailable")?;
+        self.queue
+            .send((bytes, permit))
+            .map_err(|_| "peer writer unavailable")?;
         Ok(())
     }
 }
 
 impl Drop for PeerWriter {
-    fn drop(&mut self) { self.task.abort(); }
+    fn drop(&mut self) {
+        self.task.abort();
+    }
 }
 
 async fn send(
