@@ -1,5 +1,62 @@
 # Update safety
 
+## Managed startup, status and reboot recovery, 2026-10-07
+
+Mycelium now recognizes its installed systemd or launchd service by the exact
+state directory. Implicit CLI startup waits for the supervisor rather than
+starting a competing detached daemon. Explicit detached startup refuses a
+managed home and directs the operator to its installed service. Standalone
+publisher/test homes retain autostart.
+
+`software status` derives live observations from the installed policy.
+Downloading includes durable partial-byte progress. Waiting explains manual
+activation, initial installation, missing native binding, dependency linkage,
+or cache-age/rollout/retry gates. Status and automatic activation share the
+same eligibility deadline calculation. A previous rollback is retained in
+`last_activation`, separately from present health. Old receipts default to
+no asserted rollback; malformed receipts fail visibly.
+
+Activation outcome writes are synced while holding the package lock, before
+clearing a successfully completed or rolled-back checkpoint. Recovery likewise
+persists its receipt before clearing the checkpoint. Artifact partial-file
+creation and final promotion sync their directory, and chunk bounds reject
+integer overflow.
+
+The disposable, no-NIC QEMU qualification on Agora interrupts activation with
+SIGKILL after switching the current link, then reboots its persistent disk.
+It requires the guarded DMI identity, runtime marker and exact proof directory.
+A changed Linux boot ID proves an actual reboot. The second boot resumes the
+persisted partial download, verifies its complete digest, restores the previous
+release, verifies the lifecycle fixture, and checks the durable rollback receipt
+before powering off. This is a production persistence/recovery test with a
+lifecycle fixture, not proof of a real application health check, network download
+session, whole-set rollback, published image or fleet deployment.
+
+Manual runbook: build the musl daemon test executable on Agora; install it into
+a clone of the disposable proof disk; boot that clone without a network adapter
+using the proof unit and marked DMI identity; confirm the SIGKILL, download-resume
+and recovery markers on opposite sides of a reboot; then mount the powered-off
+disk read-only and inspect the previous current link, rollback receipt and absent
+checkpoint. Keep the original disk and edge/TV guests untouched.
+
+Final qualification evidence on Agora:
+
+- `fungos-update-safety-final-20261007.service`: inactive, result `success`.
+- Markers: `FUNGOS_UPDATE_SIGKILL_CHECKPOINTED`,
+  `FUNGOS_DOWNLOAD_REBOOT_RESUME_VERIFIED`,
+  `FUNGOS_UPDATE_REBOOT_RECOVERY_VERIFIED`; guest test: 1 passed.
+- Restored link: `releases/1.0.0`; receipt: `rolled_back: true`,
+  `verified_service: true`; pending checkpoint absent.
+- Console: `/home/ajmwagar/.cache/fungos-update-safety-20261007/console-final.log`,
+  SHA-256 `04bdbc197e4ed07b12bc8ae08d560e52536d41cb258c29a1cbb18dc146d294ee`.
+- Musl test executable SHA-256:
+  `c99f696152076189d791abffd1a6bd1d417997566d2ff243707774f50980a51a`.
+- Agora: 107 daemon tests passed, 2 deliberately ignored fixtures; 59 CLI
+  tests passed. Test processes require cache-local `TMPDIR`: the initial musl
+  test run hit Agora's existing `/tmp` quota; the correctly scoped rerun passed.
+
+These artifacts are private qualification evidence, not published releases.
+
 ## Rebuilt runtime boot qualification, 2026-10-07
 
 The rebuilt edge runtime (`0ff4db1c182e47a06ed812b09e10b1235db26af9fb7f8979590ded84696cec32`)

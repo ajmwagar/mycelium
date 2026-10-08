@@ -384,7 +384,11 @@ mycelium software activate unibus --channel stable --write
 observation; it does not activate packages. `downloading` includes received
 and signed total bytes. `current` means the signed installed bytes match and
 any configured native service passes its health check; `drifted` includes
-the failure reason. `ready` means staged, not activated or service-healthy.
+the failure reason. `waiting` explains manual installation, missing health
+bindings, dependency gates or rollout/backoff timing; `eligible_at` is a Unix
+timestamp. `ready` means staged and eligible, not activated or service-healthy.
+`last_activation.rolled_back` reports restoration separately from current
+health, including after a reboot. Legacy receipts do not imply rollback.
 Missing or invalid policy is an error, not an empty healthy report.
 
 Installed systemd/launchd peers are owned by their service manager. CLI

@@ -107,6 +107,7 @@ pub enum PackageState {
     AwaitingArtifact,
     Downloading,
     Ready,
+    Waiting,
     Current,
     Drifted,
     Updated,
@@ -127,7 +128,37 @@ pub struct PackageStatus {
     pub download_bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eligible_at: Option<u64>,
+    /// Last activation outcome is separate from current health.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_activation: Option<ActivationOutcome>,
 }
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActivationOutcome {
+    pub version: Option<String>,
+    pub digest: Option<String>,
+    pub verified_service: bool,
+    pub error: Option<String>,
+    #[serde(default)]
+    pub rolled_back: bool,
+}
+
+#[derive(Debug)]
+struct RolledBack(String);
+impl std::fmt::Display for RolledBack {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "activation failed and previous version restored: {}",
+            self.0
+        )
+    }
+}
+impl std::error::Error for RolledBack {}
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct AutomaticState {
@@ -451,6 +482,48 @@ pub fn reconcile(
             },
         ));
     }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs();
+    let automatic = read_automatic_state();
+    for observed in &mut statuses {
+        observed.last_activation =
+            read_activation_outcome(&crate::software_dir().join(&observed.package))?;
+        if observed.state != PackageState::Ready {
+            continue;
+        }
+        let assignment = assignments
+            .iter()
+            .find(|item| item.package == observed.package)
+            .ok_or("status lost its assignment")?;
+        let reason = if matches!(assignment.updates, UpdatePolicy::Manual) {
+            Some("manual activation required".to_owned())
+        } else if linked.contains(&assignment.package) {
+            Some("dependency-linked updates require explicit reconcile".to_owned())
+        } else if observed.installed_version.is_none() {
+            Some("initial installation requires explicit reconcile".to_owned())
+        } else if crate::software_service::binding(&assignment.package)?.is_none() {
+            Some("automatic activation requires a local native health binding".to_owned())
+        } else {
+            let manifest = select(manifests, &assignment.package, &assignment.channel, targets)
+                .ok_or("status lost its manifest")?;
+            let metadata =
+                std::fs::metadata(crate::artifacts_dir().join(&manifest.artifact_digest))?;
+            let cached_at = metadata
+                .modified()?
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_secs();
+            let eligible_at =
+                automatic_deadline(assignment, &assignment.node_id, cached_at, &automatic)
+                    .ok_or("automatic policy expected")?;
+            observed.eligible_at = Some(eligible_at);
+            (now < eligible_at).then(|| "cache-age, rollout or retry-backoff gate".to_owned())
+        };
+        if let Some(reason) = reason {
+            observed.state = PackageState::Waiting;
+            observed.waiting_reason = Some(reason);
+        }
+    }
     if write {
         write_statuses(&statuses)?;
     }
@@ -557,6 +630,9 @@ fn status(
         drift: None,
         download_bytes: None,
         artifact_bytes: None,
+        waiting_reason: None,
+        eligible_at: None,
+        last_activation: None,
     }
 }
 
@@ -659,14 +735,9 @@ pub fn automatic_assignments(
             if linked.contains(&assignment.package) {
                 return false;
             }
-            let UpdatePolicy::Automatic {
-                minimum_cache_age_secs,
-                rollout_window_secs,
-                retry_backoff_secs,
-            } = assignment.updates
-            else {
+            if !matches!(assignment.updates, UpdatePolicy::Automatic { .. }) {
                 return false;
-            };
+            }
             let Some(installed) = installed_version(&assignment.package) else {
                 return false;
             };
@@ -700,25 +771,63 @@ pub fn automatic_assignments(
                 .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
                 .map(|value| value.as_secs())
                 .unwrap_or(now);
-            let digest = sha256_hex(format!("{node_id}\0{}", assignment.package).as_bytes());
-            let offset =
-                u64::from_str_radix(&digest[..16], 16).unwrap_or_default() % rollout_window_secs;
-            let eligible_at = cached_at
-                .saturating_add(minimum_cache_age_secs)
-                .saturating_add(offset);
-            let retry_at = state
-                .last_attempts
-                .get(&assignment.package)
-                .copied()
-                .unwrap_or_default()
-                .saturating_add(retry_backoff_secs);
-            if now < eligible_at || now < retry_at {
+            let eligible_at = automatic_deadline(assignment, node_id, cached_at, state)
+                .expect("automatic policy");
+            if now < eligible_at {
                 return false;
             }
             state.last_attempts.insert(assignment.package.clone(), now);
             true
         })
         .collect()
+}
+
+fn automatic_deadline(
+    assignment: &SoftwareAssignment,
+    node_id: &str,
+    cached_at: u64,
+    state: &AutomaticState,
+) -> Option<u64> {
+    let UpdatePolicy::Automatic {
+        minimum_cache_age_secs,
+        rollout_window_secs,
+        retry_backoff_secs,
+    } = assignment.updates
+    else {
+        return None;
+    };
+    let digest = sha256_hex(format!("{node_id}\0{}", assignment.package).as_bytes());
+    let offset = if rollout_window_secs == 0 {
+        0
+    } else {
+        u64::from_str_radix(&digest[..16], 16).expect("SHA-256 hex") % rollout_window_secs
+    };
+    let eligible = cached_at
+        .saturating_add(minimum_cache_age_secs)
+        .saturating_add(offset);
+    let retry = state
+        .last_attempts
+        .get(&assignment.package)
+        .copied()
+        .unwrap_or_default()
+        .saturating_add(retry_backoff_secs);
+    Some(eligible.max(retry))
+}
+
+fn read_activation_outcome(directory: &Path) -> Result<Option<ActivationOutcome>, AnyError> {
+    match std::fs::read(directory.join("last-activation.json")) {
+        Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn write_activation_outcome(directory: &Path, outcome: &ActivationOutcome) -> Result<(), AnyError> {
+    let temporary = directory.join(".last-activation.tmp");
+    std::fs::write(&temporary, serde_json::to_vec_pretty(outcome)?)?;
+    std::fs::File::open(&temporary)?.sync_all()?;
+    std::fs::rename(temporary, directory.join("last-activation.json"))?;
+    sync_directory(directory)
 }
 
 pub fn read_automatic_state() -> AutomaticState {
@@ -752,27 +861,14 @@ fn compare_versions(left: &str, right: &str) -> Ordering {
 pub fn activate(manifest: &PackageManifest) -> Result<ActivatedPackage, AnyError> {
     validate_label("package", &manifest.name)?;
     let binding = crate::software_service::binding(&manifest.name)?;
-    let result = activate_transaction(
+    activate_transaction(
         manifest,
         &crate::artifacts_dir(),
         &crate::software_dir(),
         binding
             .as_ref()
             .map(|binding| binding as &dyn crate::software_service::Lifecycle),
-    );
-    let directory = crate::software_dir().join(&manifest.name);
-    std::fs::create_dir_all(&directory)?;
-    let temporary = directory.join(".last-activation.tmp");
-    std::fs::write(
-        &temporary,
-        serde_json::to_vec_pretty(&serde_json::json!({
-            "version": manifest.version, "digest": manifest.artifact_digest,
-            "verified_service": binding.is_some() && result.is_ok(),
-            "error": result.as_ref().err().map(ToString::to_string)
-        }))?,
-    )?;
-    std::fs::rename(temporary, directory.join("last-activation.json"))?;
-    result
+    )
 }
 
 #[cfg(test)]
@@ -798,110 +894,132 @@ fn activate_transaction(
     let package_dir = software.join(&manifest.name);
     std::fs::create_dir_all(&package_dir)?;
     let _lock = activation_lock(&package_dir)?;
-    recover_activation(&package_dir, &manifest.name, lifecycle)?;
-    let current = package_dir.join("current");
-    let previous = match std::fs::read_link(&current) {
-        Ok(previous) => Some(previous),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => return Err(error.into()),
-    };
-    if let Some(previous) = &previous {
-        let components: Vec<_> = previous.components().collect();
-        if components.len() != 2
-            || components[0].as_os_str() != "releases"
-            || !matches!(components[1], std::path::Component::Normal(_))
+    let result = (|| -> Result<ActivatedPackage, AnyError> {
+        recover_activation(&package_dir, &manifest.name, lifecycle)?;
+        let current = package_dir.join("current");
+        let previous = match std::fs::read_link(&current) {
+            Ok(previous) => Some(previous),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        if let Some(previous) = &previous {
+            let components: Vec<_> = previous.components().collect();
+            if components.len() != 2
+                || components[0].as_os_str() != "releases"
+                || !matches!(components[1], std::path::Component::Normal(_))
+            {
+                return Err("current package link is not an internal release".into());
+            }
+        }
+        let artifact = artifacts.join(&manifest.artifact_digest);
+        let bytes = std::fs::read(&artifact).map_err(|error| {
+            format!(
+                "package artifact {} is not cached: {error}",
+                manifest.artifact_digest
+            )
+        })?;
+        if bytes.len() as u64 != manifest.artifact_size
+            || sha256_hex(&bytes) != manifest.artifact_digest
         {
-            return Err("current package link is not an internal release".into());
+            return Err("cached package artifact does not match signed manifest".into());
         }
-    }
-    let artifact = artifacts.join(&manifest.artifact_digest);
-    let bytes = std::fs::read(&artifact).map_err(|error| {
-        format!(
-            "package artifact {} is not cached: {error}",
-            manifest.artifact_digest
-        )
-    })?;
-    if bytes.len() as u64 != manifest.artifact_size
-        || sha256_hex(&bytes) != manifest.artifact_digest
-    {
-        return Err("cached package artifact does not match signed manifest".into());
-    }
-    let release_dir = software
-        .join(&manifest.name)
-        .join("releases")
-        .join(&manifest.version);
-    std::fs::create_dir_all(&release_dir)?;
-    let executable = release_dir.join(&manifest.name);
-    if executable.exists() {
-        if sha256_hex(&std::fs::read(&executable)?) != manifest.artifact_digest {
-            return Err(
-                "refusing to overwrite an immutable package version with different bytes".into(),
-            );
+        let release_dir = software
+            .join(&manifest.name)
+            .join("releases")
+            .join(&manifest.version);
+        std::fs::create_dir_all(&release_dir)?;
+        let executable = release_dir.join(&manifest.name);
+        if executable.exists() {
+            if sha256_hex(&std::fs::read(&executable)?) != manifest.artifact_digest {
+                return Err(
+                    "refusing to overwrite an immutable package version with different bytes"
+                        .into(),
+                );
+            }
+        } else {
+            let temporary =
+                release_dir.join(format!(".{}.tmp-{}", manifest.name, std::process::id()));
+            std::fs::write(&temporary, bytes)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o755))?;
+            }
+            std::fs::File::open(&temporary)?.sync_all()?;
+            std::fs::rename(&temporary, &executable)?;
+            sync_directory(&release_dir)?;
+            sync_directory(&package_dir.join("releases"))?;
         }
-    } else {
-        let temporary = release_dir.join(format!(".{}.tmp-{}", manifest.name, std::process::id()));
-        std::fs::write(&temporary, bytes)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o755))?;
-        }
-        std::fs::File::open(&temporary)?.sync_all()?;
-        std::fs::rename(&temporary, &executable)?;
-        sync_directory(&release_dir)?;
-        sync_directory(&package_dir.join("releases"))?;
-    }
-    let previous_digest = previous
-        .as_ref()
-        .map(|path| {
-            std::fs::read(package_dir.join(path).join(&manifest.name))
-                .map(|bytes| sha256_hex(&bytes))
-        })
-        .transpose()?;
-    let advance = || {
-        switch_current(
-            &package_dir,
-            Some(&Path::new("releases").join(&manifest.version)),
-        )
-    };
-    if let Some(lifecycle) = lifecycle {
-        lifecycle.preflight(&current.join(&manifest.name))?;
-        persist_activation(
-            &package_dir,
-            &PendingActivation {
-                previous: previous.clone(),
-                previous_digest: previous_digest.clone(),
-            },
-        )?;
-        lifecycle.stop()?;
-        let applied = advance()
-            .and_then(|()| lifecycle.start())
-            .and_then(|()| lifecycle.verify(&manifest.artifact_digest));
-        if let Err(error) = applied {
-            lifecycle.stop().map_err(|rollback| {
-                format!(
+        let previous_digest = previous
+            .as_ref()
+            .map(|path| {
+                std::fs::read(package_dir.join(path).join(&manifest.name))
+                    .map(|bytes| sha256_hex(&bytes))
+            })
+            .transpose()?;
+        let advance = || {
+            switch_current(
+                &package_dir,
+                Some(&Path::new("releases").join(&manifest.version)),
+            )
+        };
+        if let Some(lifecycle) = lifecycle {
+            lifecycle.preflight(&current.join(&manifest.name))?;
+            persist_activation(
+                &package_dir,
+                &PendingActivation {
+                    previous: previous.clone(),
+                    previous_digest: previous_digest.clone(),
+                },
+            )?;
+            lifecycle.stop()?;
+            let applied = advance()
+                .and_then(|()| lifecycle.start())
+                .and_then(|()| lifecycle.verify(&manifest.artifact_digest));
+            if let Err(error) = applied {
+                lifecycle.stop().map_err(|rollback| {
+                    format!(
                     "activation failed: {error}; could not stop candidate for rollback: {rollback}"
                 )
-            })?;
-            switch_current(&package_dir, previous.as_deref())?;
-            if let Some(digest) = previous_digest {
-                lifecycle.start().and_then(|()| lifecycle.verify(&digest))
+                })?;
+                switch_current(&package_dir, previous.as_deref())?;
+                if let Some(digest) = previous_digest {
+                    lifecycle.start().and_then(|()| lifecycle.verify(&digest))
                     .map_err(|rollback| format!("activation failed: {error}; previous link restored but recovery failed: {rollback}"))?;
+                }
+                return Err(Box::new(RolledBack(error.to_string())));
             }
-            clear_activation(&package_dir)?;
-            return Err(format!("activation failed and previous version restored: {error}").into());
+        } else {
+            advance()?;
         }
+        Ok(ActivatedPackage {
+            name: manifest.name.clone(),
+            version: manifest.version.clone(),
+            target: manifest.target.clone(),
+            digest: manifest.artifact_digest.clone(),
+            executable,
+        })
+    })();
+    let rolled_back = result
+        .as_ref()
+        .err()
+        .is_some_and(|error| error.is::<RolledBack>());
+    // Keep the outcome and checkpoint under the same package lock. A crash
+    // before this receipt is durable leaves recovery evidence intact.
+    write_activation_outcome(
+        &package_dir,
+        &ActivationOutcome {
+            version: Some(manifest.version.clone()),
+            digest: Some(manifest.artifact_digest.clone()),
+            verified_service: lifecycle.is_some() && result.is_ok(),
+            error: result.as_ref().err().map(ToString::to_string),
+            rolled_back,
+        },
+    )?;
+    if (result.is_ok() || rolled_back) && package_dir.join("activation-pending.json").exists() {
         clear_activation(&package_dir)?;
-    } else {
-        advance()?;
     }
-    Ok(ActivatedPackage {
-        name: manifest.name.clone(),
-        version: manifest.version.clone(),
-        target: manifest.target.clone(),
-        digest: manifest.artifact_digest.clone(),
-        executable,
-    })
+    result
 }
 
 /// Written and synced before any disruptive action. Recovery deliberately
@@ -1047,10 +1165,24 @@ fn recover_activation(
     lifecycle.preflight(&directory.join("current").join(name))?;
     lifecycle.stop()?;
     switch_current(directory, pending.previous.as_deref())?;
-    if let Some(digest) = pending.previous_digest {
+    if let Some(digest) = &pending.previous_digest {
         lifecycle.start()?;
-        lifecycle.verify(&digest)?;
+        lifecycle.verify(digest)?;
     }
+    write_activation_outcome(
+        directory,
+        &ActivationOutcome {
+            version: pending
+                .previous
+                .as_ref()
+                .and_then(|path| path.file_name())
+                .map(|name| name.to_string_lossy().into_owned()),
+            digest: pending.previous_digest,
+            verified_service: pending.previous.is_some(),
+            error: None,
+            rolled_back: true,
+        },
+    )?;
     clear_activation(directory)
 }
 
@@ -1112,6 +1244,43 @@ fn validate_update_policy(policy: &UpdatePolicy) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn eligibility_deadline_combines_stable_rollout_and_retry_without_drift() {
+        let assignment = SoftwareAssignment {
+            node_id: "node".into(),
+            hostname: "test".into(),
+            package: "unibus".into(),
+            channel: "stable".into(),
+            updates: UpdatePolicy::Automatic {
+                minimum_cache_age_secs: 60,
+                rollout_window_secs: 300,
+                retry_backoff_secs: 120,
+            },
+            rules: BTreeSet::new(),
+            requires: BTreeMap::new(),
+        };
+        let mut state = AutomaticState::default();
+        let first = automatic_deadline(&assignment, "node", 1_000, &state).unwrap();
+        assert!((1_060..1_360).contains(&first));
+        assert_eq!(
+            automatic_deadline(&assignment, "node", 1_000, &state),
+            Some(first)
+        );
+        state.last_attempts.insert("unibus".into(), 2_000);
+        assert_eq!(
+            automatic_deadline(&assignment, "node", 1_000, &state),
+            Some(2_120)
+        );
+    }
+
+    #[test]
+    fn legacy_activation_receipt_is_not_misreported_as_rollback() {
+        let outcome: ActivationOutcome = serde_json::from_str(
+            r#"{"version":"1.0","digest":"abc","verified_service":true,"error":null}"#,
+        )
+        .unwrap();
+        assert!(!outcome.rolled_back);
+    }
     #[test]
     fn download_status_reads_disk_progress_and_rejects_oversize_partials() {
         let (root, artifacts, _, manifest, _) = activation_fixture();
@@ -1770,6 +1939,21 @@ mod tests {
         let (root, artifacts, software, previous, _) = activation_fixture();
         let directory = software.join("unibus");
         if !directory.join("activation-pending.json").exists() {
+            let download = root.join("reboot-download").join(&previous.artifact_digest);
+            crate::peer::store_artifact_chunk(
+                &download,
+                &previous.artifact_digest,
+                4,
+                0,
+                b"go",
+                false,
+            )
+            .unwrap();
+            let boot = std::fs::read("/proc/sys/kernel/random/boot_id").unwrap();
+            let first_boot = root.join("first-boot-id");
+            std::fs::write(&first_boot, boot).unwrap();
+            std::fs::File::open(first_boot).unwrap().sync_all().unwrap();
+            sync_directory(&root).unwrap();
             activate_from(&previous, &artifacts, &software).unwrap();
             let status = std::process::Command::new(std::env::current_exe().unwrap())
                 .args([
@@ -1795,6 +1979,19 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_secs(15));
             panic!("guest did not reboot");
         }
+        assert_ne!(
+            std::fs::read(root.join("first-boot-id")).unwrap(),
+            std::fs::read("/proc/sys/kernel/random/boot_id").unwrap()
+        );
+        let download = root.join("reboot-download").join(&previous.artifact_digest);
+        assert_eq!(
+            std::fs::read(download.with_extension("part")).unwrap(),
+            b"go"
+        );
+        crate::peer::store_artifact_chunk(&download, &previous.artifact_digest, 4, 2, b"od", true)
+            .unwrap();
+        assert_eq!(std::fs::read(&download).unwrap(), b"good");
+        println!("FUNGOS_DOWNLOAD_REBOOT_RESUME_VERIFIED");
         assert_eq!(
             std::fs::read_link(directory.join("current")).unwrap(),
             Path::new("releases/1.1.0")
@@ -1809,6 +2006,9 @@ mod tests {
             b"good"
         );
         assert!(!directory.join("activation-pending.json").exists());
+        let outcome = read_activation_outcome(&directory).unwrap().unwrap();
+        assert!(outcome.rolled_back && outcome.verified_service);
+        assert_eq!(outcome.version.as_deref(), Some("1.0.0"));
         assert_eq!(
             *native.calls.borrow(),
             ["preflight", "stop", "start", "verify"]
@@ -1832,6 +2032,7 @@ mod tests {
         let error =
             activate_transaction(&candidate, &artifacts, &software, Some(&native)).unwrap_err();
         assert!(error.to_string().contains("previous version restored"));
+        assert!(error.is::<RolledBack>());
         assert_eq!(
             std::fs::read(software.join("unibus/current/unibus")).unwrap(),
             b"good"

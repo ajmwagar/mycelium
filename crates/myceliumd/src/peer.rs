@@ -2054,7 +2054,7 @@ fn accept_artifact_chunk(
     store_artifact_chunk(&destination, digest, signed_bounds, offset, &data, complete)
 }
 
-fn store_artifact_chunk(
+pub(crate) fn store_artifact_chunk(
     destination: &std::path::Path,
     digest: &str,
     signed_bounds: u64,
