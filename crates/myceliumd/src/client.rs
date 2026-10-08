@@ -95,7 +95,9 @@ impl Client {
         // startup or mesh work. A timeout is not evidence that a write failed.
         let deadline = match req {
             Request::Hello => Some(Duration::from_secs(10)),
-            Request::PackagePublish { .. } => Some(Duration::from_secs(60)),
+            Request::PackagePublish { .. }
+            | Request::ReleasePublish { .. }
+            | Request::ReleasePublishSet { .. } => Some(Duration::from_secs(60)),
             _ => None,
         };
         if let Some(deadline) = deadline {

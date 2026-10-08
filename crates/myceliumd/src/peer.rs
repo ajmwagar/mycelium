@@ -868,22 +868,30 @@ impl Mesh {
         validate_release_label("channel", &channel)?;
         let target = target.unwrap_or_else(local_build_target);
         validate_release_label("target", &target)?;
-        let bytes = std::fs::read(binary)?;
-        let key_bytes = std::fs::read(signing_key)?;
-        let key = SigningKey::from_bytes(
-            key_bytes
-                .as_slice()
-                .try_into()
-                .map_err(|_| "release signing key must be exactly 32 bytes")?,
-        );
-        let release = ReleaseManifest::sign(&key, version, channel, target, &bytes)?;
-        std::fs::create_dir_all(crate::artifacts_dir())?;
-        let final_path = artifact_path(&release.artifact_digest)?;
-        if !final_path.is_file() {
-            let temp = final_path.with_extension("tmp");
-            std::fs::write(&temp, &bytes)?;
-            std::fs::rename(temp, &final_path)?;
-        }
+        let binary = binary.to_owned();
+        let signing_key = signing_key.to_owned();
+        // Reading/hashing large binaries and writing the cache must not occupy
+        // a Tokio worker needed by control RPCs and peer distribution.
+        let release = tokio::task::spawn_blocking(move || -> Result<ReleaseManifest, AnyError> {
+            let bytes = std::fs::read(binary)?;
+            let key_bytes = std::fs::read(signing_key)?;
+            let key = SigningKey::from_bytes(
+                key_bytes
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| "release signing key must be exactly 32 bytes")?,
+            );
+            let release = ReleaseManifest::sign(&key, version, channel, target, &bytes)?;
+            std::fs::create_dir_all(crate::artifacts_dir())?;
+            let final_path = artifact_path(&release.artifact_digest)?;
+            if !final_path.is_file() {
+                let temp = final_path.with_extension("tmp");
+                std::fs::write(&temp, &bytes)?;
+                std::fs::rename(temp, &final_path)?;
+            }
+            Ok(release)
+        })
+        .await??;
         self.publish_release(release.clone()).await?;
         Ok(release)
     }

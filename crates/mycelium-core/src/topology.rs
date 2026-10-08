@@ -430,7 +430,21 @@ pub struct Topology {
     pub resource_attachments:
         BTreeMap<fpl_resource_observation::ResourceId, fpl_resource_observation::Attachment>,
     pub conflicts: Vec<Conflict>,
+    #[serde(deserialize_with = "unique_origins")]
     pub updated_from: Vec<Origin>,
+}
+
+// Provenance is a set of sources, not a history entry for every scan. Normalize
+// legacy snapshots at the boundary without changing their on-wire array shape.
+fn unique_origins<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<Origin>, D::Error> {
+    let origins = Vec::<Origin>::deserialize(deserializer)?;
+    Ok(origins
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect())
 }
 
 fn origin_key(o: &Origin) -> String {
@@ -519,11 +533,12 @@ impl Topology {
                 self.conflicts.push(conflict);
             }
         }
-        for origin in other.updated_from {
-            if !self.updated_from.contains(&origin) {
-                self.updated_from.push(origin);
-            }
-        }
+        self.updated_from = std::mem::take(&mut self.updated_from)
+            .into_iter()
+            .chain(other.updated_from)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
     }
 
     pub fn observe_all(&mut self, obs: impl IntoIterator<Item = Observation>) -> TopologyReport {
@@ -1099,7 +1114,9 @@ impl Topology {
                 }
             }
         }
-        self.updated_from.push(obs_origin);
+        if !self.updated_from.contains(&obs_origin) {
+            self.updated_from.push(obs_origin);
+        }
     }
 
     fn device_node(
@@ -1465,6 +1482,19 @@ mod tests {
         };
         topo.observe_all([lease.clone(), lease]);
         assert_eq!(topo.leases.len(), 1);
+        assert_eq!(topo.updated_from.len(), 1);
+    }
+
+    #[test]
+    fn legacy_provenance_is_normalized_on_load_and_merge() {
+        let origin = Origin::new("node", "arp").at_site("site");
+        let mut legacy = Topology::empty();
+        legacy.updated_from = vec![origin.clone(); 1000];
+        let loaded: Topology =
+            serde_json::from_value(serde_json::to_value(&legacy).unwrap()).unwrap();
+        assert_eq!(loaded.updated_from, vec![origin.clone()]);
+        legacy.merge_snapshot(loaded);
+        assert_eq!(legacy.updated_from, vec![origin]);
     }
 
     #[test]
