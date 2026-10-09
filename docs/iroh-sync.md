@@ -102,6 +102,18 @@ then verifies the existing fleet CA and certificate SAN; the existing gossip
 stream retains signed envelopes and transport-certificate binding checks.
 No accept-all TLS verifier or new access authority exists.
 
+The runtime also publishes the Iroh endpoint key in a peer-signed transport
+binding. Iroh sessions require both that binding (matched against the actual
+QUIC remote endpoint ID) and the existing TLS certificate fingerprint binding
+before artifact or SSH-renewal exchanges are authorized. Logs report
+`authenticated Iroh peer ... endpoint ...` when both checks succeed. Keys are
+not rotated to establish this relationship. Older peers do not receive the new
+binding kind unless they advertise `transport.iroh-key-binding` support.
+
+This runtime check uses existing signed gossip plus inner mTLS. The portable
+authority-signed membership proofs described in `fleet-identity.md` are not
+yet issued by enrollment and do not replace mTLS.
+
 `iroh-sync.json` is strict, bounded JSON, with at most 32 unique seeds:
 
 ```json

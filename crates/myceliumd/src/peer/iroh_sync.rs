@@ -171,6 +171,9 @@ pub(super) async fn start(mesh: Arc<Mesh>, tls: &TlsSettings) -> Result<(), AnyE
         builder.relay_mode(iroh::RelayMode::Disabled)
     };
     let endpoint = builder.bind().await?;
+    let mut hello = mesh.local_hello().await;
+    hello.capabilities.push("transport.iroh-key-binding".into());
+    mesh.publish(PeerEvent::Hello(hello)).await?;
     mesh.publish(PeerEvent::Transport(TransportCredentialBinding {
         node_id: mesh.hello.node_id.clone(),
         kind: TransportKind::Iroh,
@@ -311,6 +314,12 @@ mod tests {
             node_id: mesh.node_id().to_owned(), kind: TransportKind::Iroh,
             public_key: endpoint.clone(), generation: 1, valid_until: None,
         })).await.unwrap();
+        let binding = PeerEvent::Transport(TransportCredentialBinding {
+            node_id: mesh.node_id().to_owned(), kind: TransportKind::Iroh,
+            public_key: endpoint.clone(), generation: 1, valid_until: None,
+        });
+        assert!(!transport_event_supported(&binding, false));
+        assert!(transport_event_supported(&binding, true));
         assert!(mesh.has_transport_binding(mesh.node_id(), TransportKind::Iroh, &endpoint).await);
         assert!(!mesh.has_transport_binding(mesh.node_id(), TransportKind::Iroh, &SecretKey::generate().public().to_string()).await);
         assert!(!mesh.has_transport_binding("another-peer", TransportKind::Iroh, &endpoint).await);

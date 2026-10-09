@@ -1183,6 +1183,7 @@ impl Mesh {
         let mut binding_required = self.require_transport_binding || iroh_endpoint.is_some();
         let mut transport_authenticated = false;
         let mut endpoint_published = false;
+        let mut remote_supports_iroh = false;
         loop {
             tokio::select! {
                 result = next_peer_line(&mut reader, &mut pending_line) => {
@@ -1227,6 +1228,7 @@ impl Mesh {
                                 .lock()
                                 .await
                                 .iter()
+                                .filter(|(_, envelope)| transport_event_supported(&envelope.event, remote_supports_iroh))
                                 .filter(|(key, envelope)| {
                                     remote.get(*key).copied().unwrap_or(0) < envelope.sequence
                                 })
@@ -1296,6 +1298,10 @@ impl Mesh {
                             }
                         }
                         PeerMessage::Hello(hello) => {
+                            if remote_identity.as_ref().is_some_and(|identity| identity != &hello.node_id) {
+                                return Err("peer identity changed within authenticated stream".into());
+                            }
+                            remote_supports_iroh = hello.capabilities.iter().any(|capability| capability == "transport.iroh-key-binding");
                             remote_identity = Some(hello.node_id.clone());
                             binding_required = self.require_transport_binding
                                 || iroh_endpoint.is_some()
@@ -1418,6 +1424,10 @@ impl Mesh {
                 (release.version.clone(), preference)
             })
     }
+}
+
+fn transport_event_supported(event: &PeerEvent, iroh: bool) -> bool {
+    iroh || !matches!(event, PeerEvent::Transport(binding) if binding.kind == TransportKind::Iroh)
 }
 
 fn observation_batches(
