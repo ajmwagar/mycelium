@@ -12,6 +12,13 @@ pub fn project(topology: &Topology) -> ServiceCatalog {
         schema_version: SCHEMA_VERSION,
         ..ServiceCatalog::default()
     };
+    for advertisement in topology.advertisements.values() {
+        match crate::local_services::project(advertisement) {
+            Ok(Some(observation)) => catalog.observations.push(observation),
+            Ok(None) => {}
+            Err(error) => eprintln!("application owner lease rejected: {error}"),
+        }
+    }
     #[cfg(feature = "iroh-discovery")]
     for advertisement in topology.advertisements.values() {
         match mycelium_iroh_discovery::project(advertisement) {

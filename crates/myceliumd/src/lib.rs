@@ -33,6 +33,7 @@ pub mod rpc;
 mod security;
 mod service_env;
 pub mod services;
+pub mod local_services;
 pub mod siem;
 pub mod software;
 pub mod software_apt;
