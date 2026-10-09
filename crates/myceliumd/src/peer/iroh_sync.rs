@@ -124,6 +124,25 @@ fn transport_key(path: &std::path::Path) -> Result<SecretKey, AnyError> {
     }
 }
 
+fn portable_addresses(
+    addresses: impl Iterator<Item = std::net::SocketAddr>,
+) -> BTreeSet<std::net::SocketAddr> {
+    let mut addresses: BTreeSet<_> = addresses
+        .filter(|address| match address.ip() {
+            std::net::IpAddr::V4(ip) => !ip.is_link_local(),
+            std::net::IpAddr::V6(ip) => !ip.is_unicast_link_local(),
+        })
+        .collect();
+    if addresses.len() > 16 {
+        eprintln!(
+            "myceliumd: Iroh connection hints bounded to 16 of {} portable addresses",
+            addresses.len()
+        );
+        addresses = addresses.into_iter().take(16).collect();
+    }
+    addresses
+}
+
 pub(super) async fn start(mesh: Arc<Mesh>, tls: &TlsSettings) -> Result<(), AnyError> {
     let home = crate::home_dir();
     let path = home.join("iroh-sync.json");
@@ -228,7 +247,10 @@ pub(super) async fn start(mesh: Arc<Mesh>, tls: &TlsSettings) -> Result<(), AnyE
                     id: "mycelium-sync".into(),
                     endpoint_id: addr.id.to_string(),
                     alpns: BTreeSet::from([String::from_utf8_lossy(ALPN).into_owned()]),
-                    direct_addresses: addr.ip_addrs().copied().collect(),
+                    // Scoped link-local addresses cannot be dialed from a portable
+                    // rendezvous. Container hosts can otherwise overflow the
+                    // bounded discovery contract with per-veth IPv6 addresses.
+                    direct_addresses: portable_addresses(addr.ip_addrs().copied()),
                     relay_urls: addr.relay_urls().map(ToString::to_string).collect(),
                     observed_at: at,
                     expires_at: at + 120,
@@ -260,6 +282,23 @@ pub(super) async fn start(mesh: Arc<Mesh>, tls: &TlsSettings) -> Result<(), AnyE
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn portable_hints_drop_scoped_addresses_and_stay_bounded() {
+        let mut input: Vec<std::net::SocketAddr> = (1..=20)
+            .map(|n| format!("192.168.1.{n}:7443").parse().unwrap())
+            .collect();
+        input.push("[fe80::1]:7443".parse().unwrap());
+        input.push("169.254.1.1:7443".parse().unwrap());
+        let result = portable_addresses(input.into_iter());
+        assert_eq!(result.len(), 16);
+        assert!(result.iter().all(|address| address.ip().is_ipv4()));
+        assert!(!result.contains(&"169.254.1.1:7443".parse().unwrap()));
+        assert_eq!(
+            portable_addresses(["127.0.0.1:7443".parse().unwrap()].into_iter()).len(),
+            1
+        );
+    }
 
     fn rendezvous() -> SyncRendezvous {
         SyncRendezvous {
@@ -392,7 +431,10 @@ mod tests {
                 .await
                 .unwrap();
             // Keep the connection alive until delivery is acknowledged.
-            assert!(next_peer_line(&mut reader, &mut Vec::new()).await.unwrap().is_some());
+            assert!(next_peer_line(&mut reader, &mut Vec::new())
+                .await
+                .unwrap()
+                .is_some());
         });
         let connection = client.connect(server.addr(), ALPN).await.unwrap();
         let (send_stream, recv) = connection.open_bi().await.unwrap();
@@ -416,7 +458,9 @@ mod tests {
             .unwrap()
             .unwrap()
             .contains("ping"));
-        send(reader.get_mut(), &PeerMessage::Ping { sent_at: 2 }).await.unwrap();
+        send(reader.get_mut(), &PeerMessage::Ping { sent_at: 2 })
+            .await
+            .unwrap();
         tokio::time::timeout(HANDSHAKE, task)
             .await
             .unwrap()
