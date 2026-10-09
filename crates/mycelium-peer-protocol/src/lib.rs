@@ -249,6 +249,7 @@ pub enum HardwareKind {
     StorageDevice,
     StorageVolume,
     Accelerator,
+    SecurityModule,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -1110,6 +1111,15 @@ fn decode_array<const N: usize>(text: &str) -> Result<[u8; N], String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn security_module_kind_round_trips() {
+        let encoded = serde_json::to_string(&super::HardwareKind::SecurityModule).unwrap();
+        assert_eq!(encoded, "\"security_module\"");
+        assert_eq!(
+            serde_json::from_str::<super::HardwareKind>(&encoded).unwrap(),
+            super::HardwareKind::SecurityModule
+        );
+    }
     use super::*;
 
     #[test]

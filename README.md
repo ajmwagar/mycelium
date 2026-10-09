@@ -973,6 +973,11 @@ resource contract. Raw USB and PCI nodes are not promoted into usable resources
 until a function probe identifies storage, camera, audio, or another typed
 profile.
 
+Linux inventory also reports registered TPMs as security modules. This is
+read-only presence evidence, not attestation or proof that peer keys are protected.
+See [hardware-backed peer secrets](docs/hardware-key-protection.md) for the sealing
+boundary, recovery requirements and mixed-version rollout caveat.
+
 ## Security posture, STIG, and SIEM events
 
 Every agent periodically publishes a bounded security-posture observation

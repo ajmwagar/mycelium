@@ -76,7 +76,63 @@ fn platform_devices(node_id: &str) -> Result<Vec<HardwareDevice>, AnyError> {
     collect_linux_pci(node_id, &mut devices)?;
     collect_linux_usb(node_id, &mut devices)?;
     collect_linux_storage(node_id, &mut devices)?;
+    collect_linux_tpm(node_id, Path::new("/sys/class/tpm"), &mut devices)?;
     Ok(devices)
+}
+
+/// Observe registered TPMs without opening a character device or issuing commands.
+/// Presence is not evidence of usable sealing, hardware provenance, or attestation.
+#[cfg(target_os = "linux")]
+fn collect_linux_tpm(
+    node_id: &str,
+    root: &Path,
+    out: &mut Vec<HardwareDevice>,
+) -> Result<(), AnyError> {
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(index) = name.strip_prefix("tpm") else {
+            continue;
+        };
+        if index.is_empty() || !index.bytes().all(|byte| byte.is_ascii_digit()) {
+            continue;
+        }
+        let path = entry.path();
+        let version = match fs::read_to_string(path.join("tpm_version_major")) {
+            Ok(value) => match value.trim() {
+                "1" => "1",
+                "2" => "2",
+                _ => "unknown",
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => "unknown",
+            Err(error) => return Err(error.into()),
+        };
+        let locator = format!("tpm:{name}");
+        out.push(HardwareDevice {
+            id: hardware_id(node_id, &locator),
+            parent: None,
+            locator,
+            kind: HardwareKind::SecurityModule,
+            // TPM class registration alone does not establish its physical bus.
+            bus: HardwareBus::Unknown,
+            vendor: None,
+            model: Some("TPM".into()),
+            serial_hash: None,
+            capabilities: BTreeSet::from(["tpm-present".into()]),
+            properties: BTreeMap::from([
+                ("tpm_version_major".into(), version.into()),
+                ("source".into(), path.to_string_lossy().into_owned()),
+                ("key_protection".into(), "unknown".into()),
+                ("attestation".into(), "not_verified".into()),
+            ]),
+        });
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -518,5 +574,43 @@ mod tests {
         assert_eq!(block_parent("nvme0n1p2"), Some("nvme0n1"));
         assert_eq!(block_parent("sda3"), Some("sda"));
         assert_eq!(block_parent("sda"), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_tpm_observation_does_not_claim_protection() {
+        let root = std::env::temp_dir().join(format!(
+            "mycelium-tpm-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("tpm0")).unwrap();
+        fs::create_dir_all(root.join("tpm1")).unwrap();
+        fs::create_dir_all(root.join("tpmrm0")).unwrap();
+        fs::write(root.join("tpm0/tpm_version_major"), "2\n").unwrap();
+        let mut devices = Vec::new();
+        collect_linux_tpm("peer", &root, &mut devices).unwrap();
+        devices.sort_by(|left, right| left.locator.cmp(&right.locator));
+        assert_eq!(devices.len(), 2);
+        assert_eq!(devices[0].kind, HardwareKind::SecurityModule);
+        assert_eq!(devices[0].properties["tpm_version_major"], "2");
+        assert_eq!(devices[1].properties["tpm_version_major"], "unknown");
+        assert_eq!(
+            devices[0].capabilities,
+            BTreeSet::from(["tpm-present".into()])
+        );
+        assert_eq!(devices[0].properties["key_protection"], "unknown");
+        assert_eq!(devices[0].properties["attestation"], "not_verified");
+        assert_eq!(devices[0].id, hardware_id("peer", "tpm:tpm0"));
+        let mut absent = Vec::new();
+        collect_linux_tpm("peer", &root.join("missing"), &mut absent).unwrap();
+        assert!(absent.is_empty());
+        // A malformed root must surface as an error, not reported absence.
+        fs::write(root.join("not-a-directory"), "").unwrap();
+        assert!(collect_linux_tpm("peer", &root.join("not-a-directory"), &mut absent).is_err());
+        fs::remove_dir_all(&root).unwrap();
     }
 }

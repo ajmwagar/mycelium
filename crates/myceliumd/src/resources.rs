@@ -93,7 +93,10 @@ fn resource_kind_prefix(device: &HardwareDevice) -> Option<&'static str> {
         HardwareKind::StorageDevice | HardwareKind::StorageVolume => Some("storage"),
         // Raw USB/PCI nodes are topology evidence, not automatically useful
         // resources. Function probes will project cameras/audio independently.
-        HardwareKind::PciDevice | HardwareKind::UsbDevice | HardwareKind::StorageController => None,
+        HardwareKind::PciDevice
+        | HardwareKind::UsbDevice
+        | HardwareKind::StorageController
+        | HardwareKind::SecurityModule => None,
     }
 }
 
@@ -242,7 +245,12 @@ mod tests {
     #[test]
     fn raw_bus_devices_are_not_promoted_to_resources() {
         let usb = device(HardwareKind::UsbDevice, HardwareBus::Usb, "bus-node");
-        let catalog = project([snapshot(vec![usb])]);
+        let tpm = device(
+            HardwareKind::SecurityModule,
+            HardwareBus::Unknown,
+            "tpm:tpm0",
+        );
+        let catalog = project([snapshot(vec![usb, tpm])]);
         assert!(catalog.observations.is_empty());
         assert!(catalog.attachments.is_empty());
     }
