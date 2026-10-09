@@ -15,6 +15,13 @@ On each already-enrolled peer, retain the existing `MYCELIUM_PEER_CA`,
 `MYCELIUM_IROH_SERVER_NAME` in its daemon environment to a name/IP present
 in **that peer's certificate SAN**, then:
 
+The runtime uses UDP port 7444 for stable saved connection hints across restart;
+`MYCELIUM_IROH_PORT` overrides it (zero/invalid values fail). IPv6 is used when
+available. Cloud firewalls must allow this UDP port from intended sites or peers;
+TCP 7443 permission alone is insufficient. Physical and overlay interfaces are
+prioritized over container interfaces when public hints reach the 16-address
+bound; excluded scoped link-local addresses are not remotely dialable.
+
 ```sh
 mycelium sync enable --write
 mycelium daemon stop

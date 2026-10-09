@@ -126,6 +126,7 @@ fn transport_key(path: &std::path::Path) -> Result<SecretKey, AnyError> {
 
 fn portable_addresses(
     addresses: impl Iterator<Item = std::net::SocketAddr>,
+    preferred: &BTreeSet<std::net::IpAddr>,
 ) -> BTreeSet<std::net::SocketAddr> {
     let mut addresses: BTreeSet<_> = addresses
         .filter(|address| match address.ip() {
@@ -138,7 +139,9 @@ fn portable_addresses(
             "myceliumd: Iroh connection hints bounded to 16 of {} portable addresses",
             addresses.len()
         );
-        addresses = addresses.into_iter().take(16).collect();
+        let mut ranked: Vec<_> = addresses.into_iter().collect();
+        ranked.sort_by_key(|address| (!preferred.contains(&address.ip()), *address));
+        addresses = ranked.into_iter().take(16).collect();
     }
     addresses
 }
@@ -154,8 +157,20 @@ pub(super) async fn start(mesh: Arc<Mesh>, tls: &TlsSettings) -> Result<(), AnyE
     let server_name = std::env::var("MYCELIUM_IROH_SERVER_NAME")
         .map_err(|_| "MYCELIUM_IROH_SERVER_NAME must match this peer's certificate SAN")?;
     ServerName::try_from(server_name.clone())?;
+    let port: u16 = match std::env::var("MYCELIUM_IROH_PORT") {
+        Ok(value) => value.parse()?,
+        Err(std::env::VarError::NotPresent) => 7444,
+        Err(error) => return Err(error.into()),
+    };
+    if port == 0 { return Err("Iroh sync requires a stable nonzero UDP port".into()); }
+    let preferred: BTreeSet<_> = mesh.hello.interfaces.iter()
+        .filter(|interface| !["veth", "docker", "br-", "sh-"].iter().any(|prefix| interface.name.starts_with(prefix)))
+        .flat_map(|interface| interface.addresses.iter().copied()).collect();
     let builder = Endpoint::builder(iroh::endpoint::presets::N0)
         .secret_key(transport_key(&home.join("iroh-secret.key"))?)
+        .clear_ip_transports()
+        .bind_addr(format!("0.0.0.0:{port}"))?
+        .bind_addr_with_opts(format!("[::]:{port}"), iroh::endpoint::BindOpts::default().set_is_required(false))?
         .clear_address_lookup()
         .portmapper_config(iroh::endpoint::PortmapperConfig::Disabled)
         .transport_config(
@@ -273,7 +288,7 @@ pub(super) async fn start(mesh: Arc<Mesh>, tls: &TlsSettings) -> Result<(), AnyE
                     // Scoped link-local addresses cannot be dialed from a portable
                     // rendezvous. Container hosts can otherwise overflow the
                     // bounded discovery contract with per-veth IPv6 addresses.
-                    direct_addresses: portable_addresses(addr.ip_addrs().copied()),
+                    direct_addresses: portable_addresses(addr.ip_addrs().copied(), &preferred),
                     relay_urls: addr.relay_urls().map(ToString::to_string).collect(),
                     observed_at: at,
                     expires_at: at + 120,
@@ -333,12 +348,14 @@ mod tests {
             .collect();
         input.push("[fe80::1]:7443".parse().unwrap());
         input.push("169.254.1.1:7443".parse().unwrap());
-        let result = portable_addresses(input.into_iter());
+        let preferred = BTreeSet::from(["192.168.1.20".parse().unwrap()]);
+        let result = portable_addresses(input.into_iter(), &preferred);
         assert_eq!(result.len(), 16);
+        assert!(result.contains(&"192.168.1.20:7443".parse().unwrap()));
         assert!(result.iter().all(|address| address.ip().is_ipv4()));
         assert!(!result.contains(&"169.254.1.1:7443".parse().unwrap()));
         assert_eq!(
-            portable_addresses(["127.0.0.1:7443".parse().unwrap()].into_iter()).len(),
+            portable_addresses(["127.0.0.1:7443".parse().unwrap()].into_iter(), &BTreeSet::new()).len(),
             1
         );
     }
