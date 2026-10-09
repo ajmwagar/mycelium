@@ -113,12 +113,19 @@ impl Mesh {
     }
 
     pub async fn local_hello(&self) -> PeerHello {
-        self.observations.lock().await.values().find_map(|envelope| {
-            if envelope.origin == self.node_id() {
-                if let PeerEvent::Hello(hello) = &envelope.event { return Some(hello.clone()); }
-            }
-            None
-        }).unwrap_or_else(|| self.hello.clone())
+        self.observations
+            .lock()
+            .await
+            .values()
+            .find_map(|envelope| {
+                if envelope.origin == self.node_id() {
+                    if let PeerEvent::Hello(hello) = &envelope.event {
+                        return Some(hello.clone());
+                    }
+                }
+                None
+            })
+            .unwrap_or_else(|| self.hello.clone())
     }
 
     /// Refresh public observations after a locally authorized rename/profile
@@ -127,14 +134,23 @@ impl Mesh {
         let mut hello = self.local_hello().await;
         let previous = hello.clone();
         let intent = crate::node_profile::read()?;
-        if intent.as_ref().is_some_and(|intent| intent.node_id != self.node_id()) {
+        if intent
+            .as_ref()
+            .is_some_and(|intent| intent.node_id != self.node_id())
+        {
             return Err("local profile belongs to another peer".into());
         }
         hello.hostname = tokio::task::spawn_blocking(|| output("hostname", &["-s"]))
-            .await??.trim().to_owned();
-        hello.capabilities.retain(|fact| !fact.starts_with("profile."));
+            .await??
+            .trim()
+            .to_owned();
+        hello
+            .capabilities
+            .retain(|fact| !fact.starts_with("profile."));
         if let Some(intent) = intent {
-            hello.capabilities.push(format!("profile.{}", intent.profile));
+            hello
+                .capabilities
+                .push(format!("profile.{}", intent.profile));
         }
         if hello != previous {
             self.publish(PeerEvent::Hello(hello.clone())).await?;
@@ -1128,6 +1144,20 @@ impl Mesh {
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
     {
+        self.run_bound_stream(stream, peer_certificate, observed_address, None)
+            .await
+    }
+
+    async fn run_bound_stream<S>(
+        &self,
+        stream: S,
+        peer_certificate: Option<String>,
+        observed_address: Option<IpAddr>,
+        iroh_endpoint: Option<String>,
+    ) -> Result<(), AnyError>
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    {
         let (reader, mut writer) = tokio::io::split(stream);
         send(&mut writer, &PeerMessage::Hello(self.local_hello().await)).await?;
         let mut reader = BufReader::new(reader);
@@ -1150,7 +1180,7 @@ impl Mesh {
         renewal_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut pending_renewal = None::<String>;
         let mut remote_identity = None::<String>;
-        let mut binding_required = self.require_transport_binding;
+        let mut binding_required = self.require_transport_binding || iroh_endpoint.is_some();
         let mut transport_authenticated = false;
         let mut endpoint_published = false;
         loop {
@@ -1164,9 +1194,16 @@ impl Mesh {
                             if let (Some(node_id), Some(fingerprint)) =
                                 (remote_identity.as_deref(), peer_certificate.as_deref())
                             {
+                                let was_authenticated = transport_authenticated;
                                 transport_authenticated = self
                                     .has_transport_binding(node_id, TransportKind::Mtls, fingerprint)
                                     .await;
+                                if let Some(endpoint) = iroh_endpoint.as_deref() {
+                                    transport_authenticated &= self.has_transport_binding(node_id, TransportKind::Iroh, endpoint).await;
+                                    if transport_authenticated && !was_authenticated {
+                                        eprintln!("myceliumd: authenticated Iroh peer {node_id} endpoint {endpoint}");
+                                    }
+                                }
                             }
                             if transport_authenticated && !endpoint_published {
                                 if let (Some(peer), Some(address)) =
@@ -1261,6 +1298,7 @@ impl Mesh {
                         PeerMessage::Hello(hello) => {
                             remote_identity = Some(hello.node_id.clone());
                             binding_required = self.require_transport_binding
+                                || iroh_endpoint.is_some()
                                 || hello.capabilities.iter().any(|capability| {
                                     capability == "transport.identity-binding"
                                 });
@@ -1500,26 +1538,37 @@ async fn send<W: tokio::io::AsyncWrite + Unpin>(
 /// Cancellation-safe framing: retained partial bytes survive select! ticks,
 /// and the size bound is enforced before extending the buffer.
 async fn next_peer_line<R: tokio::io::AsyncRead + Unpin>(
-    reader: &mut BufReader<R>, pending: &mut Vec<u8>,
+    reader: &mut BufReader<R>,
+    pending: &mut Vec<u8>,
 ) -> std::io::Result<Option<String>> {
     loop {
         let available = reader.fill_buf().await?;
         if available.is_empty() {
-            if pending.is_empty() { return Ok(None); }
+            if pending.is_empty() {
+                return Ok(None);
+            }
             break;
         }
         let end = available.iter().position(|byte| *byte == b'\n');
         let count = end.map_or(available.len(), |i| i + 1);
         if pending.len() + count > 1_048_577 {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "peer message exceeds 1 MiB"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "peer message exceeds 1 MiB",
+            ));
         }
         pending.extend_from_slice(&available[..count]);
         reader.consume(count);
-        if end.is_some() { break; }
+        if end.is_some() {
+            break;
+        }
     }
     let mut bytes = std::mem::take(pending);
-    if bytes.last() == Some(&b'\n') { bytes.pop(); }
-    String::from_utf8(bytes).map(Some)
+    if bytes.last() == Some(&b'\n') {
+        bytes.pop();
+    }
+    String::from_utf8(bytes)
+        .map(Some)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
 }
 
@@ -2475,12 +2524,28 @@ mod tests {
         let mut reader = BufReader::new(stream);
         let mut pending = Vec::new();
         writer.write_all(b"partial").await.unwrap();
-        assert!(tokio::time::timeout(Duration::from_millis(10),
-            next_peer_line(&mut reader, &mut pending)).await.is_err());
+        assert!(tokio::time::timeout(
+            Duration::from_millis(10),
+            next_peer_line(&mut reader, &mut pending)
+        )
+        .await
+        .is_err());
         assert_eq!(pending, b"partial");
         writer.write_all(b" complete\nnext\n").await.unwrap();
-        assert_eq!(next_peer_line(&mut reader, &mut pending).await.unwrap().unwrap(), "partial complete");
-        assert_eq!(next_peer_line(&mut reader, &mut pending).await.unwrap().unwrap(), "next");
+        assert_eq!(
+            next_peer_line(&mut reader, &mut pending)
+                .await
+                .unwrap()
+                .unwrap(),
+            "partial complete"
+        );
+        assert_eq!(
+            next_peer_line(&mut reader, &mut pending)
+                .await
+                .unwrap()
+                .unwrap(),
+            "next"
+        );
         let oversized = vec![b'x'; 1_048_578];
         let mut reader = BufReader::new(&oversized[..]);
         assert!(next_peer_line(&mut reader, &mut pending).await.is_err());

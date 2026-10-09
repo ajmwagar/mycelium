@@ -171,6 +171,14 @@ pub(super) async fn start(mesh: Arc<Mesh>, tls: &TlsSettings) -> Result<(), AnyE
         builder.relay_mode(iroh::RelayMode::Disabled)
     };
     let endpoint = builder.bind().await?;
+    mesh.publish(PeerEvent::Transport(TransportCredentialBinding {
+        node_id: mesh.hello.node_id.clone(),
+        kind: TransportKind::Iroh,
+        public_key: endpoint.id().to_string(),
+        generation: now(),
+        valid_until: None,
+    }))
+    .await?;
     let acceptor = TlsAcceptor::from(Arc::new(tls.server_config()?));
     let connector = TlsConnector::from(Arc::new(tls.client_config()?));
     let permits = Arc::new(tokio::sync::Semaphore::new(LIMIT));
@@ -196,7 +204,13 @@ pub(super) async fn start(mesh: Arc<Mesh>, tls: &TlsSettings) -> Result<(), AnyE
                     )
                     .await??;
                     let fingerprint = tls_peer_fingerprint(stream.get_ref().1.peer_certificates());
-                    mesh.run_stream(stream, fingerprint, None).await
+                    mesh.run_bound_stream(
+                        stream,
+                        fingerprint,
+                        None,
+                        Some(connection.remote_id().to_string()),
+                    )
+                    .await
                 }
                 .await;
                 if let Err(error) = result {
@@ -226,7 +240,13 @@ pub(super) async fn start(mesh: Arc<Mesh>, tls: &TlsSettings) -> Result<(), AnyE
                     )
                     .await??;
                     let fingerprint = tls_peer_fingerprint(stream.get_ref().1.peer_certificates());
-                    mesh.run_stream(stream, fingerprint, None).await
+                    mesh.run_bound_stream(
+                        stream,
+                        fingerprint,
+                        None,
+                        Some(connection.remote_id().to_string()),
+                    )
+                    .await
                 }
                 .await;
                 if let Err(error) = result {
@@ -282,6 +302,20 @@ pub(super) async fn start(mesh: Arc<Mesh>, tls: &TlsSettings) -> Result<(), AnyE
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn signed_endpoint_binding_rejects_substitution() {
+        let mesh = Mesh::ephemeral_for_test();
+        let endpoint = SecretKey::generate().public().to_string();
+        mesh.publish(PeerEvent::Transport(TransportCredentialBinding {
+            node_id: mesh.node_id().to_owned(), kind: TransportKind::Iroh,
+            public_key: endpoint.clone(), generation: 1, valid_until: None,
+        })).await.unwrap();
+        assert!(mesh.has_transport_binding(mesh.node_id(), TransportKind::Iroh, &endpoint).await);
+        assert!(!mesh.has_transport_binding(mesh.node_id(), TransportKind::Iroh, &SecretKey::generate().public().to_string()).await);
+        assert!(!mesh.has_transport_binding("another-peer", TransportKind::Iroh, &endpoint).await);
+        assert!(!mesh.has_transport_binding(mesh.node_id(), TransportKind::Mtls, &endpoint).await);
+    }
 
     #[test]
     fn portable_hints_drop_scoped_addresses_and_stay_bounded() {
