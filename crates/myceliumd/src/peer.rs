@@ -35,6 +35,7 @@ const DIGEST_INTERVAL: Duration = Duration::from_secs(15);
 const SSH_RENEWAL_INTERVAL: Duration = Duration::from_secs(15 * 60);
 const DEFAULT_ARTIFACT_REQUEST_INTERVAL: Duration = Duration::from_secs(5);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const PEER_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 const MAX_OBSERVATIONS_PER_MESSAGE: usize = 64;
 const MAX_OBSERVATION_MESSAGE_BYTES: usize = 900 * 1024;
 
@@ -92,6 +93,7 @@ struct ReleaseSetArtifact {
 }
 
 pub struct Mesh {
+    active_tcp: std::sync::Mutex<BTreeMap<String, usize>>,
     key: SigningKey,
     hello: PeerHello,
     sequence: AtomicU64,
@@ -171,6 +173,7 @@ impl Mesh {
         let key = SigningKey::from_bytes(&[3; 32]);
         let node_id = encode_hex(key.verifying_key().as_bytes());
         Arc::new(Self {
+            active_tcp: std::sync::Mutex::new(BTreeMap::new()),
             key,
             hello: PeerHello {
                 node_id,
@@ -278,6 +281,7 @@ impl Mesh {
             .max()
             .unwrap_or(0);
         Ok(Arc::new(Self {
+            active_tcp: std::sync::Mutex::new(BTreeMap::new()),
             key,
             hello,
             sequence: AtomicU64::new(sequence),
@@ -421,6 +425,7 @@ impl Mesh {
                 PeerEvent::SecurityPosture(_) => {}
                 PeerEvent::SecurityEvents(_) => {}
                 PeerEvent::Unknown => {}
+                PeerEvent::SyncHints(_) => {}
             }
         }
         for endpoint in endpoints {
@@ -1192,10 +1197,16 @@ impl Mesh {
         let mut transport_authenticated = false;
         let mut endpoint_published = false;
         let mut remote_supports_iroh = false;
+        let mut tcp_registration = None;
+        let mut read_deadline = tokio::time::Instant::now() + PEER_IDLE_TIMEOUT;
         loop {
             tokio::select! {
+                _ = tokio::time::sleep_until(read_deadline) => {
+                    return Err("peer sync read timed out".into());
+                }
                 result = next_peer_line(&mut reader, &mut pending_line) => {
                     let Some(line) = result? else { return Ok(()); };
+                    read_deadline = tokio::time::Instant::now() + PEER_IDLE_TIMEOUT;
                     if line.len() > 1_048_576 { return Err("peer message exceeds 1 MiB".into()); }
                     match serde_json::from_str::<PeerMessage>(line.trim())? {
                         PeerMessage::Observations(values) => {
@@ -1212,6 +1223,14 @@ impl Mesh {
                                     if transport_authenticated && !was_authenticated {
                                         eprintln!("myceliumd: authenticated Iroh peer {node_id} endpoint {endpoint}");
                                     }
+                                }
+                            }
+                            if !transport_authenticated {
+                                tcp_registration = None;
+                            }
+                            if transport_authenticated && iroh_endpoint.is_none() && tcp_registration.is_none() {
+                                if let Some(peer) = remote_identity.as_ref() {
+                                    tcp_registration = Some(TcpRegistration::new(&self.active_tcp, peer.clone()));
                                 }
                             }
                             if transport_authenticated && !endpoint_published {
@@ -1438,6 +1457,27 @@ fn transport_event_supported(event: &PeerEvent, iroh: bool) -> bool {
     iroh || !matches!(event, PeerEvent::Transport(binding) if binding.kind == TransportKind::Iroh)
 }
 
+/// Drop removes live path state on EOF, errors, and task cancellation alike.
+struct TcpRegistration<'a> {
+    peers: &'a std::sync::Mutex<BTreeMap<String, usize>>,
+    peer: String,
+}
+impl<'a> TcpRegistration<'a> {
+    fn new(peers: &'a std::sync::Mutex<BTreeMap<String, usize>>, peer: String) -> Self {
+        *peers.lock().expect("TCP path lock poisoned").entry(peer.clone()).or_default() += 1;
+        Self { peers, peer }
+    }
+}
+impl Drop for TcpRegistration<'_> {
+    fn drop(&mut self) {
+        let mut peers = self.peers.lock().expect("TCP path lock poisoned");
+        if let Some(count) = peers.get_mut(&self.peer) {
+            *count -= 1;
+            if *count == 0 { peers.remove(&self.peer); }
+        }
+    }
+}
+
 fn observation_batches(
     observations: Vec<SignedEnvelope>,
 ) -> Result<Vec<Vec<SignedEnvelope>>, AnyError> {
@@ -1547,9 +1587,22 @@ async fn send<W: tokio::io::AsyncWrite + Unpin>(
     writer: &mut W,
     message: &PeerMessage,
 ) -> Result<(), AnyError> {
-    writer.write_all(&serde_json::to_vec(message)?).await?;
-    writer.write_all(b"\n").await?;
-    writer.flush().await?;
+    send_with_timeout(writer, message, CONNECT_TIMEOUT).await
+}
+
+async fn send_with_timeout<W: tokio::io::AsyncWrite + Unpin>(
+    writer: &mut W,
+    message: &PeerMessage,
+    deadline: Duration,
+) -> Result<(), AnyError> {
+    let bytes = serde_json::to_vec(message)?;
+    // A timed-out partial frame is fatal: callers must close the stream,
+    // never resume writing a different frame onto these partial bytes.
+    tokio::time::timeout(deadline, async {
+        writer.write_all(&bytes).await?;
+        writer.write_all(b"\n").await?;
+        writer.flush().await
+    }).await.map_err(|_| "peer sync write timed out")??;
     Ok(())
 }
 
@@ -1642,6 +1695,12 @@ fn event_is_authorized(
     resolver: &crate::authority::AuthorityResolver<'_>,
 ) -> bool {
     match &envelope.event {
+        PeerEvent::SyncHints(hints) => {
+            #[cfg(feature = "iroh-sync")]
+            { iroh_sync::validate_hints(hints, &envelope.origin).is_ok() }
+            #[cfg(not(feature = "iroh-sync"))]
+            { let _ = hints; false }
+        }
         PeerEvent::Hello(hello) => {
             hello.interfaces.len() <= 64
                 && hello.interfaces.iter().all(|interface| {
@@ -1687,6 +1746,7 @@ fn event_is_authorized(
 
 fn event_key(envelope: &SignedEnvelope) -> String {
     match &envelope.event {
+        PeerEvent::SyncHints(_) => format!("{}:sync-hints", envelope.origin),
         PeerEvent::Hello(_) => format!("{}:hello", envelope.origin),
         PeerEvent::Health(_) => format!("{}:health", envelope.origin),
         PeerEvent::Topology(_) => format!("{}:topology", envelope.origin),
@@ -1732,6 +1792,7 @@ fn event_key(envelope: &SignedEnvelope) -> String {
 
 fn event_origin_matches(envelope: &SignedEnvelope) -> bool {
     match &envelope.event {
+        PeerEvent::SyncHints(hints) => hints.node_id == envelope.origin,
         PeerEvent::Hello(hello) => hello.node_id == envelope.origin,
         PeerEvent::Health(_)
         | PeerEvent::Topology(_)

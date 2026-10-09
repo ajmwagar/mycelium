@@ -8,7 +8,74 @@ use std::io::{Read, Write};
 
 const ALPN: &[u8] = b"mycelium/sync/1";
 const LIMIT: usize = 32;
+const DISCOVERED_LINK_LIMIT: usize = 2;
 const HANDSHAKE: Duration = Duration::from_secs(15);
+
+fn rendezvous_from_hints(hints: &mycelium_peer_protocol::SyncHints) -> SyncRendezvous {
+    SyncRendezvous {
+        server_name: hints.server_name.clone(),
+        endpoint: mycelium_iroh_discovery::Endpoint {
+            id: "mycelium-sync".into(),
+            endpoint_id: hints.endpoint_id.clone(),
+            alpns: BTreeSet::from([String::from_utf8_lossy(ALPN).into_owned()]),
+            direct_addresses: hints.direct_addresses.clone(),
+            relay_urls: hints.relay_urls.clone(),
+            observed_at: hints.observed_at,
+            expires_at: hints.expires_at,
+        },
+    }
+}
+
+fn fallback_needed(mesh: &Mesh, owner: Option<&str>) -> bool {
+    !owner.is_some_and(|peer| mesh.active_tcp.lock().expect("TCP path lock poisoned").contains_key(peer))
+}
+
+pub(super) fn validate_hints(hints: &mycelium_peer_protocol::SyncHints, origin: &str) -> Result<(), String> {
+    if hints.node_id != origin { return Err("sync hints owner mismatch".into()); }
+    // Freshness is checked at selection, not merge: expired observations may
+    // transit retained gossip without acquiring a new lease.
+    rendezvous_from_hints(hints).validate(None)
+}
+
+async fn candidates(mesh: &Mesh, seeds: &[SyncRendezvous], at: u64) -> BTreeMap<String, (Option<String>, SyncRendezvous)> {
+    let observations = mesh.observations.lock().await;
+    let mut result: BTreeMap<_, _> = seeds.iter().map(|seed| {
+        let owner = observations.values().find_map(|envelope| match &envelope.event {
+            PeerEvent::Transport(binding) if binding.kind == TransportKind::Iroh
+                && binding.public_key == seed.endpoint.endpoint_id
+                && binding.valid_until.is_none_or(|expiry| expiry > at) => Some(envelope.origin.clone()),
+            _ => None,
+        });
+        (seed.endpoint.endpoint_id.clone(), (owner, seed.clone()))
+    }).collect();
+    for envelope in observations.values() {
+        let PeerEvent::SyncHints(hints) = &envelope.event else { continue; };
+        if envelope.origin == mesh.node_id() || validate_hints(hints, &envelope.origin).is_err() {
+            continue;
+        }
+        let rendezvous = rendezvous_from_hints(hints);
+        if rendezvous.validate(Some(at)).is_err() { continue; }
+        // A signed hint alone is not an endpoint-key binding.
+        let bound = observations.values().any(|binding| binding.origin == envelope.origin
+            && matches!(&binding.event, PeerEvent::Transport(value)
+                if value.kind == TransportKind::Iroh && value.public_key == hints.endpoint_id
+                    && value.valid_until.is_none_or(|expiry| expiry > at)));
+        if bound {
+            result.insert(hints.endpoint_id.clone(), (Some(envelope.origin.clone()), rendezvous));
+        }
+    }
+    result
+}
+
+async fn dial_once(mesh: Arc<Mesh>, endpoint: Endpoint, connector: TlsConnector, seed: SyncRendezvous) -> Result<(), AnyError> {
+    let connection = tokio::time::timeout(HANDSHAKE, endpoint.connect(seed.address()?, ALPN)).await??;
+    let (send, recv) = tokio::time::timeout(HANDSHAKE, connection.open_bi()).await??;
+    let stream = tokio::time::timeout(HANDSHAKE, connector.connect(
+        ServerName::try_from(seed.server_name)?, tokio::io::join(recv, send),
+    )).await??;
+    let fingerprint = tls_peer_fingerprint(stream.get_ref().1.peer_certificates());
+    mesh.run_bound_stream(stream, fingerprint, None, Some(connection.remote_id().to_string())).await
+}
 
 /// Explicit persistent seed configuration; changes take effect on restart.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -237,44 +304,46 @@ pub(super) async fn start(mesh: Arc<Mesh>, tls: &TlsSettings) -> Result<(), AnyE
             });
         }
     });
-    for seed in config.seeds {
-        let mesh = mesh.clone();
-        let endpoint = endpoint.clone();
-        let connector = connector.clone();
-        tokio::spawn(async move {
-            let mut backoff = Duration::from_secs(1);
-            loop {
-                let result: Result<(), AnyError> = async {
-                    let connection =
-                        tokio::time::timeout(HANDSHAKE, endpoint.connect(seed.address()?, ALPN))
-                            .await??;
-                    let (send, recv) = connection.open_bi().await?;
-                    let stream = tokio::time::timeout(
-                        HANDSHAKE,
-                        connector.connect(
-                            ServerName::try_from(seed.server_name.clone())?,
-                            tokio::io::join(recv, send),
-                        ),
-                    )
-                    .await??;
-                    let fingerprint = tls_peer_fingerprint(stream.get_ref().1.peer_certificates());
-                    mesh.run_bound_stream(
-                        stream,
-                        fingerprint,
-                        None,
-                        Some(connection.remote_id().to_string()),
-                    )
-                    .await
+    let outgoing_mesh = mesh.clone();
+    let outgoing_endpoint = endpoint.clone();
+    tokio::spawn(async move {
+        let mut running = BTreeMap::<String, tokio::task::JoinHandle<Result<(), AnyError>>>::new();
+        let mut retries = BTreeMap::<String, (u64, u64)>::new();
+        let configured: BTreeSet<_> = config.seeds.iter().map(|seed| seed.endpoint.endpoint_id.clone()).collect();
+        // Give the concurrently starting TCP connector first opportunity.
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        loop {
+            let at = now();
+            let finished: Vec<_> = running.iter().filter(|(_, task)| task.is_finished()).map(|(id, _)| id.clone()).collect();
+            for id in finished {
+                let task = running.remove(&id).unwrap();
+                match task.await {
+                    Ok(Ok(())) => { retries.insert(id, (at + 5, 5)); }
+                    result => {
+                        eprintln!("myceliumd: Iroh fallback {id}: {result:?}");
+                        let delay = retries.get(&id).map_or(5, |(_, delay)| (delay * 2).min(60));
+                        retries.insert(id, (at + delay, delay));
+                    }
                 }
-                .await;
-                if let Err(error) = result {
-                    eprintln!("myceliumd: Iroh outgoing sync: {error}");
-                }
-                tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(Duration::from_secs(60));
             }
-        });
-    }
+            let candidates = candidates(&outgoing_mesh, &config.seeds, at).await;
+            retries.retain(|id, _| candidates.contains_key(id) || running.contains_key(id));
+            for (id, (owner, mut seed)) in candidates {
+                if running.len() >= LIMIT { break; }
+                if running.contains_key(&id) || retries.get(&id).is_some_and(|(next, _)| *next > at) { continue; }
+                // Discovery adds sparse repair edges, not an all-to-all mesh.
+                if !configured.contains(&id) && running.keys().filter(|key| !configured.contains(*key)).count() >= DISCOVERED_LINK_LIMIT { continue; }
+                if !fallback_needed(&outgoing_mesh, owner.as_deref()) { continue; }
+                if !config.public_relays { seed.endpoint.relay_urls.clear(); }
+                if seed.validate(None).is_err() { continue; }
+                let mesh = outgoing_mesh.clone();
+                let endpoint = outgoing_endpoint.clone();
+                let connector = connector.clone();
+                running.insert(id, tokio::spawn(dial_once(mesh, endpoint, connector, seed)));
+            }
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
+    });
     tokio::spawn(async move {
         loop {
             let addr = endpoint.addr();
@@ -310,6 +379,16 @@ pub(super) async fn start(mesh: Arc<Mesh>, tls: &TlsSettings) -> Result<(), AnyE
             })();
             if let Err(error) = result {
                 eprintln!("myceliumd: Iroh rendezvous refresh: {error}");
+            } else if let Err(error) = mesh.publish(PeerEvent::SyncHints(mycelium_peer_protocol::SyncHints {
+                node_id: mesh.node_id().into(),
+                endpoint_id: rendezvous.endpoint.endpoint_id.clone(),
+                server_name: rendezvous.server_name.clone(),
+                direct_addresses: rendezvous.endpoint.direct_addresses.clone(),
+                relay_urls: rendezvous.endpoint.relay_urls.clone(),
+                observed_at: at,
+                expires_at: rendezvous.endpoint.expires_at,
+            })).await {
+                eprintln!("myceliumd: Iroh hint gossip: {error}");
             }
             tokio::time::sleep(Duration::from_secs(30)).await;
         }
@@ -320,6 +399,68 @@ pub(super) async fn start(mesh: Arc<Mesh>, tls: &TlsSettings) -> Result<(), AnyE
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tcp_path_lifetime_controls_fallback() {
+        let mesh = Mesh::ephemeral_for_test();
+        assert!(fallback_needed(&mesh, Some("peer")));
+        let first = TcpRegistration::new(&mesh.active_tcp, "peer".into());
+        let second = TcpRegistration::new(&mesh.active_tcp, "peer".into());
+        assert!(!fallback_needed(&mesh, Some("peer")));
+        drop(first);
+        assert!(!fallback_needed(&mesh, Some("peer")));
+        drop(second);
+        assert!(fallback_needed(&mesh, Some("peer")));
+        assert!(fallback_needed(&mesh, None));
+        assert!(mesh.active_tcp.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn stalled_write_releases_tcp_path_for_fallback() {
+        let mesh = Mesh::ephemeral_for_test();
+        let (mut writer, _unread_receiver) = tokio::io::duplex(1);
+        let result: Result<(), AnyError> = async {
+            let _registration = TcpRegistration::new(&mesh.active_tcp, "peer".into());
+            assert!(!fallback_needed(&mesh, Some("peer")));
+            send_with_timeout(&mut writer, &PeerMessage::Ping { sent_at: 1 }, Duration::from_millis(5)).await
+        }.await;
+        assert!(result.unwrap_err().to_string().contains("write timed out"));
+        assert!(fallback_needed(&mesh, Some("peer")));
+    }
+
+    #[tokio::test]
+    async fn discovery_requires_fresh_owner_hints_and_matching_binding() {
+        let mesh = Mesh::ephemeral_for_test();
+        let key = SigningKey::from_bytes(&[7; 32]);
+        let owner = encode_hex(key.verifying_key().as_bytes());
+        let r = rendezvous();
+        let mut hints = mycelium_peer_protocol::SyncHints {
+            node_id: owner.clone(), endpoint_id: r.endpoint.endpoint_id.clone(),
+            server_name: r.server_name.clone(), direct_addresses: r.endpoint.direct_addresses.clone(),
+            relay_urls: r.endpoint.relay_urls.clone(), observed_at: 100, expires_at: 130,
+        };
+        assert!(validate_hints(&hints, "another-owner").is_err());
+        let envelope = SignedEnvelope::sign(&key, 1, 100, PeerEvent::SyncHints(hints.clone())).unwrap();
+        envelope.verify().unwrap();
+        mesh.observations.lock().await.insert(event_key(&envelope), envelope);
+        assert!(candidates(&mesh, &[], 110).await.is_empty());
+        let binding = SignedEnvelope::sign(&key, 2, 100, PeerEvent::Transport(TransportCredentialBinding {
+            node_id: owner.clone(), kind: TransportKind::Iroh,
+            public_key: hints.endpoint_id.clone(), generation: 1, valid_until: None,
+        })).unwrap();
+        mesh.observations.lock().await.insert(event_key(&binding), binding);
+        let selected = candidates(&mesh, &[], 110).await;
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected.values().next().unwrap().0.as_deref(), Some(owner.as_str()));
+        assert!(candidates(&mesh, &[], 99).await.is_empty());
+        assert!(candidates(&mesh, &[], 130).await.is_empty());
+        hints.endpoint_id = SecretKey::generate().public().to_string();
+        let changed = SignedEnvelope::sign(&key, 3, 110, PeerEvent::SyncHints(hints)).unwrap();
+        mesh.observations.lock().await.insert(event_key(&changed), changed);
+        assert!(candidates(&mesh, &[], 110).await.is_empty());
+        // Saved bootstrap seeds remain dialable, but never get a new lease.
+        assert_eq!(candidates(&mesh, &[r], 1000).await.len(), 1);
+    }
 
     #[tokio::test]
     async fn signed_endpoint_binding_rejects_substitution() {

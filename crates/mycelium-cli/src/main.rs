@@ -87,6 +87,7 @@ mycelium — control plane for your network appliances
 usage:
   mycelium completions zsh|bash|fish
   mycelium sync enable --write | export [--qr] | join <rendezvous.json> --write
+  mycelium sync relays enable|disable --write
   mycelium pair --kind peer --iroh --qr --name NAME --site SITE [--public-relays] [--ttl 15m]
   mycelium setup [--gateway HTTPS-URL] [--claim CODE|--claim-file PATH] [--system-service] [--ttl 8h] [--key PATH] [--certificate PATH]
   mycelium setup --repair [--site SITE] [--path MYCELIUM-HOME] [--system-service]

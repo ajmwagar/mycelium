@@ -83,6 +83,20 @@ pub struct PeerEndpointObservation {
     pub observed_at: u64,
 }
 
+/// Expiring connection hints, separate from durable transport-key bindings.
+/// These nominate a path; they never confer membership or authorization.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SyncHints {
+    pub node_id: String,
+    pub endpoint_id: String,
+    pub server_name: String,
+    pub direct_addresses: BTreeSet<std::net::SocketAddr>,
+    pub relay_urls: BTreeSet<String>,
+    pub observed_at: u64,
+    pub expires_at: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EgressObservation {
     pub node_id: String,
@@ -131,6 +145,7 @@ pub struct HostHealth {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum PeerEvent {
+    SyncHints(SyncHints),
     Hello(PeerHello),
     Health(HostHealth),
     Topology(TopologySnapshot),
@@ -153,6 +168,7 @@ pub enum PeerEvent {
 #[derive(Deserialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 enum KnownPeerEvent {
+    SyncHints(SyncHints),
     Hello(PeerHello),
     Health(HostHealth),
     Topology(TopologySnapshot),
@@ -179,6 +195,7 @@ impl<'de> Deserialize<'de> for PeerEvent {
             value.get("kind").and_then(serde_json::Value::as_str),
             Some(
                 "hello"
+                    | "sync_hints"
                     | "health"
                     | "topology"
                     | "release"
@@ -200,6 +217,7 @@ impl<'de> Deserialize<'de> for PeerEvent {
         let event: KnownPeerEvent =
             serde_json::from_value(value).map_err(serde::de::Error::custom)?;
         Ok(match event {
+            KnownPeerEvent::SyncHints(value) => Self::SyncHints(value),
             KnownPeerEvent::Hello(value) => Self::Hello(value),
             KnownPeerEvent::Health(value) => Self::Health(value),
             KnownPeerEvent::Topology(value) => Self::Topology(value),

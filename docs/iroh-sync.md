@@ -48,9 +48,42 @@ mycelium services --json
 Rendezvous export expires after two minutes, refreshed every 30 seconds. Import
 rejects expired/future data. Explicitly imported seeds persist across restarts;
 their old addresses are connection hints, **not fresh availability evidence**.
-Re-export/import when addresses change. Only one side needs an outgoing seed.
-For new peers, use the claim flow below. Automatic refresh of seed hints remains
-follow-up work.
+Only one side needs an outgoing bootstrap seed. Once gossip connects, peers
+publish signed, two-minute sync hints every 30 seconds. The runtime learns
+fresh hints automatically and checks them against the owner's signed Iroh key
+binding before dialing. Hints nominate a path, never membership or access.
+For new peers, use the claim flow below. A disconnected new peer still needs
+one bootstrap hint/claim; discovery cannot cross an entirely disconnected mesh.
+
+## Automatic fallback
+
+Authenticated TCP connections are preferred. Every five seconds, the Iroh
+scheduler considers saved seeds and fresh learned hints for peers without a
+live authenticated TCP connection. TCP dialing continues independently, so a
+recovered direct route is retried without intervention. Existing healthy Iroh
+streams are retained when TCP recovers, avoiding teardown/reconnect churn.
+Silently stalled streams close after 45 seconds without a complete received
+frame; blocked writes fail after 15 seconds. Connection cleanup releases the
+TCP path count, allowing fallback even when the old socket never reported EOF.
+Discovery adds at most two outgoing repair links, rather than an all-to-all
+mesh. The runtime limits total outgoing tasks to 32 and retries failures with exponential
+backoff capped at 60 seconds. Expired learned hints cannot start new dials;
+saved bootstrap seeds retain their original, explicitly configured hints.
+
+Within Iroh, direct QUIC paths and encrypted relay paths use the same peer
+authentication. Public relays remain disabled by default. Enable them explicitly
+on the participating peers when NAT/firewalls prevent direct QUIC:
+
+```sh
+mycelium sync relays enable --write
+# Restart the existing systemd user service or LaunchAgent.
+```
+
+Use `relays disable --write` to restore direct-only policy. No public DNS record,
+UPnP mapping, cloud firewall rule, WireGuard route, or ACL is changed. Removing
+TCP access alone does not guarantee Iroh connectivity: direct UDP must work or
+relay policy must be enabled. TLS SAN checks and both TLS/Iroh signed bindings
+remain mandatory for Iroh, including relayed connections.
 
 ## Enroll a new peer using a QR claim
 
