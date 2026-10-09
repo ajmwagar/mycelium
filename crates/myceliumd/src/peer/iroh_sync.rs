@@ -335,6 +335,7 @@ mod tests {
         });
         assert!(!transport_event_supported(&binding, false));
         assert!(transport_event_supported(&binding, true));
+        assert!(mesh.local_hello().await.capabilities.iter().any(|capability| capability == "transport.iroh-key-binding"));
         assert!(mesh.has_transport_binding(mesh.node_id(), TransportKind::Iroh, &endpoint).await);
         assert!(!mesh.has_transport_binding(mesh.node_id(), TransportKind::Iroh, &SecretKey::generate().public().to_string()).await);
         assert!(!mesh.has_transport_binding("another-peer", TransportKind::Iroh, &endpoint).await);

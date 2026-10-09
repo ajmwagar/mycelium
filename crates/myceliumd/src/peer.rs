@@ -113,9 +113,8 @@ impl Mesh {
     }
 
     pub async fn local_hello(&self) -> PeerHello {
-        self.observations
-            .lock()
-            .await
+        let observations = self.observations.lock().await;
+        let mut hello = observations
             .values()
             .find_map(|envelope| {
                 if envelope.origin == self.node_id() {
@@ -125,7 +124,16 @@ impl Mesh {
                 }
                 None
             })
-            .unwrap_or_else(|| self.hello.clone())
+            .unwrap_or_else(|| self.hello.clone());
+        // Negotiation follows the actual local binding, even when a bounded
+        // inventory projection cannot retain the full Hello observation.
+        if observations.values().any(|envelope| envelope.origin == self.node_id()
+            && matches!(&envelope.event, PeerEvent::Transport(binding) if binding.kind == TransportKind::Iroh))
+            && !hello.capabilities.iter().any(|capability| capability == "transport.iroh-key-binding")
+        {
+            hello.capabilities.push("transport.iroh-key-binding".into());
+        }
+        hello
     }
 
     /// Refresh public observations after a locally authorized rename/profile
