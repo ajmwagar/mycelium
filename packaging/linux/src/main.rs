@@ -237,6 +237,7 @@ mod tests {
     #[test]
     fn payload_has_no_implicit_activation_or_credentials() {
         assert!(SERVICE.contains("ConditionPathExists=/var/lib/mycelium/node.env"));
+        assert!(CONTACT_UNIT.contains("[Unit]\nConditionPathExists=/run/fungos-first-contact/claim"));
         assert!(!SERVICE.contains("MYCELIUM_RELEASE_KEYS="));
         assert!(!ADAPTER.contains(". \"$1\""));
     }

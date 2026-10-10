@@ -79,6 +79,9 @@ The package supplies the existing dispatcher with one executable adapter at
 stages an owner-only claim at `/run/fungos-first-contact/claim`. The adapter never
 sources shell code or publishes a claim in an ISO, kernel arguments, TFTP or
 public HTTP. The common sandbox is retained with a narrow private-state drop-in.
+The dispatcher also requires the staged claim to exist, so a consumed claim is
+not retried on the next boot; the profile metadata remains available to inspect.
+A missing claim leaves first contact waiting/inert, not successfully enrolled.
 No QEMU-specific disk or new enrollment protocol is required.
 
 ## Updates and recovery
@@ -90,10 +93,12 @@ ownership is not changed.
 
 Explicit enrollment installs the existing Mycelium health binding in private
 software-services.json only if absent; operator entries are preserved. Use the
-existing `mycelium software apt` plan/apply/rollback engine and exact versions
+existing `mycelium software apt` plan/apply/recover commands and exact versions
 from admitted signed repository generations, not a second updater. Retain the
-previous archive and verify service health after updates. Manual recovery is
-installing that previous package and explicitly restarting the service.
+previous archive and verify service health after updates. Apply automatically
+rolls back a failed-health activation; `recover` resumes recovery of an interrupted
+transaction. Manual recovery is installing the previous package and explicitly
+restarting the service.
 
 Removal has no implicit daemon stop: stop/disable explicitly first. Private peer
 state is retained on removal/purge; deleting or migrating it is separately
