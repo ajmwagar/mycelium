@@ -635,7 +635,7 @@ fn host_apply(args: &[String]) -> Result<Vec<String>, String> {
     if prior_principals.is_dir() {
         copy_directory_files(&prior_principals, &backup.join("principals"))?;
     }
-    fs::create_dir_all(&managed).map_err(|e| format!("create {}: {e}", managed.display()))?;
+    public_policy_directory(&managed)?;
     fs::create_dir_all(drop_in.parent().expect("drop-in has parent"))
         .map_err(|e| format!("create sshd drop-in directory: {e}"))?;
     let mut created_accounts = Vec::new();
@@ -656,8 +656,7 @@ fn host_apply(args: &[String]) -> Result<Vec<String>, String> {
             fs::remove_dir_all(&principals)
                 .map_err(|e| format!("replace {}: {e}", principals.display()))?;
         }
-        fs::create_dir_all(&principals)
-            .map_err(|e| format!("create {}: {e}", principals.display()))?;
+        public_policy_directory(&principals)?;
         for entry in fs::read_dir(bundle.join("principals"))
             .map_err(|e| format!("read host principals: {e}"))?
         {
@@ -683,6 +682,7 @@ fn host_apply(args: &[String]) -> Result<Vec<String>, String> {
         let principals = managed.join("principals");
         let _ = fs::remove_dir_all(&principals);
         if backup.join("principals").is_dir() {
+            let _ = public_policy_directory(&principals);
             let _ = copy_directory_files(&backup.join("principals"), &principals);
         }
         let _ = command("sshd", &["-t"]);
@@ -819,6 +819,14 @@ fn validate_host_bundle(bundle: &Path) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+// sshd opens AuthorizedPrincipalsFile as the target account. Its public policy
+// ancestors must be traversable even when enrollment runs with UMask=0077.
+// This applies only to Mycelium's policy directories, never keys or backups.
+fn public_policy_directory(path: &Path) -> Result<(), String> {
+    fs::create_dir_all(path).map_err(|e| format!("create {}: {e}", path.display()))?;
+    private_permissions(path, 0o755)
 }
 
 fn install_mode(source: &Path, destination: &Path, mode: u32) -> Result<(), String> {
@@ -1550,6 +1558,34 @@ fn command(program: &str, args: &[&str]) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn public_policy_directory_repairs_restrictive_mode_without_exposing_backups() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = super::temporary_key_path("public-policy-test");
+        super::fs::create_dir(&root).unwrap();
+        let policy = root.join("mycelium");
+        let principals = policy.join("principals");
+        let backup = root.join("backup");
+        for directory in [&policy, &principals, &backup] {
+            super::fs::create_dir(directory).unwrap();
+            super::fs::set_permissions(directory, super::fs::Permissions::from_mode(0o700))
+                .unwrap();
+        }
+        super::public_policy_directory(&policy).unwrap();
+        super::public_policy_directory(&principals).unwrap();
+        for directory in [&policy, &principals] {
+            assert_eq!(
+                super::fs::metadata(directory).unwrap().permissions().mode() & 0o777,
+                0o755
+            );
+        }
+        assert_eq!(
+            super::fs::metadata(&backup).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        super::fs::remove_dir_all(root).unwrap();
+    }
     use super::*;
 
     #[test]
