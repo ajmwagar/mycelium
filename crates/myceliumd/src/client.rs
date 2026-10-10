@@ -58,6 +58,9 @@ impl Client {
     /// (the CLI and daemon ship together; PATH never consulted).
     pub fn spawn_daemon() -> Result<(), ClientError> {
         let exe = std::env::current_exe().map_err(|e| ClientError::Spawn(e.to_string()))?;
+        if cfg!(target_os = "linux") && std::fs::canonicalize(&exe).map_err(ClientError::Io)? == std::path::Path::new("/usr/bin/mycelium") {
+            return Err(ClientError::Spawn("package-owned Mycelium must run through its enrolled systemd service; use sudo mycelium setup --packaged, not an unmanaged daemon".into()));
+        }
         let home = crate::home_dir();
         std::fs::create_dir_all(&home).map_err(|e| ClientError::Spawn(e.to_string()))?;
         let log = std::fs::OpenOptions::new()

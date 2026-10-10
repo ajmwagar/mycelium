@@ -13,6 +13,7 @@ mod node;
 mod oidc;
 mod oidc_gateway;
 mod pair;
+mod packaged;
 #[cfg(feature = "iroh-sync")]
 mod pair_iroh;
 mod setup;
@@ -34,6 +35,10 @@ use myceliumd::siem::SinkConfig;
 use std::io::Write;
 
 fn main() {
+    if let Err(error) = packaged::configure_cli() {
+        eprintln!("mycelium: {error}");
+        std::process::exit(1);
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(|a| a.as_str()) {
         Some("_serve") => {
@@ -91,6 +96,7 @@ usage:
   mycelium pair --kind peer --iroh --qr --name NAME --site SITE [--public-relays] [--ttl 15m]
   mycelium setup [--gateway HTTPS-URL] [--claim CODE|--claim-file PATH] [--system-service] [--ttl 8h] [--key PATH] [--certificate PATH]
   mycelium setup --repair [--site SITE] [--path MYCELIUM-HOME] [--system-service]
+  mycelium setup --packaged --claim-file PATH | --packaged --repair
   mycelium pair --kind access --name NAME --unix-user USER... [--role ROLE]... [--listen ADDR] [--advertise URL] [--ca PATH] [--ttl 15m] [--credential-ttl 8h]
   mycelium pair --kind peer --name NAME --site SITE --peer HOST:PORT... [--unix-user USER --role ROLE]... [--ca PATH] [--enrollment-ca DIR] [--listen ADDR] [--advertise URL] [--ttl 15m]
   mycelium invite create --kind access|peer --name NAME [--unix-user USER]... [--role ROLE]... [--site SITE] [--peer HOST:PORT]... [--ttl 15m] [--credential-ttl 8h] [--uses 1] --write
@@ -1074,10 +1080,11 @@ async fn enroll_command(args: &[String]) -> Result<Vec<String>, ClientError> {
                 .as_deref()
                 .or_else(|| flags.rest.get(1).map(String::as_str))
                 .ok_or(err_usage("enroll install needs --bundle DIR"))?;
-            let home = flags
-                .path
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(myceliumd::home_dir);
+            let home = match flags.path {
+                Some(path) => std::path::PathBuf::from(path),
+                None if packaged::current().map_err(|error| err_usage(&error))? => std::path::PathBuf::from(packaged::HOME),
+                None => myceliumd::home_dir(),
+            };
             enroll::install(std::path::Path::new(bundle), &home)
         }
         other => Err(err_usage(&format!("unknown enroll action `{other}`"))),
@@ -2026,6 +2033,13 @@ async fn update(args: &[String]) -> Result<Vec<String>, ClientError> {
     }
     let flags = parse_flags(args);
     let action = flags.rest.first().map(String::as_str).unwrap_or("status");
+    if action == "apply" {
+        let executable = std::env::current_exe().map_err(ClientError::Io)?;
+        myceliumd::software_apt::require_native_executable(&executable).map_err(|error| err_usage(&error.to_string()))?;
+        if let Some(path) = flags.path.as_deref() {
+            myceliumd::software_apt::require_native_executable(std::path::Path::new(path)).map_err(|error| err_usage(&error.to_string()))?;
+        }
+    }
     let channel = flags.channel.unwrap_or_else(|| "canary".into());
     let targets = mycelium_peer_protocol::local_compatible_targets();
     let mut client = connect().await?;
@@ -2184,6 +2198,7 @@ fn update_policy_command(args: &[String]) -> Result<Vec<String>, ClientError> {
     let mut policy = myceliumd::read_update_policy();
     match action {
         "enable" => {
+            myceliumd::software_apt::require_native_executable(&std::env::current_exe().map_err(ClientError::Io)?).map_err(|error| err_usage(&error.to_string()))?;
             policy.enabled = true;
             if let Some(channel) = update_arg(args, "--channel") {
                 policy.channel = channel.to_owned();
@@ -2231,6 +2246,7 @@ fn update_policy_command(args: &[String]) -> Result<Vec<String>, ClientError> {
 }
 
 async fn update_auto_run() -> Result<Vec<String>, ClientError> {
+    myceliumd::software_apt::require_native_executable(&std::env::current_exe().map_err(ClientError::Io)?).map_err(|error| err_usage(&error.to_string()))?;
     let policy = myceliumd::read_update_policy();
     policy.validate().map_err(|error| err_usage(&error))?;
     if !policy.enabled {
@@ -2553,6 +2569,7 @@ async fn activate_update(
     artifact: &std::path::Path,
     destination: &std::path::Path,
 ) -> Result<(), ClientError> {
+    myceliumd::software_apt::require_native_executable(destination).map_err(|error| err_usage(&error.to_string()))?;
     use std::os::unix::fs::PermissionsExt;
     let parent = destination
         .parent()

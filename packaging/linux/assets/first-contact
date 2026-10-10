@@ -1,0 +1,10 @@
+#!/bin/sh
+set -eu
+[ "$#" = 1 ] && [ -r "$1" ] || { echo 'first-contact requires a private environment file' >&2; exit 1; }
+# Never source shell code from an enrollment envelope. The claim itself is
+# staged separately as an owner-only file, never in public image metadata.
+grep -Eq '^PROFILE=fungos-(edge|headless-edge|cloud|compute)$' "$1" || {
+  echo 'unsupported packaged first-contact profile' >&2
+  exit 1
+}
+exec /usr/bin/mycelium setup --packaged --claim-file /run/fungos-first-contact/claim

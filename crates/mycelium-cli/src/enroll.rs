@@ -222,6 +222,10 @@ pub fn issue(ca: &Path, request: Issue<'_>) -> Result<Vec<String>, ClientError> 
 }
 
 pub fn install(bundle: &Path, home: &Path) -> Result<Vec<String>, ClientError> {
+    let packaged = crate::packaged::current().map_err(|error| usage(&error))?;
+    if packaged {
+        crate::packaged::validate_new_peer(home, true).map_err(|error| usage(&error))?;
+    }
     for name in [
         "mycelium",
         "ca.pem",
@@ -257,9 +261,14 @@ pub fn install(bundle: &Path, home: &Path) -> Result<Vec<String>, ClientError> {
 
     let bin = home.join("bin/mycelium");
     let pki = home.join("pki");
-    std::fs::create_dir_all(bin.parent().unwrap()).map_err(ClientError::Io)?;
+    if packaged {
+        crate::packaged::private_home(home).map_err(|error| usage(&error))?;
+        crate::packaged::ensure_binding(home).map_err(|error| usage(&error))?;
+    } else {
+        std::fs::create_dir_all(bin.parent().unwrap()).map_err(ClientError::Io)?;
+        copy_mode(&bundle.join("mycelium"), &bin, 0o755)?;
+    }
     std::fs::create_dir_all(&pki).map_err(ClientError::Io)?;
-    copy_mode(&bundle.join("mycelium"), &bin, 0o755)?;
     copy_mode(&bundle.join("ca.pem"), &pki.join("ca.pem"), 0o644)?;
     copy_mode(&bundle.join("node.pem"), &pki.join("node.pem"), 0o644)?;
     copy_mode(
@@ -284,7 +293,10 @@ pub fn install(bundle: &Path, home: &Path) -> Result<Vec<String>, ClientError> {
         )?,
     )
     .map_err(ClientError::Io)?;
-    let service = if cfg!(target_os = "macos") {
+    if packaged { owner_only(&home.join("node.env"))?; }
+    let service = if packaged {
+        crate::packaged::service_path()
+    } else if cfg!(target_os = "macos") {
         let path = user_home()?.join("Library/LaunchAgents/dev.fpl.mycelium.plist");
         std::fs::create_dir_all(path.parent().unwrap()).map_err(ClientError::Io)?;
         std::fs::write(
@@ -310,7 +322,7 @@ pub fn install(bundle: &Path, home: &Path) -> Result<Vec<String>, ClientError> {
     };
     Ok(vec![
         format!("installed enrolled peer under {}", home.display()),
-        format!("wrote {}; service was not started", service.display()),
+        format!("{} {}; service was not started", if packaged { "retained package-owned" } else { "wrote" }, service.display()),
     ])
 }
 
@@ -324,6 +336,12 @@ pub(crate) fn install_peer_material(
     system_service: bool,
     iroh_server_name: Option<&str>,
 ) -> Result<Vec<String>, String> {
+    let packaged = crate::packaged::current()?;
+    if packaged {
+        crate::packaged::validate(home, system_service)?;
+        crate::packaged::private_home(home)?;
+        crate::packaged::ensure_binding(home)?;
+    }
     validate_label("site", site).map_err(|error| error.to_string())?;
     if let Some(name) = iroh_server_name {
         validate_label("Iroh server name", name).map_err(|error| error.to_string())?;
@@ -334,14 +352,15 @@ pub(crate) fn install_peer_material(
     let bin = home.join("bin/mycelium");
     let pki = home.join("pki");
     std::fs::create_dir_all(&pki).map_err(|error| format!("create {}: {error}", pki.display()))?;
-    std::fs::create_dir_all(bin.parent().expect("bin has a parent"))
-        .map_err(|error| format!("create binary directory: {error}"))?;
-    copy_mode(
-        &std::env::current_exe().map_err(|error| format!("locate current binary: {error}"))?,
-        &bin,
-        0o755,
-    )
-    .map_err(|error| error.to_string())?;
+    if !packaged {
+        std::fs::create_dir_all(bin.parent().expect("bin has a parent"))
+            .map_err(|error| format!("create binary directory: {error}"))?;
+        copy_mode(
+            &std::env::current_exe().map_err(|error| format!("locate current binary: {error}"))?,
+            &bin,
+            0o755,
+        ).map_err(|error| error.to_string())?;
+    }
     copy_mode(key, &pki.join("node-key.pem"), 0o600).map_err(|error| error.to_string())?;
     std::fs::write(pki.join("node.pem"), certificate_pem)
         .map_err(|error| format!("install node certificate: {error}"))?;
@@ -365,6 +384,7 @@ pub(crate) fn install_peer_material(
             .map(|name| format!("MYCELIUM_IROH_SERVER_NAME={name}\n")).unwrap_or_default()),
     )
     .map_err(|error| format!("write node environment: {error}"))?;
+    if packaged { owner_only(&home.join("node.env")).map_err(|error| error.to_string())?; }
     let service = write_peer_service(
         home,
         site,
@@ -386,6 +406,12 @@ pub(crate) fn repair_peer_service(
     site_override: Option<&str>,
     system_service: bool,
 ) -> Result<Vec<String>, String> {
+    let packaged = crate::packaged::current()?;
+    if packaged {
+        crate::packaged::validate(home, system_service)?;
+        crate::packaged::private_home(home)?;
+        crate::packaged::ensure_binding(home)?;
+    }
     for required in ["node.env", "pki/ca.pem", "pki/node.pem", "pki/node-key.pem"] {
         if !home.join(required).is_file() {
             return Err(format!(
@@ -397,7 +423,7 @@ pub(crate) fn repair_peer_service(
     let managed_binary = home.join("bin/mycelium");
     let current_binary = std::env::current_exe()
         .map_err(|error| format!("locate current Mycelium binary: {error}"))?;
-    if current_binary != managed_binary {
+    if !packaged && current_binary != managed_binary {
         std::fs::create_dir_all(
             managed_binary
                 .parent()
@@ -475,6 +501,10 @@ fn write_peer_service(
     access_keys: &str,
     system_service: bool,
 ) -> Result<PathBuf, String> {
+    if crate::packaged::current()? {
+        crate::packaged::validate(home, system_service)?;
+        return Ok(crate::packaged::service_path());
+    }
     if system_service {
         if !cfg!(target_os = "linux") {
             return Err("system peer service is supported only on Linux".into());

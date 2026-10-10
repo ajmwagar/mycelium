@@ -1,0 +1,25 @@
+[Unit]
+Description=Mycelium enrolled system peer
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/var/lib/mycelium/node.env
+ConditionPathExists=/var/lib/mycelium/pki/node-key.pem
+
+[Service]
+# Host actions require root; enrollment and ACLs remain the authorization layer.
+User=root
+Group=root
+ExecStart=/usr/bin/mycelium _serve
+Environment=MYCELIUM_HOME=/var/lib/mycelium
+Environment=MYCELIUM_NO_AUTOSTART=1
+EnvironmentFile=/var/lib/mycelium/node.env
+StateDirectory=mycelium
+StateDirectoryMode=0700
+UMask=0077
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

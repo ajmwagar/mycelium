@@ -680,6 +680,14 @@ pub async fn join(args: &[String]) -> Result<Vec<String>, String> {
 
 pub async fn redeem(args: &[String]) -> Result<Vec<String>, String> {
     require_write(args)?;
+    let packaged = crate::packaged::current()?;
+    if value(args, "--peer-csr").is_some() && packaged {
+        let home = value(args, "--home").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(crate::packaged::HOME));
+        crate::packaged::validate(&home, args.iter().any(|argument| argument == "--system-service"))?;
+        if home.join("pki/node-key.pem").exists() || home.join("node.env").exists() {
+            return Err("refusing a new packaged peer claim over an existing identity; use setup --packaged --repair".into());
+        }
+    }
     let gateway = required(args, "--gateway")?.trim_end_matches('/');
     if !gateway.starts_with("iroh-pair:") { validate_gateway_url(gateway)?; }
     let claim = required(args, "--claim")?;
@@ -744,7 +752,9 @@ pub async fn redeem(args: &[String]) -> Result<Vec<String>, String> {
     if let Some(peer) = redeemed.peer {
         let home = value(args, "--home")
             .map(PathBuf::from)
-            .unwrap_or_else(myceliumd::home_dir);
+            .unwrap_or_else(|| {
+                if packaged { PathBuf::from(crate::packaged::HOME) } else { myceliumd::home_dir() }
+            });
         let key = Path::new(required(args, "--peer-key")?);
         #[cfg(feature = "iroh-sync")]
         let iroh_server_name = if let Some((seed, relays)) = sync_seed {

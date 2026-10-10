@@ -3,14 +3,20 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub async fn run(args: &[String]) -> Result<Vec<String>, String> {
+    let packaged = crate::packaged::current()?;
+    if args.iter().any(|argument| argument == "--packaged") && !packaged {
+        return Err("--packaged requires the installed owner-built Mycelium Debian package".into());
+    }
+    let system_service = packaged || args.iter().any(|argument| argument == "--system-service");
+    let home = value(args, "--path").map(expand_home).unwrap_or_else(|| {
+        if packaged { PathBuf::from(crate::packaged::HOME) } else { myceliumd::home_dir() }
+    });
+    if packaged { crate::packaged::validate(&home, system_service)?; }
     if args.iter().any(|argument| argument == "--repair") {
-        let home = value(args, "--path")
-            .map(expand_home)
-            .unwrap_or_else(myceliumd::home_dir);
         return crate::enroll::repair_peer_service(
             &home,
             value(args, "--site"),
-            args.iter().any(|argument| argument == "--system-service"),
+            system_service,
         );
     }
     let claim_path = value(args, "--claim-file").map(expand_home);
@@ -41,8 +47,8 @@ pub async fn run(args: &[String]) -> Result<Vec<String>, String> {
     {
         let result = setup_peer(
             embedded.as_ref().expect("checked above"),
-            value(args, "--path").map(expand_home),
-            args.iter().any(|argument| argument == "--system-service"),
+            Some(home),
+            system_service,
         )
         .await;
         remove_consumed_claim(&result, claim_path.as_deref())?;
@@ -160,6 +166,11 @@ async fn setup_peer(
     system_service: bool,
 ) -> Result<Vec<String>, String> {
     let home = home.unwrap_or_else(myceliumd::home_dir);
+    let packaged = crate::packaged::current()?;
+    if packaged {
+        crate::packaged::validate_new_peer(&home, system_service)?;
+        crate::packaged::private_home(&home)?;
+    }
     if claim.0.starts_with("iroh-pair:") && (home.join("iroh-sync.json").exists()
         || home.join("pki/node-key.pem").exists()) {
         return Err("refusing new-peer enrollment over an existing peer identity/configuration".into());
@@ -196,7 +207,7 @@ async fn setup_peer(
             "extendedKeyUsage=serverAuth,clientAuth",
         ],
     )?;
-    let ssh_dir = user_home()?.join(".ssh");
+    let ssh_dir = if packaged { home.join("ssh") } else { user_home()?.join(".ssh") };
     let ssh_key = ssh_dir.join("id_ed25519");
     let ssh_public = PathBuf::from(format!("{}.pub", ssh_key.display()));
     if !ssh_key.is_file() || !ssh_public.is_file() {

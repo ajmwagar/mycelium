@@ -11,6 +11,46 @@ use std::{
 };
 type Error = Box<dyn std::error::Error + Send + Sync>;
 
+/// Read dpkg's ownership database, including a symlink's resolved destination.
+/// Missing ownership is distinct from a broken/missing dpkg-query command.
+/// Native activation must call this before creating candidates or backups.
+pub fn package_owner(path: &Path) -> Result<Option<String>, Error> {
+    if !cfg!(target_os = "linux") { return Ok(None); }
+    if !Path::new("/var/lib/dpkg/status").is_file() { return Ok(None); }
+    let canonical = fs::canonicalize(path)?;
+    for candidate in [path, canonical.as_path()] {
+        let output = Command::new("dpkg-query")
+            .args(["-S", candidate.to_str().ok_or("non-UTF8 ownership path")?])
+            .env("LC_ALL", "C")
+            .output()?;
+        if output.status.code() == Some(1) { continue; }
+        if !output.status.success() { return Err("dpkg-query ownership lookup failed".into()); }
+        let text = String::from_utf8(output.stdout)?;
+        return parse_owner(&text, candidate).map(Some);
+    }
+    Ok(None)
+}
+
+fn parse_owner(output: &str, path: &Path) -> Result<String, Error> {
+    let lines: Vec<_> = output.lines().collect();
+    if lines.len() != 1 { return Err("ambiguous Debian executable ownership".into()); }
+    let (owner, owned) = lines[0].split_once(": ").ok_or("invalid dpkg ownership response")?;
+    if owned != path.to_str().ok_or("non-UTF8 ownership path")?
+        || !owner.split(':').all(|value| identity(value, false))
+        || owner.contains(',') {
+        return Err("unexpected Debian executable ownership".into());
+    }
+    Ok(owner.to_owned())
+}
+
+/// Fail before native writes to an executable managed by Debian.
+pub fn require_native_executable(path: &Path) -> Result<(), Error> {
+    if let Some(owner) = package_owner(path)? {
+        return Err(format!("{} is owned by Debian package {owner}; use APT package updates, not native binary activation", path.display()).into());
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AptPlan {
@@ -462,6 +502,15 @@ pub fn recover() -> Result<(), Error> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ownership_response_is_exact_and_unambiguous() {
+        use std::path::Path;
+        assert_eq!(super::parse_owner("mycelium: /usr/bin/mycelium\n", Path::new("/usr/bin/mycelium")).unwrap(), "mycelium");
+        assert_eq!(super::parse_owner("mycelium:amd64: /usr/bin/mycelium\n", Path::new("/usr/bin/mycelium")).unwrap(), "mycelium:amd64");
+        assert!(super::parse_owner("mycelium: /usr/bin/other\n", Path::new("/usr/bin/mycelium")).is_err());
+        assert!(super::parse_owner("one, two: /usr/bin/mycelium\n", Path::new("/usr/bin/mycelium")).is_err());
+        assert!(super::parse_owner("one: /usr/bin/mycelium\ntwo: /usr/bin/mycelium\n", Path::new("/usr/bin/mycelium")).is_err());
+    }
     use super::*;
     #[test]
     fn exact_identities_only() {
