@@ -242,6 +242,11 @@ pub(crate) fn require_root(action: &str) -> Result<(), String> {
 
 fn host_bundle_matches_installed(bundle: &Path) -> Result<bool, String> {
     let installed = Path::new("/etc/ssh");
+    if !public_policy_directory_matches(&installed.join("mycelium"))
+        || !public_policy_directory_matches(&installed.join("mycelium/principals"))
+    {
+        return Ok(false);
+    }
     for (desired, current) in [
         (
             bundle.join("user_ca.pub"),
@@ -827,6 +832,18 @@ fn validate_host_bundle(bundle: &Path) -> Result<(), String> {
 fn public_policy_directory(path: &Path) -> Result<(), String> {
     fs::create_dir_all(path).map_err(|e| format!("create {}: {e}", path.display()))?;
     private_permissions(path, 0o755)
+}
+
+fn public_policy_directory_matches(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::metadata(path).is_ok_and(|metadata| {
+            metadata.is_dir() && metadata.permissions().mode() & 0o777 == 0o755
+        })
+    }
+    #[cfg(not(unix))]
+    path.is_dir()
 }
 
 fn install_mode(source: &Path, destination: &Path, mode: u32) -> Result<(), String> {
@@ -1572,9 +1589,12 @@ mod tests {
             super::fs::set_permissions(directory, super::fs::Permissions::from_mode(0o700))
                 .unwrap();
         }
+        assert!(!super::public_policy_directory_matches(&policy));
+        assert!(!super::public_policy_directory_matches(&principals));
         super::public_policy_directory(&policy).unwrap();
         super::public_policy_directory(&principals).unwrap();
         for directory in [&policy, &principals] {
+            assert!(super::public_policy_directory_matches(directory));
             assert_eq!(
                 super::fs::metadata(directory).unwrap().permissions().mode() & 0o777,
                 0o755
