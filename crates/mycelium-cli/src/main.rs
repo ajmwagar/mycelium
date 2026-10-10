@@ -48,11 +48,7 @@ fn main() {
                 .map(|_| Vec::new())
                 .map_err(ClientError::Io)
         }
-        Some("_self-check") => Ok(vec![format!(
-            "mycelium {} protocol {}",
-            env!("CARGO_PKG_VERSION"),
-            mycelium_peer_protocol::PROTOCOL_VERSION
-        )]),
+        Some("_self-check") => Ok(vec![self_check()]),
         Some("completions") => completions::command(&args[1..], USAGE),
         Some(other) => rt_block(run(other, &args[1..])),
         None => Ok(usage()),
@@ -72,6 +68,11 @@ fn main() {
             });
         }
     }
+}
+
+fn self_check() -> String {
+    format!("mycelium {} protocol {} iroh-sync={}", env!("CARGO_PKG_VERSION"),
+        mycelium_peer_protocol::PROTOCOL_VERSION, cfg!(feature = "iroh-sync"))
 }
 
 fn rt_block<'a, F>(fut: F) -> Result<Vec<String>, ClientError>
@@ -5028,6 +5029,12 @@ fn render_tunnel_plan(plan: &serde_json::Value) -> Vec<String> {
 
 #[cfg(test)]
 mod ssh_command_tests {
+    #[test]
+    fn self_check_reports_compiled_transport_capability() {
+        let value = super::self_check();
+        assert!(value.starts_with(concat!("mycelium ", env!("CARGO_PKG_VERSION"), " protocol ")));
+        assert!(value.ends_with(if cfg!(feature = "iroh-sync") { "iroh-sync=true" } else { "iroh-sync=false" }));
+    }
     use super::*;
 
     #[test]
