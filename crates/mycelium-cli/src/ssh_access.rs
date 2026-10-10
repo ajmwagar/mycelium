@@ -850,9 +850,6 @@ fn client_config(args: &[String]) -> Result<Vec<String>, String> {
             destination.display()
         ));
     }
-    if let Some(parent) = destination.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
-    }
     let mut config = format!(
         "# Managed by Mycelium. Include this file from ~/.ssh/config.\n\
          Host {alias}\n\
@@ -867,9 +864,11 @@ fn client_config(args: &[String]) -> Result<Vec<String>, String> {
            CertificateFile {certificate}\n\
            IdentitiesOnly yes\n"
     ));
-    let staging = temporary_key_path(destination.to_string_lossy().as_ref());
+    let staging_guard = destination_staging(destination)?;
+    let staging = staging_guard.path.clone();
     fs::write(&staging, config)
         .map_err(|e| format!("write staged SSH client config {}: {e}", staging.display()))?;
+    private_permissions(&staging, 0o600)?;
     fs::rename(&staging, destination)
         .map_err(|e| format!("install SSH client config {}: {e}", destination.display()))?;
     Ok(vec![format!(
@@ -890,7 +889,8 @@ fn host_bundle(args: &[String], state: &Value) -> Result<Vec<String>, String> {
             destination.display()
         ));
     }
-    let staging = temporary_key_path(destination.to_string_lossy().as_ref());
+    let staging_guard = destination_staging(destination)?;
+    let staging = staging_guard.path.clone();
     if staging.exists() {
         fs::remove_dir_all(&staging)
             .map_err(|e| format!("remove stale staging directory {}: {e}", staging.display()))?;
@@ -940,9 +940,6 @@ fn host_bundle(args: &[String], state: &Value) -> Result<Vec<String>, String> {
                 .map_err(|e| format!("encode host bundle manifest: {e}"))?,
         )
         .map_err(|e| format!("write host bundle manifest: {e}"))?;
-        if let Some(parent) = destination.parent() {
-            fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
-        }
         fs::rename(&staging, destination)
             .map_err(|e| format!("install host bundle {}: {e}", destination.display()))
     })();
@@ -1068,9 +1065,11 @@ pub(crate) fn issue_for_invite(
     let public_key = fs::read_to_string(public_key_path)
         .map_err(|error| format!("read SSH public key {}: {error}", public_key_path.display()))?;
     key_material(&public_key)?;
-    let temp = temporary_key_path(&public_key_path.to_string_lossy());
+    let staging_guard = destination_staging(output)?;
+    let temp = staging_guard.path.clone();
     fs::copy(public_key_path, &temp)
         .map_err(|error| format!("prepare certificate input {}: {error}", temp.display()))?;
+    private_permissions(&temp, 0o600)?;
     // A role-bound certificate must not also carry its Unix account as a
     // principal: older hosts that trust the CA without AuthorizedPrincipalsFile
     // would otherwise accept it and bypass the host's role policy.
@@ -1113,10 +1112,6 @@ pub(crate) fn issue_for_invite(
         let _ = fs::remove_file(&temp);
         let _ = fs::remove_file(&generated);
         return Err(error);
-    }
-    if let Some(parent) = output.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("create {}: {error}", parent.display()))?;
     }
     fs::rename(&generated, output)
         .map_err(|error| format!("install certificate {}: {error}", output.display()))?;
@@ -1252,9 +1247,11 @@ fn issue_bound(
         ));
     }
 
-    let temp = temporary_key_path(public_key_path);
+    let staging_guard = destination_staging(Path::new(output))?;
+    let temp = staging_guard.path.clone();
     fs::copy(public_key_path, &temp)
         .map_err(|e| format!("prepare certificate input {}: {e}", temp.display()))?;
+    private_permissions(&temp, 0o600)?;
     // Match invitation-issued certificates: a role-bound identity must not
     // also carry its Unix account as a principal, because older hosts that
     // only trust the CA could otherwise bypass the host's role mapping.
@@ -1297,9 +1294,6 @@ fn issue_bound(
         let _ = fs::remove_file(&temp);
         let _ = fs::remove_file(&generated);
         return Err(error);
-    }
-    if let Some(parent) = Path::new(output).parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
     }
     fs::rename(&generated, output).map_err(|e| format!("install certificate {output}: {e}"))?;
     let _ = fs::remove_file(&temp);
@@ -1479,6 +1473,69 @@ fn temporary_key_path(seed: &str) -> PathBuf {
     ))
 }
 
+/// Atomic installs must stage on the destination filesystem, not in `/tmp`.
+/// Keep intermediate keys/configuration private and clean up every error path.
+struct DestinationStaging {
+    root: PathBuf,
+    path: PathBuf,
+}
+
+impl Drop for DestinationStaging {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+fn destination_staging(destination: &Path) -> Result<DestinationStaging, String> {
+    let parent = destination
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("create staging parent {}: {error}", parent.display()))?;
+    for _ in 0..16 {
+        let name = temporary_key_path("staging")
+            .file_name()
+            .ok_or("temporary staging name missing")?
+            .to_owned();
+        let root = parent.join(name);
+        let mut builder = fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        match builder.create(&root) {
+            Ok(()) => {
+                return Ok(DestinationStaging {
+                    path: root.join("key.pub"),
+                    root,
+                })
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(format!(
+                    "create private staging {}: {error}",
+                    root.display()
+                ))
+            }
+        }
+    }
+    Err("cannot allocate unique private destination staging".into())
+}
+
+fn private_permissions(path: &Path, mode: u32) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(mode))
+            .map_err(|error| format!("secure staging {}: {error}", path.display()))?;
+    }
+    #[cfg(not(unix))]
+    let _ = (path, mode);
+    Ok(())
+}
+
 fn command(program: &str, args: &[&str]) -> Result<(), String> {
     let output = Command::new(program)
         .args(args)
@@ -1494,6 +1551,42 @@ fn command(program: &str, args: &[&str]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn destination_staging_is_private_unique_and_failure_preserves_output() {
+        let base = temporary_key_path("destination-staging-test");
+        fs::create_dir(&base).unwrap();
+        let output = base.join("nested/certificate.pub");
+        let first = destination_staging(&output).unwrap();
+        let second = destination_staging(&output).unwrap();
+        assert_eq!(first.root.parent(), output.parent());
+        assert_ne!(first.root, second.root);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&first.root).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+        }
+        fs::write(&output, "existing certificate").unwrap();
+        fs::write(&first.path, "failed staging").unwrap();
+        let staging_root = first.root.clone();
+        drop(first);
+        assert!(!staging_root.exists());
+        assert_eq!(fs::read_to_string(&output).unwrap(), "existing certificate");
+        drop(second);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn destination_staging_handles_relative_filename_output() {
+        let staging = destination_staging(Path::new("certificate.pub")).unwrap();
+        assert_eq!(staging.root.parent(), Some(Path::new(".")));
+        let root = staging.root.clone();
+        drop(staging);
+        assert!(!root.exists());
+    }
 
     #[test]
     fn ssh_policy_timer_schedules_after_late_install_or_restart() {
