@@ -130,7 +130,28 @@ fn err(plugin: &str, e: &mlua::Error) -> MyceliumError {
 /// device: `mlua::Lua` is not shareable across threads, and per-device
 /// globals keep plugin state from bleeding between appliances.
 fn instantiate(source: &str, name: &str) -> Result<Lua> {
+    instantiate_inner(source, name, false)
+}
+
+fn instantiate_inner(source: &str, name: &str, bounded: bool) -> Result<Lua> {
     let lua = Lua::new();
+    if bounded {
+        lua.set_memory_limit(8 * 1024 * 1024)
+            .map_err(|e| err(name, &e))?;
+        let ticks = std::sync::atomic::AtomicUsize::new(0);
+        lua.set_hook(
+            mlua::HookTriggers::new().every_nth_instruction(1000),
+            move |_, _| {
+                if ticks.fetch_add(1, std::sync::atomic::Ordering::Relaxed) >= 200 {
+                    return Err(mlua::Error::RuntimeError(
+                        "service provider instruction budget exceeded".into(),
+                    ));
+                }
+                Ok(mlua::VmState::Continue)
+            },
+        )
+        .map_err(|e| err(name, &e))?;
+    }
     {
         // Remove dangerous stdlib entries before loading user code.
         const DANGEROUS: &[&str] =
@@ -156,6 +177,96 @@ fn instantiate(source: &str, name: &str) -> Result<Lua> {
 
 fn plugin_table(lua: &Lua, name: &str) -> Result<Table> {
     lua.globals().get::<Table>("plugin").map_err(|e| err(name, &e))
+}
+
+/// Pure service dialect over bounded host-decoded JSON. Loading a provider
+/// grants no transport or DNS authority; the operator chooses the socket.
+pub struct ServiceProvider {
+    source: Arc<str>,
+    pub name: String,
+}
+
+impl ServiceProvider {
+    pub fn load(source: impl Into<Arc<str>>) -> Result<Self> {
+        let source = source.into();
+        if source.len() > 65536 {
+            return Err(MyceliumError::Plugin {
+                plugin: "service-provider".into(),
+                message: "source exceeds bound".into(),
+            });
+        }
+        let lua = instantiate_inner(&source, "service-provider", true)?;
+        let table: Table = lua
+            .globals()
+            .get("service_provider")
+            .map_err(|e| err("service-provider", &e))?;
+        let name: String = table.get("name").map_err(|e| err("service-provider", &e))?;
+        if name.is_empty()
+            || name.len() > 63
+            || !name
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        {
+            return Err(MyceliumError::Plugin {
+                plugin: name,
+                message: "invalid provider name".into(),
+            });
+        }
+        table
+            .get::<mlua::Function>("project")
+            .map_err(|e| err(&name, &e))?;
+        Ok(Self { source, name })
+    }
+
+    /// Operator-reviewed request declaration. Generic JSON cannot prove a
+    /// vendor operation is read-only; providers are executable configuration.
+    pub fn request(&self) -> Result<serde_json::Value> {
+        let lua = instantiate_inner(&self.source, &self.name, true)?;
+        let table: Table = lua
+            .globals()
+            .get("service_provider")
+            .map_err(|e| err(&self.name, &e))?;
+        let value: LuaValue = table.get("request").map_err(|e| err(&self.name, &e))?;
+        let value: serde_json::Value = lua.from_value(value).map_err(|e| err(&self.name, &e))?;
+        if !value.is_object()
+            || !validate_json_bounds(&value)
+            || serde_json::to_vec(&value).unwrap_or_default().len() > 4096
+        {
+            return Err(MyceliumError::Plugin {
+                plugin: self.name.clone(),
+                message: "invalid request declaration".into(),
+            });
+        }
+        Ok(value)
+    }
+
+    pub fn project(&self, response: &str, context: serde_json::Value) -> Result<serde_json::Value> {
+        if response.len() > 262144 || !validate_json_bounds(&context) {
+            return Err(MyceliumError::Plugin {
+                plugin: self.name.clone(),
+                message: "projection input exceeds bounds".into(),
+            });
+        }
+        let input = decode_output(&self.name, OutputDecoder::Json, response)?;
+        let lua = instantiate_inner(&self.source, &self.name, true)?;
+        let table: Table = lua
+            .globals()
+            .get("service_provider")
+            .map_err(|e| err(&self.name, &e))?;
+        let project: mlua::Function = table.get("project").map_err(|e| err(&self.name, &e))?;
+        let result: JsonBridge = project
+            .call((JsonBridge(input), JsonBridge(context)))
+            .map_err(|e| err(&self.name, &e))?;
+        if !validate_json_bounds(&result.0)
+            || serde_json::to_vec(&result.0).unwrap_or_default().len() > 65536
+        {
+            return Err(MyceliumError::Plugin {
+                plugin: self.name.clone(),
+                message: "projection output exceeds bounds".into(),
+            });
+        }
+        Ok(result.0)
+    }
 }
 
 /// A validated plugin, ready to open devices. Validation happens at load

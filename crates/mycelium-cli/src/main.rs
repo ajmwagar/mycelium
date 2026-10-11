@@ -134,6 +134,7 @@ usage:
   mycelium peers [--json]
   mycelium resources [show ID | watch [--once]] [--kind KIND] [--node NODE] [--json]
   mycelium services [show ID | watch [--once]] [--kind KIND] [--node NODE] [--json]
+  mycelium services discover --plugin PATH --socket PATH --node OWNER_NODE_ID
   mycelium debug hardware [PEER] [--json]
   mycelium releases list [--json]
   mycelium releases keygen --path PATH --write [--json]
@@ -3028,18 +3029,24 @@ async fn resources(args: &[String]) -> Result<Vec<String>, ClientError> {
 
 async fn services(args: &[String]) -> Result<Vec<String>, ClientError> {
     let action = args.first().map(String::as_str).unwrap_or("list");
-    if action == "shroud" {
-        if args.len() != 5 || args[1] != "--socket" || args[3] != "--node" {
+    if action == "discover" {
+        if args.len() != 7 || args[1] != "--plugin" || args[3] != "--socket" || args[5] != "--node" {
             return Err(err_usage(
-                "services shroud --socket PATH --node OWNER_NODE_ID (read-only JSON projection)",
+                "services discover --plugin PATH --socket PATH --node OWNER_NODE_ID",
             ));
         }
+        use std::io::Read;
+        let mut source = String::new();
+        std::fs::File::open(&args[2]).map_err(ClientError::Io)?.take(65537)
+            .read_to_string(&mut source).map_err(ClientError::Io)?;
+        let provider = mycelium_plugins_lua::ServiceProvider::load(source).map_err(|e| err_usage(&e.to_string()))?;
+        let mut request = serde_json::to_vec(&provider.request().map_err(|e| err_usage(&e.to_string()))?)
+            .map_err(|e| err_usage(&e.to_string()))?;
+        request.push(b'\n');
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
         let bytes = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            let mut socket = tokio::net::UnixStream::connect(&args[2]).await?;
-            socket
-                .write_all(b"{\"action\":\"discover\",\"includeUnready\":false}\n")
-                .await?;
+            let mut socket = tokio::net::UnixStream::connect(&args[4]).await?;
+            socket.write_all(&request).await?;
             let mut reader = tokio::io::BufReader::new(socket);
             let mut bytes = Vec::new();
             loop {
@@ -3052,7 +3059,7 @@ async fn services(args: &[String]) -> Result<Vec<String>, ClientError> {
                     .position(|b| *b == b'\n')
                     .map_or(available.len(), |i| i + 1);
                 if bytes.len() + count > 262144 {
-                    return Err(std::io::Error::other("Shroud response exceeds bound"));
+                    return Err(std::io::Error::other("service response exceeds bound"));
                 }
                 let done = available[count - 1] == b'\n';
                 bytes.extend_from_slice(&available[..count]);
@@ -3064,13 +3071,13 @@ async fn services(args: &[String]) -> Result<Vec<String>, ClientError> {
             Ok::<_, std::io::Error>(bytes)
         })
         .await
-        .map_err(|_| err_usage("Shroud discovery timed out"))?
-        .map_err(|e| err_usage(&format!("Shroud discovery failed: {e}")))?;
+        .map_err(|_| err_usage("service discovery timed out"))?
+        .map_err(|e| err_usage(&format!("service discovery failed: {e}")))?;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|_| err_usage("invalid system clock"))?
             .as_secs();
-        let catalog = myceliumd::shroud_services::project(&bytes, &args[4], now)
+        let catalog = myceliumd::service_provider::project(&provider, &bytes, &args[6], now)
             .map_err(|e| err_usage(&e))?;
         return Ok(vec![
             serde_json::to_string_pretty(&catalog).map_err(|e| err_usage(&e.to_string()))?,

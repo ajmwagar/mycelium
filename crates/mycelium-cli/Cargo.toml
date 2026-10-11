@@ -17,6 +17,7 @@ name = "mycelium-https-forwarder"
 path = "src/https_forwarder.rs"
 
 [dependencies]
+mycelium-plugins-lua.workspace = true
 mycelium-dns-policy.workspace = true
 mycelium-driver-dnsmasq.workspace = true
 qrcode = { version = "0.14", default-features = false, optional = true }
