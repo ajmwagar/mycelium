@@ -26,10 +26,13 @@ compilation; external scripts and framing remain denied. Configure valid TLS
 and client identity before testing. A secure browser supporting WebGPU is
 required for GPU rendering; the shared loader visibly reports degraded mode.
 
-The widget shows observed memory use, uptime and indexed device count. Missing
-values remain null; no synthetic history or traffic is generated. The oldest
-included health/hardware observation sets snapshot time, with a two-minute
-lifetime. Polling cannot refresh old data by changing the response timestamp.
+The health widget shows observed memory use and uptime; the separate hardware
+widget shows indexed device count. Each feed uses its own source timestamp and
+two-minute lifetime. A slower hardware scan cannot freeze fresh health updates
+or mark health stale. Hardware may independently remain stale until another real
+scan, retaining its useful last observation. Missing values remain null; no
+synthetic history or traffic is generated. Polling cannot refresh old data by
+changing the response timestamp.
 
 The identity panel displays up to 64 observed non-loopback interface IPs, which
 are explicitly not reachability guarantees. The QR encodes the canonical

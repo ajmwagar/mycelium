@@ -401,8 +401,16 @@ pub(crate) async fn start(mesh: Arc<Mesh>, config: Config, _acceptor: TlsAccepto
                     if json.len() > 256 * 1024 {
                         return Err("host web projection exceeds response bound".into());
                     }
-                    if route == "/api/widgets/host" {
-                        let body = serde_json::to_string(&widgets::snapshot(&snapshot))?;
+                    if matches!(
+                        route.as_str(),
+                        "/api/widgets/host" | "/api/widgets/hardware"
+                    ) {
+                        let widget = if route == "/api/widgets/host" {
+                            widgets::snapshot(&snapshot)
+                        } else {
+                            widgets::hardware_snapshot(&snapshot)
+                        };
+                        let body = serde_json::to_string(&widget)?;
                         respond(&mut stream, 200, "application/json", &body).await
                     } else if route == "/api/host" {
                         respond(&mut stream, 200, "application/json", &json).await
@@ -502,6 +510,7 @@ async fn read_route<S: AsyncRead + Unpin>(stream: &mut S) -> std::result::Result
             | "/sites"
             | "/api/sites"
             | "/api/widgets/host"
+            | "/api/widgets/hardware"
             | "/widgets/coherence-widgets.js"
             | "/widgets/coherence_widget_web.js"
             | "/widgets/coherence_widget_web_bg.wasm"

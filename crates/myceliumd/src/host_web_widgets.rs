@@ -4,13 +4,7 @@ use coherence_widget_contract::{Metric, Snapshot as WidgetSnapshot};
 use std::io::Read;
 
 pub(super) fn snapshot(host: &Snapshot) -> WidgetSnapshot {
-    let observed = host
-        .health_observed_at
-        .into_iter()
-        .chain(host.hardware_observed_at)
-        .min()
-        .unwrap_or(0)
-        .saturating_mul(1000);
+    let observed = host.health_observed_at.unwrap_or(0).saturating_mul(1000);
     let memory = match (host.memory_available_bytes, host.memory_total_bytes) {
         (Some(free), Some(total)) if total > 0 && free <= total => {
             Some(((total - free) as f64 / total as f64 * 100.) as f32)
@@ -39,14 +33,26 @@ pub(super) fn snapshot(host: &Snapshot) -> WidgetSnapshot {
                 host.uptime_seconds.map(|v| v as f32 / 3600.),
                 None,
             ),
-            metric(
-                "hardware",
-                "Indexed devices",
-                "devices",
-                host.hardware_devices.map(|v| v as f32),
-                None,
-            ),
         ],
+        model_catalog: None,
+    }
+}
+
+pub(super) fn hardware_snapshot(host: &Snapshot) -> WidgetSnapshot {
+    let observed = host.hardware_observed_at.unwrap_or(0).saturating_mul(1000);
+    WidgetSnapshot {
+        schema_version: 1,
+        widget_id: "hardware".into(),
+        observed_at_unix_ms: observed,
+        expires_at_unix_ms: observed.saturating_add(120_000),
+        metrics: vec![Metric {
+            id: "hardware".into(),
+            label: "Indexed devices".into(),
+            unit: "devices".into(),
+            value: host.hardware_devices.map(|v| v as f32),
+            maximum: None,
+            history: vec![],
+        }],
         model_catalog: None,
     }
 }
@@ -105,7 +111,15 @@ pub(super) fn page(host: &Snapshot, gpu: bool) -> String {
     };
     let css = include_str!("viewer-shell/coherence-product.css");
     let widgets = if gpu {
-        "<link rel=\"stylesheet\" href=\"/widgets/widgets.css\"><div class=\"co-widget\" data-co-widget=\"host\"><canvas aria-label=\"Host telemetry\"></canvas><div class=\"co-widget__labels\" data-co-labels></div><p data-co-status>Connecting to owner observations…</p></div><script type=\"module\" src=\"/widgets/coherence-widgets.js\"></script>".to_owned()
+        let mut markup = "<link rel=\"stylesheet\" href=\"/widgets/widgets.css\">".to_owned();
+        for (id, title) in [
+            ("host", "Health observations"),
+            ("hardware", "Hardware observations"),
+        ] {
+            markup.push_str(&format!("<h2>{title}</h2><p class=\"co-widget-provenance\" data-co-summary=\"{id}\">Waiting for source observation</p><div class=\"co-widget\" data-co-widget=\"{id}\"><canvas aria-label=\"{title}\"></canvas><div class=\"co-widget__labels\" data-co-labels></div><p data-co-status>Connecting to owner observations…</p></div>"));
+        }
+        markup.push_str("<script type=\"module\" src=\"/widgets/coherence-widgets.js\"></script>");
+        markup
     } else {
         "<p>GPU widgets are not installed on this host. <a href=\"/api/widgets/host\">Telemetry JSON</a></p>".into()
     };
@@ -134,8 +148,20 @@ mod tests {
         };
         let rich = snapshot(&host);
         rich.validate().unwrap();
-        assert_eq!(rich.observed_at_unix_ms, 90_000);
+        assert_eq!(rich.observed_at_unix_ms, 100_000);
         assert_eq!(rich.metrics[0].value, Some(75.));
+        let hardware = hardware_snapshot(&host);
+        hardware.validate().unwrap();
+        assert_eq!(hardware.observed_at_unix_ms, 90_000);
+        assert_eq!(hardware.widget_id, "hardware");
+        let mut updated = host;
+        updated.health_observed_at = Some(110);
+        updated.memory_available_bytes = Some(20);
+        assert_eq!(snapshot(&updated).observed_at_unix_ms, 110_000);
+        assert_eq!(snapshot(&updated).metrics[0].value, Some(80.));
+        assert_eq!(hardware_snapshot(&updated).observed_at_unix_ms, 90_000);
+        assert!(snapshot(&updated).fresh_at(225_000));
+        assert!(!hardware_snapshot(&updated).fresh_at(225_000));
     }
     #[test]
     fn identity_page_escapes_data_and_labels_qr_as_non_authority() {
@@ -150,6 +176,7 @@ mod tests {
         assert!(html.contains("https://titan.titan.myc/"));
         assert!(html.contains("&lt;script&gt;"));
         assert!(html.contains("data-co-widget=\"host\""));
+        assert!(html.contains("data-co-widget=\"hardware\""));
         assert!(asset("/tmp", "/widgets/../node.key").is_err());
     }
 }
