@@ -186,6 +186,50 @@ pub struct ServiceProvider {
     pub name: String,
 }
 
+/// Pure application naming policy. It can suggest service-kind labels only;
+/// the DNS host validates names, owner leases, addresses and explicit ingress.
+pub fn dns_aliases(source: &str, context: serde_json::Value) -> Result<BTreeMap<String, String>> {
+    const NAME: &str = "dns-policy";
+    if source.len() > 65536 || !validate_json_bounds(&context) {
+        return Err(MyceliumError::Plugin {
+            plugin: NAME.into(),
+            message: "DNS policy input exceeds bound".into(),
+        });
+    }
+    let lua = instantiate_inner(source, NAME, true)?;
+    let policy: Table = lua.globals().get("dns_policy").map_err(|e| err(NAME, &e))?;
+    let aliases: mlua::Function = policy.get("aliases").map_err(|e| err(NAME, &e))?;
+    let result: JsonBridge = aliases
+        .call(JsonBridge(context))
+        .map_err(|e| err(NAME, &e))?;
+    if !validate_json_bounds(&result.0)
+        || serde_json::to_vec(&result.0)
+            .map_err(|e| MyceliumError::Plugin {
+                plugin: NAME.into(),
+                message: e.to_string(),
+            })?
+            .len()
+            > 8192
+    {
+        return Err(MyceliumError::Plugin {
+            plugin: NAME.into(),
+            message: "DNS policy output exceeds bound".into(),
+        });
+    }
+    let result: BTreeMap<String, String> =
+        serde_json::from_value(result.0).map_err(|_| MyceliumError::Plugin {
+            plugin: NAME.into(),
+            message: "DNS aliases must be a string map".into(),
+        })?;
+    if result.len() > 32 {
+        return Err(MyceliumError::Plugin {
+            plugin: NAME.into(),
+            message: "too many DNS aliases".into(),
+        });
+    }
+    Ok(result)
+}
+
 impl ServiceProvider {
     pub fn load(source: impl Into<Arc<str>>) -> Result<Self> {
         let source = source.into();

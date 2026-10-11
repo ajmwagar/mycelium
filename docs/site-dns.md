@@ -168,6 +168,38 @@ Service aliases are default-off. Add a `service_aliases` map to resolver setting
 }
 ```
 
+Alternatively, load a reviewed application naming policy:
+
+```json
+"service_alias_plugins": [
+  "/usr/local/share/mycelium/dns-policies/unibus_dns.lua"
+]
+```
+
+The supplied policy is `crates/mycelium-plugins-lua/plugins/unibus_dns.lua`.
+Install it as a non-writable file owned by the resolver administrator. It maps
+`unibus-viewer` to `unibus`; Unibus already publishes the shared owner leases,
+so no new Unibus scraper, registry or DNS server is involved. Explicit maps
+remain supported. Maps and plugins may agree, but conflicting mappings fail
+closed. Loading a plugin does not select an index owner: `service_index_peers`
+remains explicit operator policy.
+
+The small Lua interface is `dns_policy.aliases(context) -> {kind = label}`.
+Context contains the configured site and suffix, not credentials or inventory.
+Rust bounds source, memory, instructions and output, then validates the labels,
+owner provenance, lease freshness, site addresses and namespace ownership.
+Plugins cannot return records, IPs, ports, ACLs or DNS delegation grants. DNS
+protocol handling and the existing plan/apply driver remain generic Rust.
+
+Use `mycelium-dns-resolver plan --config ABSOLUTE_SETTINGS_PATH` to inspect the
+result before applying through the existing write-gated workflow. Absolute
+plugin paths and existing filesystem permissions are required. Invalid or
+missing policies fail visibly; they do not fall back to hardcoded names.
+Each refresh resolves one policy snapshot. Retained records are bound to its
+effective mappings; changing a mapping invalidates the old snapshot, without
+renewing its leases. A failing candidate after a policy change cannot restore
+the previous naming policy. No default DNS or DHCP changes are implied.
+
 Labels must be unique canonical single DNS labels. The resolver reads the
 existing `mycelium services --json` catalog, never scans ports itself. Only
 fresh `mycelium-application-owner-lease` entries with matching node provenance

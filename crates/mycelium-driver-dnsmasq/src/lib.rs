@@ -36,6 +36,9 @@ pub struct Settings {
     /// qualify; scanned listeners never become browser entrances implicitly.
     #[serde(default)]
     pub service_aliases: BTreeMap<String, String>,
+    /// Explicit reviewed Lua naming policies; disabled when empty.
+    #[serde(default)]
+    pub service_alias_plugins: Vec<PathBuf>,
     /// Explicit index owner. Root aliases never select an arbitrary discovered peer.
     #[serde(default)]
     pub service_index_peers: BTreeMap<String, String>,
@@ -43,10 +46,10 @@ pub struct Settings {
 
 impl Settings {
     fn validate(&self) -> Result<(), String> {
-        service_dns::validate_aliases(&self.service_aliases)?;
+        let aliases = service_dns::aliases(self)?;
         if self.service_index_peers.len() > 32
             || self.service_index_peers.iter().any(|(kind, peer)| {
-                !self.service_aliases.contains_key(kind)
+                !aliases.contains_key(kind)
                     || peer.is_empty()
                     || peer.len() > 128
                     || peer.chars().any(char::is_control)
@@ -232,6 +235,8 @@ pub fn peer_records(
 }
 
 async fn observation(settings: &Settings) -> Result<(Vec<DnsRecord>, u64), String> {
+    let resolved = service_dns::resolved(settings)?;
+    let settings = &resolved;
     let mut command = tokio::process::Command::new(&settings.mycelium);
     command
         .args(["peers", "--names-only", "--json"])
@@ -266,7 +271,7 @@ async fn observation(settings: &Settings) -> Result<(Vec<DnsRecord>, u64), Strin
         .map(|seen| seen.saturating_add(settings.expiry_seconds))
         .min()
         .unwrap_or(timestamp + settings.expiry_seconds);
-    if settings.service_aliases.is_empty() {
+    if service_dns::aliases(settings)?.is_empty() {
         return Ok((records, deadline));
     }
     let mut command = tokio::process::Command::new(&settings.mycelium);
@@ -738,7 +743,7 @@ struct Retained {
 impl Retained {
     fn usable(self, settings: &Settings, timestamp: u64) -> Result<(Vec<DnsRecord>, u64), String> {
         if self.site != settings.resolver.site
-            || self.service_aliases != settings.service_aliases
+            || self.service_aliases != service_dns::aliases(settings)?
             || self.service_index_peers != settings.service_index_peers
             || self.suffix != settings.resolver.suffix
             || self.expires_at <= timestamp
@@ -765,7 +770,7 @@ fn retain(
     expires_at: u64,
 ) -> Result<(), String> {
     let retained = Retained {
-        service_aliases: settings.service_aliases.clone(),
+        service_aliases: service_dns::aliases(settings)?,
         service_index_peers: settings.service_index_peers.clone(),
         site: settings.resolver.site.clone(),
         suffix: settings.resolver.suffix.clone(),
@@ -784,11 +789,12 @@ async fn supervise(settings: &Settings) -> Result<(), String> {
     let directory = state_dir()?;
     let path = directory.join("dnsmasq.conf");
     let snapshot = directory.join("retained.json");
-    let (records, mut expires_at) = match observation(settings).await {
+    let initial_settings = service_dns::resolved(settings)?;
+    let (records, mut expires_at) = match observation(&initial_settings).await {
         Ok(result) => result,
         Err(error) => {
             eprintln!("DNS initial observation failed: {error}; checking retained state");
-            match read_json::<Retained>(&snapshot).and_then(|s| s.usable(settings, now())) {
+            match read_json::<Retained>(&snapshot).and_then(|s| s.usable(&initial_settings, now())) {
                 Ok(result) => result,
                 Err(error) => {
                     eprintln!("DNS retained state unavailable: {error}; serving no mesh addresses");
@@ -798,10 +804,11 @@ async fn supervise(settings: &Settings) -> Result<(), String> {
         }
     };
     let mut active = settings.resolver.render(records.clone())?;
+    let mut active_aliases = initial_settings.service_aliases.clone();
     atomic_write(&path, active.as_bytes())?;
     syntax(settings, &path)?;
     let mut running = start(settings, &path)?;
-    retain(&snapshot, settings, records, expires_at)?;
+    retain(&snapshot, &initial_settings, records, expires_at)?;
     #[cfg(unix)]
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .map_err(|e| e.to_string())?;
@@ -817,19 +824,23 @@ async fn supervise(settings: &Settings) -> Result<(), String> {
         if let Some(status) = running.0.try_wait().map_err(|e| e.to_string())? {
             return Err(format!("dnsmasq exited: {status}"));
         }
+        // Re-evaluate reviewed local policy on each refresh. Invalid policy
+        // fails closed; a changed policy cannot retain the previous DNS aliases.
+        let next_settings = service_dns::resolved(settings)?;
+        let next_aliases = next_settings.service_aliases.clone();
         #[cfg(unix)]
         let observed = tokio::select! {
-            result=observation(settings)=>result,
+            result=observation(&next_settings)=>result,
             _=terminate.recv()=>return Ok(()),
             _=tokio::signal::ctrl_c()=>return Ok(()),
         };
         #[cfg(not(unix))]
-        let observed = observation(settings).await;
+        let observed = observation(&next_settings).await;
         let (records, next_expiry) = match observed {
             Ok(result) => result,
             Err(error) => {
                 eprintln!("DNS observation failed: {error}");
-                if now() < expires_at {
+                if now() < expires_at && next_aliases == active_aliases {
                     continue;
                 }
                 eprintln!("Retained records expired; withdrawing mesh addresses");
@@ -838,8 +849,9 @@ async fn supervise(settings: &Settings) -> Result<(), String> {
         };
         let next = settings.resolver.render(records.clone())?;
         if next == active {
+            active_aliases = next_aliases;
             expires_at = next_expiry;
-            retain(&snapshot, settings, records, expires_at)?;
+            retain(&snapshot, &next_settings, records, expires_at)?;
             continue;
         }
         let candidate = directory.join("candidate.conf");
@@ -854,10 +866,14 @@ async fn supervise(settings: &Settings) -> Result<(), String> {
                 .first()
                 .is_none_or(|record| verify(settings, record).is_ok());
         if healthy {
+            active_aliases = next_aliases;
             active = next;
             expires_at = next_expiry;
-            retain(&snapshot, settings, records, expires_at)?;
+            retain(&snapshot, &next_settings, records, expires_at)?;
         } else {
+            if next_aliases != active_aliases {
+                return Err("DNS candidate failed after naming policy changed; refusing old policy rollback".into());
+            }
             drop(running);
             atomic_write(&path, active.as_bytes())?;
             running = start(settings, &path)?;
@@ -942,6 +958,7 @@ mod tests {
             refresh_seconds: 30,
             expiry_seconds: 300,
             service_aliases: BTreeMap::new(),
+            service_alias_plugins: Vec::new(),
             service_index_peers: BTreeMap::new(),
         }
     }

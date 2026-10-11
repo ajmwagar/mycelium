@@ -6,6 +6,7 @@ license.workspace = true
 description = "Gated optional local DNS resolver management"
 
 [dependencies]
+mycelium-plugins-lua.workspace = true
 mycelium-core.workspace = true
 mycelium-dns-policy.workspace = true
 fpl-resource-observation.workspace = true

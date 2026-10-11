@@ -2384,6 +2384,7 @@ dependencies = [
  "fpl-resource-observation",
  "mycelium-core",
  "mycelium-dns-policy",
+ "mycelium-plugins-lua",
  "serde",
  "serde_json",
  "tokio",
