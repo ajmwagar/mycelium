@@ -68,7 +68,7 @@ pub(super) async fn apply(settings: &Settings) -> Result<Value, String> {
     let candidate = directory.join("candidate.conf");
     atomic_write(
         &candidate,
-        settings.resolver.render(records.clone())?.as_bytes(),
+        settings.resolver.render_for_sites(records.clone(), &settings.additional_sites)?.as_bytes(),
     )?;
     syntax(settings, &candidate)?;
     let active = Command::new("systemctl")
