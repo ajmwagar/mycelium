@@ -230,3 +230,13 @@ The server bounds configuration to 16 KiB, headers to 8 KiB, concurrent requests
 to 32 and each handshake/request/response to ten seconds. Connections close after
 one request. Only GET `/` and GET `/api/host` are supported; there are no actions,
 WebSockets, external assets or background browser polling.
+
+### Site-index navigation
+
+When `index` is enabled, the authenticated `/sites` index includes site anchors,
+an expandable site-membership tree and links to individual peer observations.
+Anchor identifiers are generated from presentation order, never interpolated
+from untrusted host or site names. Names remain HTML-escaped. Freshness markers
+describe retained observations, not successful browser connectivity. Membership
+does not imply a physical or overlay link. These links stay inside the authorized
+index; they do not yet open remote host pages or application endpoints.

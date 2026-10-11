@@ -80,10 +80,33 @@ pub(crate) fn page(index: &Index) -> String {
     let mut body = String::from(
         "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Mycelium · Sites</title><style>body{background:#252d27;color:#e5ece3;font:16px monospace;max-width:85ch;margin:3rem auto;padding:1rem}table{width:100%;text-align:left;border-collapse:collapse}td,th{padding:.7rem;border-bottom:1px solid #435044}a{color:#d3e6c6}small{color:#b3c4af}</style><h1>Mycelium</h1><p>Sites and peers observed by this node. Discovery is not access authority.</p><nav><a href=\"/host\">This host</a> · <a href=\"/api/sites\">JSON</a></nav>",
     );
-    for (site, hosts) in &index.sites {
-        body.push_str(&format!("<section><h2>{}</h2><table><tr><th scope=\"col\">Host</th><th scope=\"col\">Platform</th><th scope=\"col\">Observation</th></tr>", crate::host_web::escape_html(site)));
-        for host in hosts {
-            body.push_str(&format!("<tr><td>{}<br><small>{}</small></td><td>{} / {}</td><td>{}<br><small>Unix {}</small></td></tr>", crate::host_web::escape_html(&host.hostname), crate::host_web::escape_html(&host.node_id), crate::host_web::escape_html(&host.platform), crate::host_web::escape_html(&host.architecture), if host.fresh {"Fresh"} else {"Stale"}, host.last_observed_at));
+    body.push_str("<nav aria-label=\"Sites\"><h2>Sites</h2>");
+    for (number, (site, _)) in index.sites.iter().enumerate() {
+        body.push_str(&format!(
+            "<a href=\"#site-{number}\">{}</a> · ",
+            crate::host_web::escape_html(site)
+        ));
+    }
+    body.push_str("</nav><h2>Site membership</h2><p><small>This tree shows observed site membership, not network connectivity. Select a node for its observation.</small></p>");
+    for (number, (site, hosts)) in index.sites.iter().enumerate() {
+        body.push_str(&format!(
+            "<details><summary>{} · {} peers</summary><ul>",
+            crate::host_web::escape_html(site),
+            hosts.len()
+        ));
+        for (peer, host) in hosts.iter().enumerate() {
+            body.push_str(&format!(
+                "<li><a href=\"#node-{number}-{peer}\">{}</a> · {}</li>",
+                crate::host_web::escape_html(&host.hostname),
+                if host.fresh { "Fresh" } else { "Stale" }
+            ));
+        }
+        body.push_str("</ul></details>");
+    }
+    for (number, (site, hosts)) in index.sites.iter().enumerate() {
+        body.push_str(&format!("<section id=\"site-{number}\"><h2>{}</h2><table><tr><th scope=\"col\">Host</th><th scope=\"col\">Platform</th><th scope=\"col\">Observation</th></tr>", crate::host_web::escape_html(site)));
+        for (peer, host) in hosts.iter().enumerate() {
+            body.push_str(&format!("<tr id=\"node-{number}-{peer}\"><td><a href=\"#node-{number}-{peer}\">{}</a><br><small>{}</small></td><td>{} / {}</td><td>{}<br><small>Unix {}</small></td></tr>", crate::host_web::escape_html(&host.hostname), crate::host_web::escape_html(&host.node_id), crate::host_web::escape_html(&host.platform), crate::host_web::escape_html(&host.architecture), if host.fresh {"Fresh"} else {"Stale"}, host.last_observed_at));
         }
         body.push_str("</table></section>");
     }
@@ -163,5 +186,10 @@ mod tests {
         assert!(!html.contains("<script>"));
         assert!(html.contains("&lt;img&gt;"));
         assert!(html.contains("Stale"));
+        assert!(html.contains("href=\"#site-0\""));
+        assert!(html.contains("id=\"site-0\""));
+        assert!(html.contains("href=\"#node-0-0\""));
+        assert!(html.contains("id=\"node-0-0\""));
+        assert!(html.contains("not network connectivity"));
     }
 }
