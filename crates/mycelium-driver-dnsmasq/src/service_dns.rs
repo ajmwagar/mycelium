@@ -1,7 +1,7 @@
 //! DNS aliases from application-owned leases, never scanned listeners or ACLs.
 use super::Settings;
-use fpl_resource_observation::{ServiceCatalog, SCHEMA_VERSION};
-use mycelium_dns_policy::{canonical_domain, DnsRecord};
+use fpl_resource_observation::{SCHEMA_VERSION, ServiceCatalog};
+use mycelium_dns_policy::{DnsRecord, canonical_domain};
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::Read,
@@ -143,7 +143,9 @@ pub(super) fn project(
     }
     records.sort();
     records.dedup();
-    settings.resolver.render(records.clone())?;
+    settings
+        .resolver
+        .render_for_sites(records.clone(), &settings.additional_sites)?;
     Ok((records, deadline))
 }
 
@@ -178,15 +180,36 @@ mod tests {
     const UNIBUS: &str = include_str!("../../mycelium-plugins-lua/plugins/unibus_dns.lua");
     #[test]
     fn ipfs_policy_names_only_explicit_owned_gateways_not_rpc() {
-        let file=PolicyFile::new(include_str!("../../mycelium-plugins-lua/plugins/ipfs_dns.lua"));
-        let mut s=crate::tests::settings(); s.service_alias_plugins.push(file.0.clone());
-        let host=DnsRecord {name:"neo.lab.myc".into(),address:"192.0.2.12".parse().unwrap(),site:"lab".into(),node:"neo".into()};
-        let mut c=catalog(); c.observations[0].value.kind="ipfs".into();
-        assert_eq!(project(&s,vec![host.clone()],&c,1000,1200).unwrap().0.len(),1);
-        c.observations[0].value.kind="ipfs-gateway".into();
-        assert!(project(&s,vec![host.clone()],&c,1000,1200).unwrap().0.iter().any(|r|r.name=="ipfs.neo.lab.myc"));
-        c.observations[0].value.endpoints=BTreeSet::from(["https://127.0.0.1:5002".into()]);
-        assert_eq!(project(&s,vec![host],&c,1000,1200).unwrap().0.len(),1);
+        let file = PolicyFile::new(include_str!(
+            "../../mycelium-plugins-lua/plugins/ipfs_dns.lua"
+        ));
+        let mut s = crate::tests::settings();
+        s.service_alias_plugins.push(file.0.clone());
+        let host = DnsRecord {
+            name: "neo.lab.myc".into(),
+            address: "192.0.2.12".parse().unwrap(),
+            site: "lab".into(),
+            node: "neo".into(),
+        };
+        let mut c = catalog();
+        c.observations[0].value.kind = "ipfs".into();
+        assert_eq!(
+            project(&s, vec![host.clone()], &c, 1000, 1200)
+                .unwrap()
+                .0
+                .len(),
+            1
+        );
+        c.observations[0].value.kind = "ipfs-gateway".into();
+        assert!(
+            project(&s, vec![host.clone()], &c, 1000, 1200)
+                .unwrap()
+                .0
+                .iter()
+                .any(|r| r.name == "ipfs.neo.lab.myc")
+        );
+        c.observations[0].value.endpoints = BTreeSet::from(["https://127.0.0.1:5002".into()]);
+        assert_eq!(project(&s, vec![host], &c, 1000, 1200).unwrap().0.len(), 1);
     }
     #[test]
     fn lua_policy_reuses_generic_owner_validation_and_explicit_index() {
@@ -244,6 +267,7 @@ mod tests {
         s.service_alias_plugins.push(file.0.clone());
         let snapshot = resolved(&s).unwrap();
         let retained = super::super::Retained {
+            additional_sites: vec![],
             site: "lab".into(),
             suffix: "myc".into(),
             records: vec![],
@@ -302,11 +326,13 @@ mod tests {
         settings
             .service_index_peers
             .insert("unibus-viewer".into(), "other".into());
-        assert!(!project(&settings, hosts.clone(), &services, 1000, 1200)
-            .unwrap()
-            .0
-            .iter()
-            .any(|r| r.name == "unibus.myc"));
+        assert!(
+            !project(&settings, hosts.clone(), &services, 1000, 1200)
+                .unwrap()
+                .0
+                .iter()
+                .any(|r| r.name == "unibus.myc")
+        );
         settings
             .service_index_peers
             .insert("unibus-viewer".into(), "neo".into());

@@ -1,5 +1,9 @@
 # Browser HTTPS trust
 
+Node certificates also cover `unibus.HOST.SITE.myc`, derived from the same
+authenticated hostname/site identity as the host and Mycelium entrances.
+No viewer ACL, arbitrary alias, or site rename is conferred by that SAN.
+
 The fleet's Ed25519 CA continues to authenticate peer transports. The optional
 P256 **web CA** authenticates HTTPS servers to browsers; it cannot enroll peers,
 issue SSH credentials or grant viewer access. Existing human certificate bindings

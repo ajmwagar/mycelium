@@ -159,6 +159,14 @@ non-peer discovery is not included in this adapter.
 
 ## Optional daemon-page service names
 
+`additional_sites` in dnsmasq settings optionally admits explicitly reviewed
+remote sites from authenticated peer observations. The default remains local-only.
+Names retain each peer's observed site; this is not a site-alias or rename API.
+Reachable-address prefixes and freshness checks still apply. Changing the list
+invalidates retained policy state. Delegated namespaces cannot overlap these
+locally projected site namespaces. Never add a guessed site or remote private
+prefix merely to make a viewer link appear to work.
+
 Service aliases are default-off. Add a `service_aliases` map to resolver settings:
 
 ```json

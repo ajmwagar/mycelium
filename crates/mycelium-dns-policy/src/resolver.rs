@@ -1,5 +1,5 @@
 //! Optional resolver policy. Naming is separate from reachability and grants.
-use crate::{canonical_domain, plan, Delegation, DnsRecord};
+use crate::{Delegation, DnsRecord, canonical_domain, plan};
 use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, SocketAddr};
 
@@ -24,11 +24,46 @@ pub struct ResolverConfig {
     pub upstreams: Vec<SocketAddr>,
     #[serde(default)]
     pub delegations: Vec<Delegation>,
+    /// Explicit child namespace owner; addresses derive from fresh reachable records.
+    /// This authorizes catch-all DNS, not TLS issuance or application access.
+    #[serde(default)]
+    pub namespace_owners: std::collections::BTreeMap<String, String>,
 }
 
 impl ResolverConfig {
     /// Produces only DNS configuration: never DHCP or an OS default DNS change.
     pub fn render(&self, records: Vec<DnsRecord>) -> Result<String, String> {
+        self.render_for_sites(records, &[])
+    }
+
+    /// Project reviewed peer sites without renaming the observed site identities.
+    pub fn render_for_sites(
+        &self,
+        records: Vec<DnsRecord>,
+        additional_sites: &[String],
+    ) -> Result<String, String> {
+        let mut sites = std::collections::BTreeSet::new();
+        if additional_sites.len() > 32 {
+            return Err("too many additional DNS sites".into());
+        }
+        for site in additional_sites {
+            if canonical_domain(site)? != *site
+                || site.contains('.')
+                || site == &self.site
+                || !sites.insert(site)
+            {
+                return Err("additional sites need unique canonical labels".into());
+            }
+            let zone = format!("{site}.{}", self.suffix);
+            if self
+                .delegations
+                .iter()
+                .any(|d| d.zone == zone || d.zone.ends_with(&format!(".{zone}")))
+            {
+                return Err("additional site overlaps delegated namespace".into());
+            }
+        }
+        let remote_records = records.clone();
         let zone = plan(&self.site, &self.suffix, records, self.delegations.clone())?;
         if self.mode == ResolverMode::Off {
             return Ok(String::new());
@@ -73,6 +108,39 @@ impl ResolverConfig {
             config.push_str(&format!("server={}#{}\n", server.ip(), server.port()));
         }
         config.push_str(&zone.dnsmasq);
+        if self.namespace_owners.len() > 8 {
+            return Err("too many owned DNS namespaces".into());
+        }
+        for (namespace, owner) in &self.namespace_owners {
+            let canonical = canonical_domain(namespace)?;
+            if canonical != *namespace
+                || !namespace.ends_with(&format!(".{}", zone.suffix))
+                || owner.is_empty()
+                || owner.len() > 128
+                || owner.chars().any(char::is_control)
+                || zone.delegations.iter().any(|d| {
+                    namespace == &d.zone || namespace.ends_with(&format!(".{}", d.zone))
+                        || d.zone.ends_with(&format!(".{namespace}"))
+                })
+                || self.namespace_owners.keys().any(|other| {
+                    other != namespace && other.ends_with(&format!(".{namespace}"))
+                })
+                || zone.records.iter().any(|r| {
+                    r.name == *namespace || r.name.ends_with(&format!(".{namespace}"))
+                })
+            {
+                return Err("invalid or conflicting child namespace ownership".into());
+            }
+            // No owner evidence means no answer; never choose another gateway.
+            let addresses: std::collections::BTreeSet<_> = zone.records.iter()
+                .filter(|r| &r.node == owner).map(|r| r.address).collect();
+            for address in addresses {
+                config.push_str(&format!("address=/{namespace}/{address}\n"));
+            }
+        }
+        for site in additional_sites {
+            config.push_str(&plan(site, &self.suffix, remote_records.clone(), vec![])?.dnsmasq);
+        }
         Ok(config)
     }
 
@@ -88,10 +156,14 @@ impl ResolverConfig {
             .find(|s| s.ip().is_loopback())
             .ok_or("macOS namespace routing needs a loopback listener")?;
         let suffix = canonical_domain(&self.suffix)?;
-        Ok((suffix.clone(), format!(
-            "# Managed by Mycelium DNS resolver\ndomain {suffix}\nnameserver {}\nport {}\ntimeout 2\n",
-            listener.ip(), listener.port()
-        )))
+        Ok((
+            suffix.clone(),
+            format!(
+                "# Managed by Mycelium DNS resolver\ndomain {suffix}\nnameserver {}\nport {}\ntimeout 2\n",
+                listener.ip(),
+                listener.port()
+            ),
+        ))
     }
 }
 
@@ -109,8 +181,22 @@ pub fn usable_address(address: IpAddr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn namespace_answers_follow_explicit_fresh_owner_records() {
+        let mut c = config();
+        c.namespace_owners.insert("ipfs.myc".into(), "gateway".into());
+        assert!(!c.render(vec![]).unwrap().contains("address=/ipfs.myc/"));
+        let record = DnsRecord { name: "agora.lab.myc".into(), site: "lab".into(), node: "gateway".into(), address: "192.168.1.20".parse().unwrap() };
+        assert!(c.render(vec![record]).unwrap().contains("address=/ipfs.myc/192.168.1.20"));
+        for invalid in ["myc", "external.example", "*.ipfs.myc"] {
+            c.namespace_owners.clear();
+            c.namespace_owners.insert(invalid.into(), "gateway".into());
+            assert!(c.render(vec![]).is_err());
+        }
+    }
     fn config() -> ResolverConfig {
         ResolverConfig {
+            namespace_owners: Default::default(),
             mode: ResolverMode::LocalhostOnly,
             site: "lab".into(),
             suffix: "myc".into(),
@@ -154,10 +240,11 @@ mod tests {
         let mut c = config();
         c.mode = ResolverMode::LanServing;
         c.listen.push("192.0.2.1:1053".parse().unwrap());
-        assert!(c
-            .render(vec![])
-            .unwrap()
-            .contains("listen-address=192.0.2.1"));
+        assert!(
+            c.render(vec![])
+                .unwrap()
+                .contains("listen-address=192.0.2.1")
+        );
         c.delegations.push(Delegation {
             zone: "myc".into(),
             site: "lab".into(),

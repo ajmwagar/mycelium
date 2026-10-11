@@ -160,6 +160,7 @@ fn names(host: &str, site: &str, index: bool) -> Result<Vec<String>, String> {
     let mut names = vec![
         format!("{host}.{site}.myc"),
         format!("mycelium.{host}.{site}.myc"),
+        format!("unibus.{host}.{site}.myc"),
     ];
     if index {
         names.push("mycelium.myc".into());
@@ -450,7 +451,7 @@ mod tests {
     fn names_are_derived_and_no_wildcards_or_injection() {
         assert_eq!(
             names("neo", "lab", false).unwrap(),
-            vec!["neo.lab.myc", "mycelium.neo.lab.myc"]
+            vec!["neo.lab.myc", "mycelium.neo.lab.myc", "unibus.neo.lab.myc"]
         );
         assert_eq!(
             names("NEO", "LAB", false).unwrap(),

@@ -4,10 +4,10 @@ use mycelium_core::{
     ActionRisk, CapResult, CapSpec, Device, DeviceId, DeviceKind, DeviceMeta, ExecContext,
     MyceliumError, Params,
 };
-use mycelium_dns_policy::resolver::{usable_address, ResolverConfig, ResolverMode};
-use mycelium_dns_policy::{canonical_domain, DnsRecord};
+use mycelium_dns_policy::resolver::{ResolverConfig, ResolverMode, usable_address};
+use mycelium_dns_policy::{DnsRecord, canonical_domain};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
@@ -30,6 +30,9 @@ pub struct Settings {
     pub mycelium: PathBuf,
     /// Explicit reachable address scopes; do not publish every remote private IP.
     pub reachable_prefixes: Vec<String>,
+    /// Explicitly reviewed sites from peer identities; no site aliasing.
+    #[serde(default)]
+    pub additional_sites: Vec<String>,
     pub refresh_seconds: u64,
     pub expiry_seconds: u64,
     /// Opt-in application kind -> DNS service label. Only fresh owner leases
@@ -57,7 +60,8 @@ impl Settings {
         {
             return Err("invalid service index peer identity".into());
         }
-        self.resolver.render(vec![])?;
+        self.resolver
+            .render_for_sites(vec![], &self.additional_sites)?;
         if !self.dnsmasq.is_absolute() || !self.mycelium.is_absolute() {
             return Err("binary paths must be absolute".into());
         }
@@ -170,7 +174,6 @@ pub fn peer_records(
     timestamp: u64,
 ) -> Result<Vec<DnsRecord>, String> {
     let peers = peers.as_array().ok_or("peers must be an array")?;
-    let site = canonical_domain(&settings.resolver.site)?;
     let suffix = canonical_domain(&settings.resolver.suffix)?;
     let mut records = BTreeSet::new();
     let mut owners = BTreeMap::new();
@@ -178,9 +181,18 @@ pub fn peer_records(
         let Some(hello) = peer.get("hello") else {
             continue;
         };
-        if hello["site"].as_str() != Some(settings.resolver.site.as_str()) {
+        let Some(peer_site) = hello["site"].as_str() else {
+            continue;
+        };
+        if peer_site != settings.resolver.site
+            && !settings
+                .additional_sites
+                .iter()
+                .any(|site| site == peer_site)
+        {
             continue;
         }
+        let site = canonical_domain(peer_site)?;
         let Some(seen) = peer["last_seen"].as_u64() else {
             continue;
         };
@@ -226,7 +238,7 @@ pub fn peer_records(
             records.insert(DnsRecord {
                 name: name.clone(),
                 address,
-                site: settings.resolver.site.clone(),
+                site: peer_site.into(),
                 node: node.into(),
             });
         }
@@ -621,7 +633,10 @@ async fn apply(settings: &Settings, _config: &Path) -> Result<Value, String> {
     let candidate = directory.join("candidate.conf");
     atomic_write(
         &candidate,
-        settings.resolver.render(records.clone())?.as_bytes(),
+        settings
+            .resolver
+            .render_for_sites(records.clone(), &settings.additional_sites)?
+            .as_bytes(),
     )?;
     syntax(settings, &candidate)?;
     // Do not disrupt an unrelated process already listening on our socket.
@@ -731,6 +746,8 @@ fn start(settings: &Settings, config: &Path) -> Result<Running, String> {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Retained {
+    #[serde(default)]
+    additional_sites: Vec<String>,
     site: String,
     suffix: String,
     records: Vec<DnsRecord>,
@@ -743,13 +760,14 @@ struct Retained {
 impl Retained {
     fn usable(self, settings: &Settings, timestamp: u64) -> Result<(Vec<DnsRecord>, u64), String> {
         if self.site != settings.resolver.site
+            || self.additional_sites != settings.additional_sites
             || self.service_aliases != service_dns::aliases(settings)?
             || self.service_index_peers != settings.service_index_peers
             || self.suffix != settings.resolver.suffix
             || self.expires_at <= timestamp
             || self.expires_at > timestamp.saturating_add(settings.expiry_seconds)
             || self.records.iter().any(|r| {
-                r.site != settings.resolver.site
+                (r.site != settings.resolver.site && !settings.additional_sites.contains(&r.site))
                     || !usable_address(r.address)
                     || !settings
                         .reachable_prefixes
@@ -759,7 +777,9 @@ impl Retained {
         {
             return Err("retained DNS snapshot expired or outside current policy".into());
         }
-        settings.resolver.render(self.records.clone())?;
+        settings
+            .resolver
+            .render_for_sites(self.records.clone(), &settings.additional_sites)?;
         Ok((self.records, self.expires_at))
     }
 }
@@ -770,6 +790,7 @@ fn retain(
     expires_at: u64,
 ) -> Result<(), String> {
     let retained = Retained {
+        additional_sites: settings.additional_sites.clone(),
         service_aliases: service_dns::aliases(settings)?,
         service_index_peers: settings.service_index_peers.clone(),
         site: settings.resolver.site.clone(),
@@ -794,7 +815,8 @@ async fn supervise(settings: &Settings) -> Result<(), String> {
         Ok(result) => result,
         Err(error) => {
             eprintln!("DNS initial observation failed: {error}; checking retained state");
-            match read_json::<Retained>(&snapshot).and_then(|s| s.usable(&initial_settings, now())) {
+            match read_json::<Retained>(&snapshot).and_then(|s| s.usable(&initial_settings, now()))
+            {
                 Ok(result) => result,
                 Err(error) => {
                     eprintln!("DNS retained state unavailable: {error}; serving no mesh addresses");
@@ -803,7 +825,9 @@ async fn supervise(settings: &Settings) -> Result<(), String> {
             }
         }
     };
-    let mut active = settings.resolver.render(records.clone())?;
+    let mut active = settings
+        .resolver
+        .render_for_sites(records.clone(), &settings.additional_sites)?;
     let mut active_aliases = initial_settings.service_aliases.clone();
     atomic_write(&path, active.as_bytes())?;
     syntax(settings, &path)?;
@@ -847,7 +871,9 @@ async fn supervise(settings: &Settings) -> Result<(), String> {
                 (vec![], now())
             }
         };
-        let next = settings.resolver.render(records.clone())?;
+        let next = settings
+            .resolver
+            .render_for_sites(records.clone(), &settings.additional_sites)?;
         if next == active {
             active_aliases = next_aliases;
             expires_at = next_expiry;
@@ -918,7 +944,7 @@ pub async fn command(args: &[String]) -> Result<String, String> {
         let records = observe(&device.settings).await?;
         return Ok(
             json!({"mode":device.settings.resolver.mode,"records":records,
-            "dnsmasq":device.settings.resolver.render(records.clone())?,
+            "dnsmasq":device.settings.resolver.render_for_sites(records.clone(), &device.settings.additional_sites)?,
             "lan_activation_supported":false,"dhcp_changed":false})
             .to_string(),
         );
@@ -944,7 +970,9 @@ mod tests {
     use super::*;
     pub(super) fn settings() -> Settings {
         Settings {
+            additional_sites: vec![],
             resolver: ResolverConfig {
+                namespace_owners: Default::default(),
                 mode: ResolverMode::LocalhostOnly,
                 site: "lab".into(),
                 suffix: "myc".into(),
@@ -964,6 +992,23 @@ mod tests {
     }
     fn peer(node: &str, seen: u64) -> Value {
         json!({"hello":{"node_id":node,"hostname":"gpu","site":"lab","interfaces":[{"addresses":["192.0.2.12","198.51.100.1","fe80::1"]}]},"last_seen":seen})
+    }
+    #[test]
+    fn reviewed_remote_sites_preserve_signed_names_and_reachability() {
+        let mut s = settings();
+        let mut remote = peer("remote", 999);
+        remote["hello"]["site"] = json!("titan");
+        assert!(peer_records(&s, &json!([remote.clone()]), 1000).unwrap().is_empty());
+        s.additional_sites = vec!["titan".into()];
+        let records = peer_records(&s, &json!([remote]), 1000).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].site, "titan");
+        assert_eq!(records[0].name, "gpu.titan.myc");
+        let rendered = s.resolver.render_for_sites(records.clone(), &s.additional_sites).unwrap();
+        assert!(rendered.contains("host-record=gpu.titan.myc,192.0.2.12"));
+        assert!(!s.resolver.render(records).unwrap().contains("gpu.titan.myc"));
+        s.additional_sites = vec!["*.myc".into()];
+        assert!(s.validate().is_err());
     }
     #[test]
     fn fresh_scoped_addresses_and_expired_identity() {
@@ -1012,6 +1057,7 @@ mod tests {
         let s = settings();
         let records = peer_records(&s, &json!([peer("a", 999)]), 1000).unwrap();
         let make = |expiry| Retained {
+            additional_sites: vec![],
             service_aliases: BTreeMap::new(),
             service_index_peers: BTreeMap::new(),
             site: "lab".into(),
