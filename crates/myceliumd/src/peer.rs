@@ -168,6 +168,23 @@ impl Mesh {
         Ok(hello)
     }
 
+    /// Replace the complete public interface snapshot, including removals.
+    /// Renew the signed observation even when unchanged: health traffic must
+    /// not be mistaken for evidence that a previous LAN attachment still exists.
+    async fn refresh_local_interfaces(&self) -> Result<(), AnyError> {
+        let interfaces = tokio::task::spawn_blocking(collect_interfaces).await??;
+        self.publish_local_interfaces(interfaces).await
+    }
+
+    async fn publish_local_interfaces(
+        &self,
+        interfaces: Vec<PeerInterface>,
+    ) -> Result<(), AnyError> {
+        let mut hello = self.local_hello().await;
+        replace_interface_attachment(&mut hello, interfaces);
+        self.publish(PeerEvent::Hello(hello)).await
+    }
+
     #[cfg(test)]
     pub fn ephemeral_for_test() -> Arc<Self> {
         let key = SigningKey::from_bytes(&[3; 32]);
@@ -247,7 +264,7 @@ impl Mesh {
             architecture: std::env::consts::ARCH.into(),
             daemon_version: crate::VERSION.into(),
             capabilities,
-            interfaces: collect_interfaces(),
+            interfaces: collect_interfaces()?,
         };
         let allowed_origins = std::env::var("MYCELIUM_PEER_ALLOW").ok().map(|value| {
             value
@@ -300,6 +317,9 @@ impl Mesh {
         let collector = self.clone();
         tokio::spawn(async move {
             loop {
+                if let Err(error) = collector.refresh_local_interfaces().await {
+                    eprintln!("myceliumd: refresh local interface attachment: {error}");
+                }
                 match tokio::task::spawn_blocking(collect_health).await {
                     Ok(Ok(mut health)) => {
                         if let Some(release) = collector.preferred_release().await {
@@ -1969,16 +1989,16 @@ fn configured_node_facts() -> impl Iterator<Item = String> {
         .into_iter()
 }
 
-fn collect_interfaces() -> Vec<PeerInterface> {
+fn replace_interface_attachment(hello: &mut PeerHello, interfaces: Vec<PeerInterface>) {
+    hello.interfaces = interfaces;
+}
+
+fn collect_interfaces() -> Result<Vec<PeerInterface>, AnyError> {
     #[cfg(target_os = "linux")]
     {
-        let Ok(text) = output("ip", &["-j", "address", "show"]) else {
-            return Vec::new();
-        };
-        let Ok(rows) = serde_json::from_str::<Vec<serde_json::Value>>(&text) else {
-            return Vec::new();
-        };
-        return rows
+        let text = output("ip", &["-j", "address", "show"])?;
+        let rows = serde_json::from_str::<Vec<serde_json::Value>>(&text)?;
+        return Ok(rows
             .into_iter()
             .filter_map(|row| {
                 let name = row["ifname"].as_str()?.to_owned();
@@ -2002,13 +2022,11 @@ fn collect_interfaces() -> Vec<PeerInterface> {
                     addresses,
                 })
             })
-            .collect();
+            .collect());
     }
     #[cfg(target_os = "macos")]
     {
-        let Ok(text) = output("ifconfig", &[]) else {
-            return Vec::new();
-        };
+        let text = output("ifconfig", &[])?;
         let mut interfaces = Vec::new();
         let mut current = None::<PeerInterface>;
         for line in text.lines() {
@@ -2051,10 +2069,10 @@ fn collect_interfaces() -> Vec<PeerInterface> {
         {
             interfaces.push(interface);
         }
-        return interfaces;
+        return Ok(interfaces);
     }
     #[allow(unreachable_code)]
-    Vec::new()
+    Err("interface observations are unsupported on this platform".into())
 }
 
 fn is_publishable_address(address: &IpAddr) -> bool {
@@ -2654,6 +2672,38 @@ fn parse_darwin_swap(text: &str) -> (u64, u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn roaming_replaces_attachment_without_changing_identity_or_admin_site() {
+        let key = SigningKey::from_bytes(&[31; 32]);
+        let mut hello = test_hello(&key);
+        hello.site = "home-site".into();
+        let original = hello.clone();
+        let interface = |name: &str, ip: &str| PeerInterface {
+            name: name.into(),
+            mac: None,
+            addresses: vec![ip.parse().unwrap()],
+        };
+        replace_interface_attachment(&mut hello, vec![interface("wifi", "192.168.1.8")]);
+        replace_interface_attachment(
+            &mut hello,
+            vec![
+                interface("wifi", "192.168.2.8"),
+                interface("vpn", "100.64.0.8"),
+            ],
+        );
+        assert_eq!(hello.interfaces.len(), 2);
+        assert!(!hello
+            .interfaces
+            .iter()
+            .any(|iface| iface.addresses.contains(&"192.168.1.8".parse().unwrap())));
+        assert_eq!(hello.node_id, original.node_id);
+        assert_eq!(hello.site, original.site);
+        assert_eq!(hello.hostname, original.hostname);
+        assert_eq!(hello.capabilities, original.capabilities);
+        replace_interface_attachment(&mut hello, vec![]);
+        assert!(hello.interfaces.is_empty());
+    }
 
     #[test]
     fn observation_batches_are_bounded_by_wire_size() {

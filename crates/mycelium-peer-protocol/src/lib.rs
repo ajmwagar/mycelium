@@ -53,6 +53,8 @@ pub struct PeerHello {
     /// Hex-encoded Ed25519 public key; also the stable node identity.
     pub node_id: String,
     pub protocol_version: u16,
+    /// Administrative/enrollment site, not proof of current physical location.
+    /// Roaming changes observed interface attachment, never this peer's key.
     pub site: String,
     pub hostname: String,
     pub platform: Platform,
