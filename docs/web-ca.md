@@ -49,6 +49,16 @@ an administrator's explicit `--index` adds `mycelium.myc`. This does not select
 the DNS index owner; that remains DNS policy. Movement does not rotate peer keys;
 an authorized hostname/admin-site change requires a new certificate.
 
+An issuer may explicitly delegate a child application namespace with
+`--namespace ipfs.myc` on `issue`. This adds `ipfs.myc` and `*.ipfs.myc` to that
+peer's leaf. It is administrator-held authority, not a CSR-requested privilege:
+omitting the option still issues no wildcard. Only canonical children of `.myc`
+are permitted; `.myc` itself and arbitrary external domains are rejected. This
+grants TLS naming authority for that child namespace, not peer enrollment,
+content access, DNS ownership or an application ACL. Keep such leaves on the
+dedicated gateway, not an unrelated host viewer. Only one label is covered by
+the wildcard; nested IPNS/DNSLink names are not covered.
+
 Return `server.pem` and public `ca.pem` to the target through an authenticated
 channel, then:
 

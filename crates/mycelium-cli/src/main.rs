@@ -20,8 +20,8 @@ mod skills;
 mod ssh_access;
 mod stun;
 mod sync;
-mod wireguard;
 mod web_ca;
+mod wireguard;
 
 use mycelium_core::{
     ActionPlan, ActionRisk, AllocationReceipt, BootReachability, DiscoveryProtocol,
@@ -88,7 +88,7 @@ mycelium — control plane for your network appliances
 usage:
   mycelium web-ca init --path DIR --write
   mycelium web-ca request --path DIR --write
-  mycelium web-ca issue --ca DIR --request FILE --output DIR [--index] --write
+  mycelium web-ca issue --ca DIR --request FILE --output DIR [--index] [--namespace ZONE.myc] --write
   mycelium web-ca install --path DIR --certificate FILE --ca FILE --hostname NAME --write
   mycelium completions zsh|bash|fish
   mycelium sync enable --write | export [--qr] | join <rendezvous.json> --write
@@ -3030,18 +3030,24 @@ async fn resources(args: &[String]) -> Result<Vec<String>, ClientError> {
 async fn services(args: &[String]) -> Result<Vec<String>, ClientError> {
     let action = args.first().map(String::as_str).unwrap_or("list");
     if action == "discover" {
-        if args.len() != 7 || args[1] != "--plugin" || args[3] != "--socket" || args[5] != "--node" {
+        if args.len() != 7 || args[1] != "--plugin" || args[3] != "--socket" || args[5] != "--node"
+        {
             return Err(err_usage(
                 "services discover --plugin PATH --socket PATH --node OWNER_NODE_ID",
             ));
         }
         use std::io::Read;
         let mut source = String::new();
-        std::fs::File::open(&args[2]).map_err(ClientError::Io)?.take(65537)
-            .read_to_string(&mut source).map_err(ClientError::Io)?;
-        let provider = mycelium_plugins_lua::ServiceProvider::load(source).map_err(|e| err_usage(&e.to_string()))?;
-        let mut request = serde_json::to_vec(&provider.request().map_err(|e| err_usage(&e.to_string()))?)
+        std::fs::File::open(&args[2])
+            .map_err(ClientError::Io)?
+            .take(65537)
+            .read_to_string(&mut source)
+            .map_err(ClientError::Io)?;
+        let provider = mycelium_plugins_lua::ServiceProvider::load(source)
             .map_err(|e| err_usage(&e.to_string()))?;
+        let mut request =
+            serde_json::to_vec(&provider.request().map_err(|e| err_usage(&e.to_string()))?)
+                .map_err(|e| err_usage(&e.to_string()))?;
         request.push(b'\n');
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
         let bytes = tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -3080,7 +3086,7 @@ async fn services(args: &[String]) -> Result<Vec<String>, ClientError> {
         let catalog = myceliumd::service_provider::project(&provider, &bytes, &args[6], now)
             .map_err(|e| err_usage(&e))?;
         return Ok(vec![
-            serde_json::to_string_pretty(&catalog).map_err(|e| err_usage(&e.to_string()))?,
+            serde_json::to_string_pretty(&catalog).map_err(|e| err_usage(&e.to_string()))?
         ]);
     }
     if action == "watch" {

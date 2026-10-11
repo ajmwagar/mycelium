@@ -112,3 +112,56 @@ Rollback without touching other HTTPS routes or Kubo:
 configuration and pinned sample for inspection/recovery. Re-enable with
 `docker start` and the Serve command above. Restart policies are configured;
 a full host reboot has not been tested.
+
+## CID hostnames on Mycelium DNS
+
+Neo now resolves `CID.ipfs.myc` to Agora's reachable LAN address and validates
+HTTPS against the already-trusted Mycelium web CA. The dedicated gateway listens
+on `192.168.2.67:443`, not the Tailscale HTTPS listener. It uses
+`examples/ipfs-gateway/subdomain.conf` and the same restricted container options
+as above, but maps host CID plus request path into Kubo's `/ipfs/CID` content
+path. Only canonical lowercase base32 labels up to 63 characters are accepted;
+Kubo validates the CID itself. CIDv0 names must first be converted to CIDv1
+base32. IPNS and nested DNSLink names are not implemented.
+
+Namespace ownership is explicit operator policy, separate from application Lua
+aliases and discovery. The generic resolver's `namespace_owners` map selects
+the authorized peer, not a configured IP or a hardcoded IPFS implementation:
+
+```json
+"namespace_owners": {
+  "ipfs.myc": "87a7134985e83ac40cbb0e3e3d4d889093f9c8564db4f3ec5aab28eeebe3a67f"
+}
+```
+
+Put this map inside `resolver`. Addresses derive only from that peer's fresh
+site-scoped records and reviewed reachable prefixes; absent owner evidence
+withdraws answers rather than choosing another gateway. Configured child zones
+cannot overlap delegations, other child owners or exact peer/service records.
+The `.myc` local guard prevents public DNS fallback. This is intentional
+namespace provisioning, not an inference that any detected Kubo is a gateway.
+Lua still owns application alias naming; neither plugin nor observation may
+grant a namespace. DNS proves neither service health nor content authorization.
+
+Issue the leaf using a peer-signed CSR and explicit issuer option
+`mycelium web-ca issue ... --namespace ipfs.myc --write`. Keep the generated
+HTTPS key on Agora and the CA key only on the issuer. The wildcard leaf expires
+after seven days and requires the documented manual renewal; unattended
+gateway renewal is not implemented. The nginx container must restart after
+atomically replacing a file-mounted certificate/configuration, so Docker
+remounts the new inode. Validate configuration first.
+
+Neo settings are private at `~/.mycelium/dns/neo-ipfs.json`. The existing
+supplemental `.myc` OS resolver was reused; default DNS and DHCP are unchanged.
+DNS backup executable is `~/.mycelium/dns/mycelium-dns-resolver.pre-ipfs-namespace`.
+Rollback the DNS policy by applying the previous `neo.json` through that backup;
+stop `mycelium-ipfs-subdomain` to withdraw the new LAN HTTPS entrance. The
+separate tailnet gateway stays available. No full reboot qualification yet.
+
+Verified without `--resolve`, `--cacert` or `-k` on Neo:
+`https://bafkreig6d4replmun3e5fdcs7aql2sffhyjmrgez7h2ebdnoczmznwyypa.ipfs.myc/`.
+Downloaded bytes match the pinned document; POST returns 405, the admin API
+path returns 404, and unrelated public DNS continues working. This LAN
+entrance has no Mycelium viewer ACL or per-CID authorization; any client with
+network access can retrieve available content. Do not put secrets in IPFS
+without a separate encryption/access design.

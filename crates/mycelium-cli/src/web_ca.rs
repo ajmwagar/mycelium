@@ -167,6 +167,16 @@ fn names(host: &str, site: &str, index: bool) -> Result<Vec<String>, String> {
     }
     Ok(names)
 }
+/// Issuer-held namespace delegation, never inferred from a CSR or discovery.
+fn authorize_namespace(names: &mut Vec<String>, zone: &str) -> Result<(), String> {
+    let zone = mycelium_dns_policy::canonical_domain(zone)?;
+    if !zone.ends_with(".myc") || zone.split('.').count() < 2 {
+        return Err("web namespace must be a child of myc".into());
+    }
+    names.push(zone.clone());
+    names.push(format!("*.{zone}"));
+    Ok(())
+}
 fn option(args: &[String], name: &str) -> Result<PathBuf, String> {
     let i = args
         .iter()
@@ -304,7 +314,7 @@ pub async fn run(args: &[String]) -> Result<Vec<String>, String> {
         Some("issue") => {
             validate_args(
                 args,
-                &["--ca", "--request", "--output"],
+                &["--ca", "--request", "--output", "--namespace"],
                 &["--write", "--index"],
             )?;
             let request_path = option(args, "--request")?;
@@ -338,11 +348,15 @@ pub async fn run(args: &[String]) -> Result<Vec<String>, String> {
                 return Err("CSR peer observation is stale".into());
             }
             let hello = &peer["hello"];
-            let sans = names(
+            let mut sans = names(
                 hello["hostname"].as_str().ok_or("missing hostname")?,
                 hello["site"].as_str().ok_or("missing site")?,
                 args.iter().any(|a| a == "--index"),
             )?;
+            if args.iter().any(|a| a == "--namespace") {
+                let zone = option(args, "--namespace")?;
+                authorize_namespace(&mut sans, path(&zone)?)?;
+            }
             let ca = option(args, "--ca")?;
             let output = option(args, "--output")?;
             if output.exists() {
@@ -447,6 +461,26 @@ pub async fn run(args: &[String]) -> Result<Vec<String>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn namespace_requires_explicit_child_authority() {
+        let mut sans = names("agora", "lab", false).unwrap();
+        authorize_namespace(&mut sans, "ipfs.myc").unwrap();
+        assert!(sans.contains(&"*.ipfs.myc".into()));
+        assert!(sans.contains(&"ipfs.myc".into()));
+        for bad in [
+            "myc",
+            "com",
+            "example.com",
+            "*.ipfs.myc",
+            "ipfs.myc\nDNS:evil",
+        ] {
+            assert!(authorize_namespace(&mut vec![], bad).is_err());
+        }
+        assert!(!names("agora", "lab", false)
+            .unwrap()
+            .iter()
+            .any(|n| n.contains('*')));
+    }
     #[test]
     fn names_are_derived_and_no_wildcards_or_injection() {
         assert_eq!(

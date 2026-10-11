@@ -24,6 +24,10 @@ pub struct ResolverConfig {
     pub upstreams: Vec<SocketAddr>,
     #[serde(default)]
     pub delegations: Vec<Delegation>,
+    /// Explicit child namespace owner; addresses derive from fresh reachable records.
+    /// This authorizes catch-all DNS, not TLS issuance or application access.
+    #[serde(default)]
+    pub namespace_owners: std::collections::BTreeMap<String, String>,
 }
 
 impl ResolverConfig {
@@ -104,6 +108,36 @@ impl ResolverConfig {
             config.push_str(&format!("server={}#{}\n", server.ip(), server.port()));
         }
         config.push_str(&zone.dnsmasq);
+        if self.namespace_owners.len() > 8 {
+            return Err("too many owned DNS namespaces".into());
+        }
+        for (namespace, owner) in &self.namespace_owners {
+            let canonical = canonical_domain(namespace)?;
+            if canonical != *namespace
+                || !namespace.ends_with(&format!(".{}", zone.suffix))
+                || owner.is_empty()
+                || owner.len() > 128
+                || owner.chars().any(char::is_control)
+                || zone.delegations.iter().any(|d| {
+                    namespace == &d.zone || namespace.ends_with(&format!(".{}", d.zone))
+                        || d.zone.ends_with(&format!(".{namespace}"))
+                })
+                || self.namespace_owners.keys().any(|other| {
+                    other != namespace && other.ends_with(&format!(".{namespace}"))
+                })
+                || zone.records.iter().any(|r| {
+                    r.name == *namespace || r.name.ends_with(&format!(".{namespace}"))
+                })
+            {
+                return Err("invalid or conflicting child namespace ownership".into());
+            }
+            // No owner evidence means no answer; never choose another gateway.
+            let addresses: std::collections::BTreeSet<_> = zone.records.iter()
+                .filter(|r| &r.node == owner).map(|r| r.address).collect();
+            for address in addresses {
+                config.push_str(&format!("address=/{namespace}/{address}\n"));
+            }
+        }
         for site in additional_sites {
             config.push_str(&plan(site, &self.suffix, remote_records.clone(), vec![])?.dnsmasq);
         }
@@ -147,8 +181,22 @@ pub fn usable_address(address: IpAddr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn namespace_answers_follow_explicit_fresh_owner_records() {
+        let mut c = config();
+        c.namespace_owners.insert("ipfs.myc".into(), "gateway".into());
+        assert!(!c.render(vec![]).unwrap().contains("address=/ipfs.myc/"));
+        let record = DnsRecord { name: "agora.lab.myc".into(), site: "lab".into(), node: "gateway".into(), address: "192.168.1.20".parse().unwrap() };
+        assert!(c.render(vec![record]).unwrap().contains("address=/ipfs.myc/192.168.1.20"));
+        for invalid in ["myc", "external.example", "*.ipfs.myc"] {
+            c.namespace_owners.clear();
+            c.namespace_owners.insert(invalid.into(), "gateway".into());
+            assert!(c.render(vec![]).is_err());
+        }
+    }
     fn config() -> ResolverConfig {
         ResolverConfig {
+            namespace_owners: Default::default(),
             mode: ResolverMode::LocalhostOnly,
             site: "lab".into(),
             suffix: "myc".into(),
