@@ -172,7 +172,13 @@ pub(crate) async fn start(mesh: Arc<Mesh>, config: Config, acceptor: TlsAcceptor
                     if route == "/api/host" {
                         respond(&mut stream, 200, "application/json", &json).await
                     } else {
-                        respond(&mut stream, 200, "text/html; charset=utf-8", &page(&json)).await
+                        respond(
+                            &mut stream,
+                            200,
+                            "text/html; charset=utf-8",
+                            &page(&snapshot),
+                        )
+                        .await
                     }
                 })
                 .await;
@@ -187,7 +193,7 @@ pub(crate) async fn start(mesh: Arc<Mesh>, config: Config, acceptor: TlsAcceptor
     Ok(())
 }
 
-#[derive(Serialize)]
+#[derive(Default, Serialize)]
 struct Snapshot {
     node_id: String,
     hostname: String,
@@ -285,14 +291,67 @@ async fn respond<S: AsyncWrite + Unpin>(
     Ok(())
 }
 
-fn page(json: &str) -> String {
-    let escaped = json
-        .replace('&', "&amp;")
+fn escape_html(text: &str) -> String {
+    text.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
-        .replace('\'', "&#39;");
-    format!("<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Mycelium host</title><style>body{{background:#252d27;color:#e5ece3;font:16px monospace;max-width:70ch;margin:4rem auto;padding:1rem}}pre{{white-space:pre-wrap;overflow-wrap:anywhere}}</style><h1>Mycelium</h1><p>Local host observations · read-only</p><p>Timestamps describe retained observations, not a live connection guarantee.</p><pre>{escaped}</pre></html>")
+        .replace('\'', "&#39;")
+}
+
+fn page(snapshot: &Snapshot) -> String {
+    let mut rows = String::new();
+    let mut row = |label: &str, value: String| {
+        rows.push_str(&format!("<dt>{label}</dt><dd>{}</dd>", escape_html(&value)));
+    };
+    row("Site", snapshot.site.clone());
+    row(
+        "Platform",
+        format!("{} / {}", snapshot.platform, snapshot.architecture),
+    );
+    row("Mycelium", snapshot.daemon_version.clone());
+    row("Node identity", snapshot.node_id.clone());
+    row(
+        "Uptime",
+        snapshot
+            .uptime_seconds
+            .map(|value| format!("{value} seconds"))
+            .unwrap_or_else(|| "Not observed".into()),
+    );
+    row(
+        "Memory available / total",
+        match (snapshot.memory_available_bytes, snapshot.memory_total_bytes) {
+            (Some(available), Some(total)) => format!(
+                "{} / {} MiB",
+                available / (1024 * 1024),
+                total / (1024 * 1024)
+            ),
+            _ => "Not observed".into(),
+        },
+    );
+    row(
+        "Health observed",
+        snapshot
+            .health_observed_at
+            .map(|value| format!("Unix timestamp {value}"))
+            .unwrap_or_else(|| "Not observed".into()),
+    );
+    row(
+        "Hardware devices",
+        snapshot
+            .hardware_devices
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "Not observed".into()),
+    );
+    row(
+        "Hardware observed",
+        snapshot
+            .hardware_observed_at
+            .map(|value| format!("Unix timestamp {value}"))
+            .unwrap_or_else(|| "Not observed".into()),
+    );
+    let hostname = escape_html(&snapshot.hostname);
+    format!("<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>{hostname} · Mycelium</title><style>body{{background:#252d27;color:#e5ece3;font:16px monospace;max-width:70ch;margin:4rem auto;padding:1rem}}dl{{display:grid;grid-template-columns:minmax(10ch,1fr) 2fr;gap:1rem}}dd{{margin:0;overflow-wrap:anywhere}}dt,p{{color:#b3c4af}}a{{color:#d3e6c6}}</style><header><p>Mycelium · read-only</p><h1>{hostname}</h1></header><main><dl>{rows}</dl><p>Timestamps describe retained observations, not a live connection guarantee.</p><a href=\"/api/host\">JSON observation</a></main></html>")
 }
 
 #[cfg(test)]
@@ -398,9 +457,14 @@ mod tests {
 
     #[test]
     fn hostile_observations_are_text_not_markup() {
-        let rendered = page("<script>alert('x')</script>&");
+        let rendered = page(&Snapshot {
+            hostname: "<script>alert('x')</script>&".into(),
+            ..Snapshot::default()
+        });
         assert!(!rendered.contains("<script>"));
         assert!(rendered.contains("&lt;script&gt;"));
+        assert!(rendered.contains("<dt>Hardware devices</dt>"));
+        assert!(rendered.contains("Not observed"));
     }
 
     #[test]

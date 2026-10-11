@@ -413,8 +413,8 @@ impl Mesh {
         let mut hardware = None;
         for envelope in observations.values().filter(|value| value.origin == self.node_id()) {
             match &envelope.event {
-                PeerEvent::Health(value) => health = Some(value),
-                PeerEvent::Hardware(value) => hardware = Some(value),
+                PeerEvent::Health(value) if health.is_none_or(|previous: &HostHealth| value.observed_at > previous.observed_at) => health = Some(value),
+                PeerEvent::Hardware(value) if hardware.is_none_or(|previous: &HardwareSnapshot| value.observed_at > previous.observed_at) => hardware = Some(value),
                 _ => {},
             }
         }
@@ -2609,6 +2609,38 @@ mod tests {
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].len(), 1);
         assert!(matches!(batches[0][0].event, PeerEvent::Hello(_)));
+    }
+
+    #[tokio::test]
+    async fn local_web_projection_chooses_observation_time_not_map_order() {
+        let key = SigningKey::from_bytes(&[73; 32]);
+        let mesh = Mesh {
+            active_tcp: std::sync::Mutex::new(BTreeMap::new()),
+            hello: test_hello(&key), key: key.clone(), sequence: AtomicU64::new(0),
+            observations: Mutex::new(BTreeMap::new()), allowed_origins: None,
+            authority_roots: BTreeSet::new(), trusted_release_keys: BTreeSet::new(),
+            trusted_access_keys: BTreeSet::new(), require_transport_binding: true,
+        };
+        for (name, timestamp) in [("a-new", 100), ("z-old", 50)] {
+            let health = HostHealth {
+                observed_at: timestamp, uptime_seconds: 0, load_average: [0.0; 3],
+                logical_cpus: 1, memory_total_bytes: 0, memory_available_bytes: 0,
+                swap_total_bytes: 0, swap_free_bytes: 0, filesystems: vec![],
+                process_leaders: vec![], ssh_listening: false, established_ssh_sessions: 0,
+                platform_metrics: BTreeMap::new(),
+            };
+            let hardware = HardwareSnapshot {
+                schema_version: 1, node_id: mesh.node_id().into(), hostname: "test".into(),
+                observed_at: timestamp, devices: vec![],
+            };
+            let mut observations = mesh.observations.lock().await;
+            observations.insert(format!("{name}-health"), SignedEnvelope::sign(&key, timestamp, timestamp, PeerEvent::Health(health)).unwrap());
+            observations.insert(format!("{name}-hardware"), SignedEnvelope::sign(&key, timestamp, timestamp, PeerEvent::Hardware(hardware)).unwrap());
+        }
+        let times = mesh.project_local(|health, hardware| (
+            health.map(|value| value.observed_at), hardware.map(|value| value.observed_at),
+        )).await;
+        assert_eq!(times, (Some(100), Some(100)));
     }
 
     fn test_hello(key: &SigningKey) -> PeerHello {
