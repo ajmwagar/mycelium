@@ -132,8 +132,10 @@ without requiring an installed CLI upgrade. Linux installs an owned
 and restores the previous unit/settings if verification fails. This is not DHCP
 advertisement or a change to default DNS. The user manager must run (login or
 existing linger); activation does not enable linger or install a system service.
-Linux `system-install` remains unsupported: a verified companion listener is
-not yet suffix routing for browsers or normal system lookups.
+Linux `system-install` supports an owned native DNS delegate when
+systemd-resolved 258+ is active and `/etc/resolv.conf` uses its stub. Older or
+inactive backends fail before configuration writes; a verified companion alone
+is not evidence of browser/system routing.
 
 Store configuration outside the checkout, for example `~/.mycelium/dns/settings.json`:
 
@@ -285,6 +287,50 @@ withdrawn at their observed expiry. An unexpired, policy-checked snapshot can
 also survive a supervisor restart while discovery is unavailable. It shuts down its own dnsmasq child on
 SIGTERM. No DHCP, TFTP or router advertisement is enabled.
 
+### Linux OS suffix routing
+
+After activating the user companion, inspect and install its privileged route:
+
+```sh
+mycelium-dns-resolver system-install --config "$HOME/.mycelium/dns/settings.json" --dry-run
+sudo env HOME="$HOME" MYCELIUM_HOME="$HOME/.mycelium" \
+  "$HOME/.mycelium/bin/mycelium-dns-resolver" system-install \
+  --config "$HOME/.mycelium/dns/settings.json" --write
+getent ahosts hostname.lab.myc
+getent ahosts example.org
+```
+
+Mycelium owns only `/etc/systemd/dns-delegate.d/mycelium.dns-delegate`:
+`[Delegate]`, the configured loopback server, `Domains=~SUFFIX`, and
+`DefaultRoute=no`. It reloads resolved with SIGHUP, rather than restarting it
+and discarding dynamic VPN/uplink settings. No synthetic interface, allocated
+IP, uplink DNS change, `/etc/resolv.conf` edit, DHCP advertisement, or global
+`[Resolve] DNS=` fanout is needed. Application naming remains in the existing
+Lua policy and shared projection; this Rust adapter only installs OS routing.
+
+Apply verifies the actual native delegate properties, a fresh peer's address
+through OS `getent`, NXDOMAIN for an unknown suffix name through the OS stub,
+public DNS, and unchanged per-link DNS/domain/default-route state. Failure
+restores the previous owned file and verifies rollback. Existing foreign files,
+symlinks, writable/non-root-owned artifacts, and conflicting delegate ownership
+are refused. `system-remove --write` removes only this owned integration.
+
+The file persists across resolved/host restarts; the separately managed user
+companion still requires login or existing linger. Missing/expired observations
+remain withdrawn. DNS availability is not access authorization, nor does it
+install HTTPS trust. Browser secure-DNS overrides may still bypass OS DNS.
+
+Reference: [systemd's native DNS delegate contract](https://github.com/systemd/systemd/blob/v259/man/systemd.dns-delegate.xml).
+
+Qualification (2026-10-11): two Ubuntu/systemd 259 hosts passed native OS peer
+lookups, cross-site lookup, public DNS, and the unknown-name guard. On the
+gateway host, normal OS DNS delivered the real CID PDF over HTTPS (200,
+`application/pdf`, byte-identical), using the existing public web CA rather than
+an insecure TLS bypass. A deliberately wildcarded candidate failed the
+NXDOMAIN postcondition and restored the prior delegate, its readable file mode,
+OS peer lookup, and public DNS. Companion restart and resolved reload are
+qualified; a full host reboot and automatic browser trust installation are not.
+
 Rollback OS integration first, then stop the companion:
 
 ```sh
@@ -294,6 +340,6 @@ sudo "$HOME/.mycelium/bin/mycelium-dns-resolver" system-remove \
 
 Change `resolver.mode` to `off` in the private settings and run `apply --write`.
 Off does not silently delete privileged namespace files; removal is an explicit
-separate operation. DHCP option 6, LAN firewall enforcement and Linux suffix
-routing remain follow-up work. `dns plan` remains a separate read-only
+separate operation. DHCP option 6, LAN firewall enforcement and older Linux
+resolver backends remain follow-up work. `dns plan` remains a separate read-only
 site projection, not evidence that a resolver has been activated.

@@ -24,6 +24,7 @@ fn mesh_sites_default() -> bool {
     true
 }
 mod linux;
+mod linux_namespace;
 mod service_dns;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -597,6 +598,16 @@ impl Device for ResolverDevice {
     ) -> mycelium_core::Result<CapResult> {
         ctx.gate(cap != "dns.resolver.status")?;
         if ctx.dry_run {
+            if cfg!(target_os = "linux")
+                && matches!(
+                    cap,
+                    "dns.resolver.system-install" | "dns.resolver.system-remove"
+                )
+            {
+                return Ok(CapResult::dry_run(mycelium_core::Value::from_json(
+                    &linux_namespace::plan(&self.settings).map_err(failure)?,
+                )));
+            }
             return Ok(CapResult::dry_run(mycelium_core::Value::from_json(
                 &serde_json::to_value(&self.settings).map_err(failure)?,
             )));
@@ -610,13 +621,25 @@ impl Device for ResolverDevice {
                 verify(&self.settings, first).map_err(failure)?;
                 let (zone, expected) = self.settings.resolver.macos_namespace().map_err(failure)?;
                 json!({"mode":self.settings.resolver.mode,"verified_record":first,
-                    "namespace_installed":fs::read_to_string(Path::new("/etc/resolver").join(zone)).is_ok_and(|s|s==expected),"default_dns_changed":false})
+                    "namespace_installed":if cfg!(target_os="linux") { linux_namespace::installed(&self.settings) } else { fs::read_to_string(Path::new("/etc/resolver").join(zone)).is_ok_and(|s|s==expected) },"default_dns_changed":false})
             }
             "dns.resolver.system-install" => {
-                owned_namespace(&self.settings.resolver, false).map_err(failure)?
+                if cfg!(target_os = "linux") {
+                    linux_namespace::apply(&self.settings, false)
+                        .await
+                        .map_err(failure)?
+                } else {
+                    owned_namespace(&self.settings.resolver, false).map_err(failure)?
+                }
             }
             "dns.resolver.system-remove" => {
-                owned_namespace(&self.settings.resolver, true).map_err(failure)?
+                if cfg!(target_os = "linux") {
+                    linux_namespace::apply(&self.settings, true)
+                        .await
+                        .map_err(failure)?
+                } else {
+                    owned_namespace(&self.settings.resolver, true).map_err(failure)?
+                }
             }
             "dns.resolver.apply" => apply(&self.settings, &self.config).await.map_err(failure)?,
             "dns.resolver.run" => {
