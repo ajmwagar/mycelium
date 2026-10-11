@@ -972,7 +972,6 @@ mod tests {
         Settings {
             additional_sites: vec![],
             resolver: ResolverConfig {
-                namespace_owners: Default::default(),
                 mode: ResolverMode::LocalhostOnly,
                 site: "lab".into(),
                 suffix: "myc".into(),
