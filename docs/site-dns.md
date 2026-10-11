@@ -147,6 +147,7 @@ cargo test -p mycelium-dns-policy -p mycelium-driver-dnsmasq --locked
 cargo build -p mycelium-driver-dnsmasq --bin mycelium-dns-resolver --locked
 # Install the companion in a stable location before creating its LaunchAgent.
 install -m 755 target/debug/mycelium-dns-resolver "$HOME/.mycelium/bin/mycelium-dns-resolver"
+export PATH="$HOME/.mycelium/bin:$PATH"
 mycelium-dns-resolver plan --config "$HOME/.mycelium/dns/settings.json"
 mycelium-dns-resolver apply --config "$HOME/.mycelium/dns/settings.json" --dry-run
 mycelium-dns-resolver apply --config "$HOME/.mycelium/dns/settings.json" --write
@@ -177,7 +178,8 @@ with independently configured secure DNS may bypass the OS resolver.
 The supervisor refreshes at the configured interval, validates a candidate
 before replacing it, verifies the replacement, and restores the previous config
 on failed activation. Observation failure is logged; retained records are
-withdrawn at their observed expiry. It shuts down its own dnsmasq child on
+withdrawn at their observed expiry. An unexpired, policy-checked snapshot can
+also survive a supervisor restart while discovery is unavailable. It shuts down its own dnsmasq child on
 SIGTERM. No DHCP, TFTP or router advertisement is enabled.
 
 Rollback OS integration first, then stop the companion:

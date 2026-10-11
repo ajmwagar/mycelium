@@ -156,7 +156,8 @@ pub fn canonical_domain(value: &str) -> Result<String, String> {
     Ok(value)
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct DnsRecord {
     pub name: String,
     pub address: IpAddr,

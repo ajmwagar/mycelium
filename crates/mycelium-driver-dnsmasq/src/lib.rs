@@ -438,6 +438,14 @@ fn owned_namespace(config: &ResolverConfig, remove: bool) -> Result<Value, Strin
         }
     } else {
         atomic_write(&path, text.as_bytes())?;
+        // This contains public namespace routing, not credentials. macOS
+        // resolver clients and the unprivileged status capability must read it.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o644))
+                .map_err(|e| e.to_string())?;
+        }
     }
     Ok(json!({"namespace":path,"installed":!remove,"default_dns_changed":false}))
 }
@@ -674,17 +682,78 @@ fn start(settings: &Settings, config: &Path) -> Result<Running, String> {
         .map(Running)
         .map_err(|e| e.to_string())
 }
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Retained {
+    site: String,
+    suffix: String,
+    records: Vec<DnsRecord>,
+    expires_at: u64,
+}
+impl Retained {
+    fn usable(self, settings: &Settings, timestamp: u64) -> Result<(Vec<DnsRecord>, u64), String> {
+        if self.site != settings.resolver.site
+            || self.suffix != settings.resolver.suffix
+            || self.expires_at <= timestamp
+            || self.expires_at > timestamp.saturating_add(settings.expiry_seconds)
+            || self.records.iter().any(|r| {
+                r.site != settings.resolver.site
+                    || !usable_address(r.address)
+                    || !settings
+                        .reachable_prefixes
+                        .iter()
+                        .any(|p| in_prefix(r.address, p))
+            })
+        {
+            return Err("retained DNS snapshot expired or outside current policy".into());
+        }
+        settings.resolver.render(self.records.clone())?;
+        Ok((self.records, self.expires_at))
+    }
+}
+fn retain(
+    path: &Path,
+    settings: &Settings,
+    records: Vec<DnsRecord>,
+    expires_at: u64,
+) -> Result<(), String> {
+    let retained = Retained {
+        site: settings.resolver.site.clone(),
+        suffix: settings.resolver.suffix.clone(),
+        records,
+        expires_at,
+    };
+    atomic_write(
+        path,
+        &serde_json::to_vec(&retained).map_err(|e| e.to_string())?,
+    )
+}
 async fn supervise(settings: &Settings) -> Result<(), String> {
     if settings.resolver.mode != ResolverMode::LocalhostOnly {
         return Err("supervisor currently activates localhost-only".into());
     }
     let directory = state_dir()?;
     let path = directory.join("dnsmasq.conf");
-    let (records, mut expires_at) = observation(settings).await?;
-    let mut active = settings.resolver.render(records)?;
+    let snapshot = directory.join("retained.json");
+    let (records, mut expires_at) = match observation(settings).await {
+        Ok(result) => result,
+        Err(error) => {
+            eprintln!("DNS initial observation failed: {error}; checking retained state");
+            match read_json::<Retained>(&snapshot).and_then(|s| s.usable(settings, now())) {
+                Ok(result) => result,
+                Err(error) => {
+                    eprintln!("DNS retained state unavailable: {error}; serving no mesh addresses");
+                    (vec![], now())
+                }
+            }
+        }
+    };
+    let mut active = settings.resolver.render(records.clone())?;
     atomic_write(&path, active.as_bytes())?;
     syntax(settings, &path)?;
     let mut running = start(settings, &path)?;
+    retain(&snapshot, settings, records, expires_at)?;
     #[cfg(unix)]
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .map_err(|e| e.to_string())?;
@@ -700,7 +769,15 @@ async fn supervise(settings: &Settings) -> Result<(), String> {
         if let Some(status) = running.0.try_wait().map_err(|e| e.to_string())? {
             return Err(format!("dnsmasq exited: {status}"));
         }
-        let (records, next_expiry) = match observation(settings).await {
+        #[cfg(unix)]
+        let observed = tokio::select! {
+            result=observation(settings)=>result,
+            _=terminate.recv()=>return Ok(()),
+            _=tokio::signal::ctrl_c()=>return Ok(()),
+        };
+        #[cfg(not(unix))]
+        let observed = observation(settings).await;
+        let (records, next_expiry) = match observed {
             Ok(result) => result,
             Err(error) => {
                 eprintln!("DNS observation failed: {error}");
@@ -714,6 +791,7 @@ async fn supervise(settings: &Settings) -> Result<(), String> {
         let next = settings.resolver.render(records.clone())?;
         if next == active {
             expires_at = next_expiry;
+            retain(&snapshot, settings, records, expires_at)?;
             continue;
         }
         let candidate = directory.join("candidate.conf");
@@ -730,6 +808,7 @@ async fn supervise(settings: &Settings) -> Result<(), String> {
         if healthy {
             active = next;
             expires_at = next_expiry;
+            retain(&snapshot, settings, records, expires_at)?;
         } else {
             drop(running);
             atomic_write(&path, active.as_bytes())?;
@@ -859,6 +938,54 @@ mod tests {
     fn truncated_dns_names_fail_without_panicking() {
         for packet in [vec![0xc0], vec![4, 1], vec![64, 0], vec![]] {
             assert!(skip_name(&packet, &mut 0).is_err());
+        }
+    }
+    #[test]
+    fn retained_records_cannot_extend_expiry_or_cross_policy() {
+        let s = settings();
+        let records = peer_records(&s, &json!([peer("a", 999)]), 1000).unwrap();
+        let make = |expiry| Retained {
+            site: "lab".into(),
+            suffix: "myc".into(),
+            records: records.clone(),
+            expires_at: expiry,
+        };
+        assert!(make(1100).usable(&s, 1000).is_ok());
+        assert!(make(1000).usable(&s, 1000).is_err());
+        assert!(make(1301).usable(&s, 1000).is_err());
+        let mut s = s;
+        s.reachable_prefixes = vec!["198.51.100.0/24".into()];
+        assert!(make(1100).usable(&s, 1000).is_err());
+    }
+    #[test]
+    fn verification_checks_address_not_only_success_rcode() {
+        for correct in [true, false] {
+            let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            let mut s = settings();
+            s.resolver.listen = vec![socket.local_addr().unwrap()];
+            let server = std::thread::spawn(move || {
+                let mut bytes = [0u8; 512];
+                let (size, client) = socket.recv_from(&mut bytes).unwrap();
+                let mut reply = bytes[..size].to_vec();
+                reply[2] = 0x81;
+                reply[3] = 0x80;
+                reply[7] = 1;
+                reply.extend([0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 30, 0, 4]);
+                reply.extend(if correct {
+                    [192, 0, 2, 12]
+                } else {
+                    [192, 0, 2, 13]
+                });
+                socket.send_to(&reply, client).unwrap();
+            });
+            let record = DnsRecord {
+                name: "gpu.lab.myc".into(),
+                address: "192.0.2.12".parse().unwrap(),
+                site: "lab".into(),
+                node: "a".into(),
+            };
+            assert_eq!(verify(&s, &record).is_ok(), correct);
+            server.join().unwrap();
         }
     }
     #[tokio::test]
