@@ -23,6 +23,9 @@ const DEADLINE: Duration = Duration::from_secs(10);
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Config {
+    /// Explicit viewer entrance; this is navigation, never an access grant.
+    #[serde(default)]
+    pub unibus_viewer_url: Option<String>,
     pub listen: SocketAddr,
     /// Publish only an explicit non-loopback page entrance; off by default.
     #[serde(default)]
@@ -332,7 +335,8 @@ pub(crate) async fn start(mesh: Arc<Mesh>, config: Config, acceptor: TlsAcceptor
                         let body = if route == "/api/sites" {
                             serde_json::to_string_pretty(&index)?
                         } else {
-                            crate::discovery_index::page(&index)
+                            let navigation = load_optional()?.and_then(|c| c.unibus_viewer_url);
+                            crate::discovery_index::page_with_navigation(&index, navigation.as_deref())
                         };
                         if body.len() > 256 * 1024 {
                             return Err("discovery index exceeds response bound".into());
@@ -552,6 +556,7 @@ mod tests {
 
     fn config() -> Config {
         Config {
+            unibus_viewer_url: None,
             listen: "127.0.0.1:8443".parse().unwrap(),
             advertise: false,
             index: false,

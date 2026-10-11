@@ -2,6 +2,9 @@
 use mycelium_peer_protocol::{PeerEvent, PeerHello, SignedEnvelope};
 use serde::Serialize;
 use std::collections::BTreeMap;
+#[path = "viewer-shell/lib.rs"]
+#[allow(dead_code)]
+mod shell;
 
 #[derive(Serialize)]
 pub(crate) struct Index {
@@ -76,7 +79,12 @@ pub(crate) fn project<'a>(
     Ok(index)
 }
 
+#[cfg(test)]
 pub(crate) fn page(index: &Index) -> String {
+    page_with_navigation(index, None)
+}
+
+pub(crate) fn page_with_navigation(index: &Index, other: Option<&str>) -> String {
     let mut body = String::from(
         "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Mycelium · Sites</title><style>body{background:#252d27;color:#e5ece3;font:16px monospace;max-width:85ch;margin:3rem auto;padding:1rem}table{width:100%;text-align:left;border-collapse:collapse}td,th{padding:.7rem;border-bottom:1px solid #435044}a{color:#d3e6c6}small{color:#b3c4af}</style><h1>Mycelium</h1><p>Sites and peers observed by this node. Discovery is not access authority.</p><nav><a href=\"/host\">This host</a> · <a href=\"/api/sites\">JSON</a></nav>",
     );
@@ -114,7 +122,9 @@ pub(crate) fn page(index: &Index) -> String {
         body.push_str("<p>No peer identities observed.</p>");
     }
     body.push_str("</html>");
-    body
+    let styles = format!("<style>{}\n{}\nbody{{max-width:1200px;margin:auto;padding:var(--co-space-6);font-family:var(--co-font-family-sans,system-ui)}}table{{font:inherit}}</style>", include_str!("viewer-shell/coherence-product.css"), shell::CSS);
+    body.replacen("<html lang=\"en\">", "<html lang=\"en\" data-co-profile=\"product\" data-co-theme=\"dark\">", 1)
+        .replacen("<h1>Mycelium</h1>", &format!("{styles}{}<h1>Mycelium</h1>", shell::switcher(shell::View::Mycelium, other)), 1)
 }
 
 #[cfg(test)]

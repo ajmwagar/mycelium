@@ -240,3 +240,11 @@ from untrusted host or site names. Names remain HTML-escaped. Freshness markers
 describe retained observations, not successful browser connectivity. Membership
 does not imply a physical or overlay link. These links stay inside the authorized
 index; they do not yet open remote host pages or application endpoints.
+# Shared environment navigation
+
+`unibus_viewer_url` optionally supplies an explicit HTTPS entrance in the shared
+Coherence Mycelium / Unibus pill on the discovery site index. Missing entrances
+remain disabled. The destination independently authenticates and authorizes the
+viewer; navigation is not a grant or a proxy. The component and product theme
+snapshot are shared with the Unibus viewer, not separately styled controls.
+
