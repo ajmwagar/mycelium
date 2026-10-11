@@ -123,8 +123,19 @@ pub(crate) fn page_with_navigation(index: &Index, other: Option<&str>) -> String
     }
     body.push_str("</html>");
     let styles = format!("<style>{}\n{}\nbody{{max-width:1200px;margin:auto;padding:var(--co-space-6);font-family:var(--co-font-family-sans,system-ui)}}table{{font:inherit}}</style>", include_str!("viewer-shell/coherence-product.css"), shell::CSS);
-    body.replacen("<html lang=\"en\">", "<html lang=\"en\" data-co-profile=\"product\" data-co-theme=\"dark\">", 1)
-        .replacen("<h1>Mycelium</h1>", &format!("{styles}{}<h1>Mycelium</h1>", shell::switcher(shell::View::Mycelium, other)), 1)
+    body.replacen(
+        "<html lang=\"en\">",
+        "<html lang=\"en\" data-co-profile=\"product\" data-co-theme=\"dark\">",
+        1,
+    )
+    .replacen(
+        "<h1>Mycelium</h1>",
+        &format!(
+            "{styles}{}<h1>Mycelium</h1>",
+            shell::switcher(shell::View::Mycelium, other)
+        ),
+        1,
+    )
 }
 
 #[cfg(test)]

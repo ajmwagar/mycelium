@@ -1246,8 +1246,12 @@ impl Daemon {
             Request::Services => {
                 let topology = self.converged_topology().await?;
                 let catalog = crate::services::project_with_local(
-                    &topology, &crate::home_dir(), self.mesh.node_id(), unix_now(),
-                ).map_err(MyceliumError::Parse)?;
+                    &topology,
+                    &crate::home_dir(),
+                    self.mesh.node_id(),
+                    unix_now(),
+                )
+                .map_err(MyceliumError::Parse)?;
                 to_value(catalog).map_err(json_err)
             }
             Request::DiscoveryScopeList => {

@@ -10,7 +10,10 @@ const SERVICE_TTL_SECONDS: u64 = 15 * 60;
 /// Overlay current local owner files without extending their original leases.
 /// Remote signed observations remain retained; local deletions withdraw now.
 pub fn project_with_local(
-    topology: &Topology, home: &std::path::Path, node: &str, now: u64,
+    topology: &Topology,
+    home: &std::path::Path,
+    node: &str,
+    now: u64,
 ) -> Result<ServiceCatalog, String> {
     let observations = crate::local_services::observe_sources(home, node, now)?;
     let mut catalog = project(topology);
@@ -96,8 +99,10 @@ pub fn project(topology: &Topology) -> ServiceCatalog {
                     // Preserve only the bounded non-secret Kubo facts selected
                     // by the Lua dialect; do not expose arbitrary attributes.
                     for key in ["peer_id", "swarm_addresses"] {
-                        if let Some(value) = service.attributes.get(key).filter(|v|v.len()<=16384) {
-                            attributes.insert(key.into(),value.clone());
+                        if let Some(value) =
+                            service.attributes.get(key).filter(|v| v.len() <= 16384)
+                        {
+                            attributes.insert(key.into(), value.clone());
                         }
                     }
                     if let Some(version) = service
@@ -209,7 +214,14 @@ fn recognize(service: &ServiceRecord) -> Option<(String, Confidence)> {
 mod tests {
     #[test]
     fn local_owner_read_refreshes_and_withdraws_without_scan() {
-        let home = std::env::temp_dir().join(format!("mycelium-owner-read-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let home = std::env::temp_dir().join(format!(
+            "mycelium-owner-read-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         std::fs::create_dir(&home).unwrap();
         let path = home.join("application-services.json");
         let document = serde_json::json!({"schema_version":1,"observations":[{
@@ -224,9 +236,15 @@ mod tests {
         let catalog = super::project_with_local(&topology, &home, "peer", 101).unwrap();
         assert_eq!(catalog.observations.len(), 1);
         assert_eq!(catalog.observations[0].expires_at, 160);
-        assert!(super::project_with_local(&topology, &home, "peer", 160).unwrap().observations.is_empty());
+        assert!(super::project_with_local(&topology, &home, "peer", 160)
+            .unwrap()
+            .observations
+            .is_empty());
         std::fs::remove_file(&path).unwrap();
-        assert!(super::project_with_local(&topology, &home, "peer", 101).unwrap().observations.is_empty());
+        assert!(super::project_with_local(&topology, &home, "peer", 101)
+            .unwrap()
+            .observations
+            .is_empty());
         std::fs::write(&path, b"invalid").unwrap();
         assert!(super::project_with_local(&topology, &home, "peer", 101).is_err());
         std::fs::remove_file(&path).unwrap();
@@ -310,9 +328,14 @@ mod tests {
         );
         let mut rpc = service("ipfs-rpc", Some("IPFS Kubo/0.43.1"), 5002);
         rpc.origin.source = "kubo-loopback-version".into();
-        rpc.attributes.insert("peer_id".into(),"12D3KooWfixture".into());
-        rpc.attributes.insert("swarm_addresses".into(),"[\"/ip4/192.0.2.10/tcp/4001/p2p/12D3KooWfixture\"]".into());
-        rpc.attributes.insert("secret".into(),"must-not-project".into());
+        rpc.attributes
+            .insert("peer_id".into(), "12D3KooWfixture".into());
+        rpc.attributes.insert(
+            "swarm_addresses".into(),
+            "[\"/ip4/192.0.2.10/tcp/4001/p2p/12D3KooWfixture\"]".into(),
+        );
+        rpc.attributes
+            .insert("secret".into(), "must-not-project".into());
         node.services.insert("tcp:5002/ipfs-rpc".into(), rpc);
         let mut topology = Topology::default();
         topology.nodes.insert(node.id.clone(), node);
@@ -323,7 +346,7 @@ mod tests {
         assert_eq!(observed.value.attributes["endpoint_scope"], "host-local");
         assert_eq!(observed.value.attributes["version"], "0.43.1");
         assert_eq!(observed.value.attributes["administrative"], "true");
-        assert_eq!(observed.value.attributes["peer_id"],"12D3KooWfixture");
+        assert_eq!(observed.value.attributes["peer_id"], "12D3KooWfixture");
         assert!(observed.value.attributes["swarm_addresses"].contains("/ip4/192.0.2.10"));
         assert!(!observed.value.attributes.contains_key("secret"));
         assert_eq!(observed.expires_at, 100 + SERVICE_TTL_SECONDS);
