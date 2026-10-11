@@ -4,6 +4,10 @@ This document is served by Agora's private Kubo node through a read-only HTTPS
 content gateway. Its CID identifies these exact bytes, independently of the
 gateway hostname.
 
-Only GET and HEAD under /ipfs/ are exposed. The Kubo administration API is not
-published. This first deployment uses existing tailnet HTTPS access; it does
-not install Tailscale as a requirement of Mycelium or enable public ingress.
+Open documents at https://CID.ipfs.myc/ using Mycelium DNS and the fleet web CA.
+The gateway is on Agora's LAN address; a Tailscale hostname is not required.
+DNS derives its address from the explicitly authorized peer's fresh records.
+
+Only GET and HEAD content requests are exposed. The Kubo administration API is
+not published. This LAN gateway is read-only, but it has no per-document ACL.
+Do not publish secrets without a separate encryption and access design.

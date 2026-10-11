@@ -100,7 +100,8 @@ Deployment runbook (Agora-specific existing network/container names):
 4. Add the non-secret `examples/ipfs-gateway/welcome.txt` document using Kubo's
    local `ipfs add --cid-version=1 -Q` CLI. This pins the sample; no existing
    pins or Kubo settings are changed. Verified CID:
-   `bafkreig6d4replmun3e5fdcs7aql2sffhyjmrgez7h2ebdnoczmznwyypa`.
+   `bafkreihnomwdkaytc4h53x7fuks253yxfobmjsims4yvtzvnjrmrylpyyy`.
+   The earlier sample CID remains pinned; no existing content was deleted.
 5. Verify HTTPS without `-k`: GET and HEAD on that CID return 200; GET
    `/api/v0/version` returns 404; POST on the content path returns 405.
    Compare downloaded document bytes with the source file. Confirm prior
@@ -159,7 +160,7 @@ stop `mycelium-ipfs-subdomain` to withdraw the new LAN HTTPS entrance. The
 separate tailnet gateway stays available. No full reboot qualification yet.
 
 Verified without `--resolve`, `--cacert` or `-k` on Neo:
-`https://bafkreig6d4replmun3e5fdcs7aql2sffhyjmrgez7h2ebdnoczmznwyypa.ipfs.myc/`.
+`https://bafkreihnomwdkaytc4h53x7fuks253yxfobmjsims4yvtzvnjrmrylpyyy.ipfs.myc/`.
 Downloaded bytes match the pinned document; POST returns 405, the admin API
 path returns 404, and unrelated public DNS continues working. This LAN
 entrance has no Mycelium viewer ACL or per-CID authorization; any client with
