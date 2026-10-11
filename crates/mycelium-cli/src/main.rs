@@ -3028,6 +3028,54 @@ async fn resources(args: &[String]) -> Result<Vec<String>, ClientError> {
 
 async fn services(args: &[String]) -> Result<Vec<String>, ClientError> {
     let action = args.first().map(String::as_str).unwrap_or("list");
+    if action == "shroud" {
+        if args.len() != 5 || args[1] != "--socket" || args[3] != "--node" {
+            return Err(err_usage(
+                "services shroud --socket PATH --node OWNER_NODE_ID (read-only JSON projection)",
+            ));
+        }
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+        let bytes = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let mut socket = tokio::net::UnixStream::connect(&args[2]).await?;
+            socket
+                .write_all(b"{\"action\":\"discover\",\"includeUnready\":false}\n")
+                .await?;
+            let mut reader = tokio::io::BufReader::new(socket);
+            let mut bytes = Vec::new();
+            loop {
+                let available = reader.fill_buf().await?;
+                if available.is_empty() {
+                    break;
+                }
+                let count = available
+                    .iter()
+                    .position(|b| *b == b'\n')
+                    .map_or(available.len(), |i| i + 1);
+                if bytes.len() + count > 262144 {
+                    return Err(std::io::Error::other("Shroud response exceeds bound"));
+                }
+                let done = available[count - 1] == b'\n';
+                bytes.extend_from_slice(&available[..count]);
+                reader.consume(count);
+                if done {
+                    break;
+                }
+            }
+            Ok::<_, std::io::Error>(bytes)
+        })
+        .await
+        .map_err(|_| err_usage("Shroud discovery timed out"))?
+        .map_err(|e| err_usage(&format!("Shroud discovery failed: {e}")))?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| err_usage("invalid system clock"))?
+            .as_secs();
+        let catalog = myceliumd::shroud_services::project(&bytes, &args[4], now)
+            .map_err(|e| err_usage(&e))?;
+        return Ok(vec![
+            serde_json::to_string_pretty(&catalog).map_err(|e| err_usage(&e.to_string()))?,
+        ]);
+    }
     if action == "watch" {
         return catalog_watch(Request::Services, &args[1..], "services").await;
     }
