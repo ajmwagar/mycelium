@@ -5,3 +5,5 @@ target/
 *.pid
 .mycelium/
 brag-output*/
+/tmp/pdfs/
+/output/pdf/

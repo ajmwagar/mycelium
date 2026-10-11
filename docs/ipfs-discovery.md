@@ -166,3 +166,22 @@ path returns 404, and unrelated public DNS continues working. This LAN
 entrance has no Mycelium viewer ACL or per-CID authorization; any client with
 network access can retrieve available content. Do not put secrets in IPFS
 without a separate encryption/access design.
+
+## Actual PDF verification
+
+The welcome text above is not a PDF. A one-page PDF example is authored in
+`examples/ipfs-gateway/welcome.typ`; with Typst installed, render it using:
+
+```sh
+mkdir -p output/pdf
+typst compile examples/ipfs-gateway/welcome.typ output/pdf/mycelium-ipfs-welcome.pdf
+```
+
+The visually inspected and pinned PDF is available at:
+`https://bafkreihva3evq42zjijp7k6jfjiyynifc2inioz4xnnwrtyly3gm32vcha.ipfs.myc/`.
+Verified through normal Neo DNS and trusted HTTPS: GET returns 200 with
+`Content-Type: application/pdf`, all 53,271 downloaded bytes match the local
+artifact, and `Range: bytes=0-4` returns 206 with `%PDF-`. The PDF has one A4
+page, no JavaScript or forms, and was rendered to PNG for layout inspection.
+No browser automation was available; native Safari's PDF presentation was not
+separately verified. Rerendering can change the CID (including PDF metadata).
