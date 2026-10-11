@@ -20,6 +20,7 @@ use std::{
 
 const LABEL: &str = "dev.fpl.mycelium-dns";
 const MARKER: &str = "# Managed by Mycelium DNS resolver\n";
+mod linux;
 mod service_dns;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -597,6 +598,9 @@ impl Device for ResolverDevice {
 }
 
 async fn apply(settings: &Settings, _config: &Path) -> Result<Value, String> {
+    if cfg!(target_os = "linux") {
+        return linux::apply(settings).await;
+    }
     if !cfg!(target_os = "macos") {
         return Err("persistent activation currently supports macOS only".into());
     }

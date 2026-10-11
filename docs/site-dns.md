@@ -123,12 +123,17 @@ server implementation. Embedded nodes can leave it off and use LAN DNS. Modes:
 | Mode | Configuration | Activation in this slice |
 | --- | --- | --- |
 | `off` | No resolver process | macOS stops the owned LaunchAgent |
-| `localhost-only` | Explicit loopback listeners | macOS user LaunchAgent plus optional suffix-only OS routing |
+| `localhost-only` | Explicit loopback listeners | macOS user LaunchAgent or Linux user systemd unit; OS routing is separate |
 | `lan-serving` | Explicit interface addresses | Plan only; verified client-network firewall policy is required before activation |
 
 The companion also builds as `mycelium-dns-resolver`; it exposes the same actions
-without requiring an installed CLI upgrade. Linux persistent activation remains
-unsupported. This is not DHCP advertisement or a change to default DNS.
+without requiring an installed CLI upgrade. Linux installs an owned
+`~/.config/systemd/user/mycelium-dns.service`, verifies DNS answers after startup,
+and restores the previous unit/settings if verification fails. This is not DHCP
+advertisement or a change to default DNS. The user manager must run (login or
+existing linger); activation does not enable linger or install a system service.
+Linux `system-install` remains unsupported: a verified companion listener is
+not yet suffix routing for browsers or normal system lookups.
 
 Store configuration outside the checkout, for example `~/.mycelium/dns/settings.json`:
 
@@ -286,6 +291,6 @@ sudo "$HOME/.mycelium/bin/mycelium-dns-resolver" system-remove \
 
 Change `resolver.mode` to `off` in the private settings and run `apply --write`.
 Off does not silently delete privileged namespace files; removal is an explicit
-separate operation. DHCP option 6, LAN firewall enforcement and Linux service
-activation remain follow-up work. `dns plan` remains a separate read-only
+separate operation. DHCP option 6, LAN firewall enforcement and Linux suffix
+routing remain follow-up work. `dns plan` remains a separate read-only
 site projection, not evidence that a resolver has been activated.
