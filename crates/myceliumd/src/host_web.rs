@@ -19,10 +19,15 @@ type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 const MAX_CONFIG: u64 = 16 * 1024;
 const MAX_HEADER: usize = 8192;
 const DEADLINE: Duration = Duration::from_secs(10);
+#[path = "host_web_widgets.rs"]
+mod widgets;
 
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Config {
+    /// Operator-installed shared Coherence bundle. Never a remotely supplied path.
+    #[serde(default)]
+    pub widget_assets: Option<String>,
     /// Explicit viewer entrance; this is navigation, never an access grant.
     #[serde(default)]
     pub unibus_viewer_url: Option<String>,
@@ -52,6 +57,13 @@ pub(crate) struct ServerIdentity {
 
 impl Config {
     fn validate(&self) -> Result<()> {
+        if self.widget_assets.as_ref().is_some_and(|p| {
+            !std::path::Path::new(p).is_absolute()
+                || p.len() > 4096
+                || p.chars().any(char::is_control)
+        }) {
+            return Err("widget assets require an absolute operator-owned directory".into());
+        }
         if self.advertise && (self.listen.ip().is_loopback() || self.listen.ip().is_unspecified()) {
             return Err("host web advertisement requires a non-loopback explicit address".into());
         }
@@ -370,19 +382,39 @@ pub(crate) async fn start(mesh: Arc<Mesh>, config: Config, _acceptor: TlsAccepto
                         )
                         .await;
                     }
+                    if route.starts_with("/widgets/") {
+                        let fresh = load_optional()?.ok_or("host web disabled")?;
+                        let Some(directory) = fresh.widget_assets else {
+                            return respond(
+                                &mut stream,
+                                404,
+                                "text/plain",
+                                "Widgets not installed.\n",
+                            )
+                            .await;
+                        };
+                        let (body, mime) = widgets::asset(&directory, &route)?;
+                        return respond_bytes(&mut stream, 200, mime, &body).await;
+                    }
                     let snapshot = local_snapshot(&mesh).await;
                     let json = serde_json::to_string_pretty(&snapshot)?;
                     if json.len() > 256 * 1024 {
                         return Err("host web projection exceeds response bound".into());
                     }
-                    if route == "/api/host" {
+                    if route == "/api/widgets/host" {
+                        let body = serde_json::to_string(&widgets::snapshot(&snapshot))?;
+                        respond(&mut stream, 200, "application/json", &body).await
+                    } else if route == "/api/host" {
                         respond(&mut stream, 200, "application/json", &json).await
                     } else {
                         respond(
                             &mut stream,
                             200,
                             "text/html; charset=utf-8",
-                            &page(&snapshot),
+                            &widgets::page(
+                                &snapshot,
+                                load_optional()?.is_some_and(|c| c.widget_assets.is_some()),
+                            ),
                         )
                         .await
                     }
@@ -401,6 +433,7 @@ pub(crate) async fn start(mesh: Arc<Mesh>, config: Config, _acceptor: TlsAccepto
 
 #[derive(Default, Serialize)]
 struct Snapshot {
+    addresses: Vec<String>,
     node_id: String,
     hostname: String,
     site: String,
@@ -419,6 +452,14 @@ struct Snapshot {
 async fn local_snapshot(mesh: &Mesh) -> Snapshot {
     let hello = mesh.local_hello().await;
     mesh.project_local(|health, hardware| Snapshot {
+        addresses: hello
+            .interfaces
+            .iter()
+            .flat_map(|i| i.addresses.iter())
+            .filter(|a| !a.is_loopback() && !a.is_unspecified() && !a.is_multicast())
+            .take(64)
+            .map(|a| a.to_string())
+            .collect(),
         node_id: hello.node_id,
         hostname: hello.hostname,
         site: hello.site,
@@ -454,7 +495,18 @@ async fn read_route<S: AsyncRead + Unpin>(stream: &mut S) -> std::result::Result
     if method != "GET" {
         return Err(405);
     }
-    if !matches!(path, "/" | "/host" | "/api/host" | "/sites" | "/api/sites") {
+    if !matches!(
+        path,
+        "/" | "/host"
+            | "/api/host"
+            | "/sites"
+            | "/api/sites"
+            | "/api/widgets/host"
+            | "/widgets/coherence-widgets.js"
+            | "/widgets/coherence_widget_web.js"
+            | "/widgets/coherence_widget_web_bg.wasm"
+            | "/widgets/widgets.css"
+    ) {
         return Err(404);
     }
     Ok(path.into())
@@ -482,6 +534,15 @@ async fn respond<S: AsyncWrite + Unpin>(
     content_type: &str,
     body: &str,
 ) -> Result<()> {
+    respond_bytes(stream, status, content_type, body.as_bytes()).await
+}
+
+async fn respond_bytes<S: AsyncWrite + Unpin>(
+    stream: &mut S,
+    status: u16,
+    content_type: &str,
+    body: &[u8],
+) -> Result<()> {
     let reason = match status {
         200 => "OK",
         403 => "Forbidden",
@@ -491,11 +552,11 @@ async fn respond<S: AsyncWrite + Unpin>(
         _ => "Bad Request",
     };
     let header = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nContent-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'\r\n\r\n",
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nContent-Security-Policy: default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self'; img-src 'self'; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'\r\n\r\n",
         body.len()
     );
     stream.write_all(header.as_bytes()).await?;
-    stream.write_all(body.as_bytes()).await?;
+    stream.write_all(body).await?;
     stream.shutdown().await?;
     Ok(())
 }
@@ -508,6 +569,7 @@ pub(crate) fn escape_html(text: &str) -> String {
         .replace('\'', "&#39;")
 }
 
+#[cfg(test)]
 fn page(snapshot: &Snapshot) -> String {
     let mut rows = String::new();
     let mut row = |label: &str, value: String| {
@@ -573,6 +635,7 @@ mod tests {
 
     fn config() -> Config {
         Config {
+            widget_assets: None,
             unibus_viewer_url: None,
             listen: "127.0.0.1:8443".parse().unwrap(),
             advertise: false,

@@ -538,6 +538,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "coherence-widget-contract"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "combine"
 version = "4.6.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2542,10 +2550,12 @@ name = "myceliumd"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "coherence-widget-contract",
  "ed25519-dalek 2.2.0",
  "fpl-resource-observation",
  "iroh",
  "mycelium-core",
+ "mycelium-dns-policy",
  "mycelium-driver-darwin",
  "mycelium-driver-edgeos",
  "mycelium-driver-linux",
@@ -2555,6 +2565,7 @@ dependencies = [
  "mycelium-iroh-discovery",
  "mycelium-peer-protocol",
  "mycelium-plugins-lua",
+ "qrcode",
  "rand_core 0.6.4",
  "rcgen",
  "reqwest 0.12.28",
