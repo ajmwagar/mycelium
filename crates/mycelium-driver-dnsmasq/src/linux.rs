@@ -66,10 +66,7 @@ pub(super) async fn apply(settings: &Settings) -> Result<Value, String> {
         .ok_or("no fresh reachable records; refusing empty activation")?;
     let directory = state_dir()?;
     let candidate = directory.join("candidate.conf");
-    atomic_write(
-        &candidate,
-        settings.resolver.render_for_sites(records.clone(), &settings.additional_sites)?.as_bytes(),
-    )?;
+    atomic_write(&candidate, settings.render(records.clone())?.as_bytes())?;
     syntax(settings, &candidate)?;
     let active = Command::new("systemctl")
         .args(["--user", "is-active", "--quiet", UNIT])

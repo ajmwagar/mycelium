@@ -4,10 +4,10 @@ use mycelium_core::{
     ActionRisk, CapResult, CapSpec, Device, DeviceId, DeviceKind, DeviceMeta, ExecContext,
     MyceliumError, Params,
 };
-use mycelium_dns_policy::resolver::{ResolverConfig, ResolverMode, usable_address};
-use mycelium_dns_policy::{DnsRecord, canonical_domain};
+use mycelium_dns_policy::resolver::{usable_address, ResolverConfig, ResolverMode};
+use mycelium_dns_policy::{canonical_domain, DnsRecord};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
@@ -20,6 +20,9 @@ use std::{
 
 const LABEL: &str = "dev.fpl.mycelium-dns";
 const MARKER: &str = "# Managed by Mycelium DNS resolver\n";
+fn mesh_sites_default() -> bool {
+    true
+}
 mod linux;
 mod service_dns;
 
@@ -31,6 +34,9 @@ pub struct Settings {
     pub mycelium: PathBuf,
     /// Explicit reachable address scopes; do not publish every remote private IP.
     pub reachable_prefixes: Vec<String>,
+    /// Derive remote sites from fresh authenticated daemon peers. DNS is not a grant.
+    #[serde(default = "mesh_sites_default")]
+    pub mesh_sites: bool,
     /// Explicitly reviewed sites from peer identities; no site aliasing.
     #[serde(default)]
     pub additional_sites: Vec<String>,
@@ -49,6 +55,25 @@ pub struct Settings {
 }
 
 impl Settings {
+    fn admits_site(&self, site: &str) -> bool {
+        self.mesh_sites
+            || site == self.resolver.site
+            || self.additional_sites.iter().any(|s| s == site)
+    }
+
+    fn render(&self, records: Vec<DnsRecord>) -> Result<String, String> {
+        let mut sites: BTreeSet<String> = self.additional_sites.iter().cloned().collect();
+        for record in &records {
+            if !self.admits_site(&record.site) {
+                return Err("DNS record outside site policy".into());
+            }
+            if record.site != self.resolver.site {
+                sites.insert(record.site.clone());
+            }
+        }
+        self.resolver
+            .render_for_sites(records, &sites.into_iter().collect::<Vec<_>>())
+    }
     fn validate(&self) -> Result<(), String> {
         let aliases = service_dns::aliases(self)?;
         if self.service_index_peers.len() > 32
@@ -185,20 +210,18 @@ pub fn peer_records(
         let Some(peer_site) = hello["site"].as_str() else {
             continue;
         };
-        if peer_site != settings.resolver.site
-            && !settings
-                .additional_sites
-                .iter()
-                .any(|site| site == peer_site)
-        {
+        if !settings.admits_site(peer_site) {
             continue;
         }
-        let site = canonical_domain(peer_site)?;
         let Some(seen) = peer["last_seen"].as_u64() else {
             continue;
         };
         if seen > timestamp + 30 || timestamp.saturating_sub(seen) > settings.expiry_seconds {
             continue;
+        }
+        let site = canonical_domain(peer_site)?;
+        if site != peer_site || site.contains('.') {
+            return Err("peer site must be one canonical DNS label".into());
         }
         let Some(node) = hello["node_id"].as_str() else {
             continue;
@@ -211,6 +234,15 @@ pub fn peer_records(
             return Err("peer hostname must be one DNS label".into());
         }
         let name = format!("{host}.{site}.{suffix}");
+        // A configured delegation owns its subtree, even for authenticated peers.
+        if settings
+            .resolver
+            .delegations
+            .iter()
+            .any(|d| name == d.zone || name.ends_with(&format!(".{}", d.zone)))
+        {
+            continue;
+        }
         let Some(interfaces) = hello["interfaces"].as_array() else {
             continue;
         };
@@ -635,13 +667,7 @@ async fn apply(settings: &Settings, _config: &Path) -> Result<Value, String> {
         return Err("no fresh reachable records; refusing empty initial activation".into());
     }
     let candidate = directory.join("candidate.conf");
-    atomic_write(
-        &candidate,
-        settings
-            .resolver
-            .render_for_sites(records.clone(), &settings.additional_sites)?
-            .as_bytes(),
-    )?;
+    atomic_write(&candidate, settings.render(records.clone())?.as_bytes())?;
     syntax(settings, &candidate)?;
     // Do not disrupt an unrelated process already listening on our socket.
     let print = Command::new("launchctl")
@@ -696,7 +722,9 @@ async fn apply(settings: &Settings, _config: &Path) -> Result<Value, String> {
         .map_err(|e| e.to_string())?;
     let mut verified = false;
     if status.success() {
-        for _ in 0..10 {
+        // Initial observation can consume two ten-second CLI deadlines before
+        // dnsmasq starts. Allow that bounded work rather than false rollback.
+        for _ in 0..60 {
             tokio::time::sleep(Duration::from_millis(500)).await;
             if verify(settings, &records[0]).is_ok() {
                 verified = true;
@@ -751,6 +779,8 @@ fn start(settings: &Settings, config: &Path) -> Result<Running, String> {
 #[serde(deny_unknown_fields)]
 struct Retained {
     #[serde(default)]
+    mesh_sites: bool,
+    #[serde(default)]
     additional_sites: Vec<String>,
     site: String,
     suffix: String,
@@ -764,6 +794,7 @@ struct Retained {
 impl Retained {
     fn usable(self, settings: &Settings, timestamp: u64) -> Result<(Vec<DnsRecord>, u64), String> {
         if self.site != settings.resolver.site
+            || self.mesh_sites != settings.mesh_sites
             || self.additional_sites != settings.additional_sites
             || self.service_aliases != service_dns::aliases(settings)?
             || self.service_index_peers != settings.service_index_peers
@@ -771,7 +802,7 @@ impl Retained {
             || self.expires_at <= timestamp
             || self.expires_at > timestamp.saturating_add(settings.expiry_seconds)
             || self.records.iter().any(|r| {
-                (r.site != settings.resolver.site && !settings.additional_sites.contains(&r.site))
+                !settings.admits_site(&r.site)
                     || !usable_address(r.address)
                     || !settings
                         .reachable_prefixes
@@ -781,9 +812,7 @@ impl Retained {
         {
             return Err("retained DNS snapshot expired or outside current policy".into());
         }
-        settings
-            .resolver
-            .render_for_sites(self.records.clone(), &settings.additional_sites)?;
+        settings.render(self.records.clone())?;
         Ok((self.records, self.expires_at))
     }
 }
@@ -794,6 +823,7 @@ fn retain(
     expires_at: u64,
 ) -> Result<(), String> {
     let retained = Retained {
+        mesh_sites: settings.mesh_sites,
         additional_sites: settings.additional_sites.clone(),
         service_aliases: service_dns::aliases(settings)?,
         service_index_peers: settings.service_index_peers.clone(),
@@ -829,9 +859,7 @@ async fn supervise(settings: &Settings) -> Result<(), String> {
             }
         }
     };
-    let mut active = settings
-        .resolver
-        .render_for_sites(records.clone(), &settings.additional_sites)?;
+    let mut active = settings.render(records.clone())?;
     let mut active_aliases = initial_settings.service_aliases.clone();
     atomic_write(&path, active.as_bytes())?;
     syntax(settings, &path)?;
@@ -875,9 +903,7 @@ async fn supervise(settings: &Settings) -> Result<(), String> {
                 (vec![], now())
             }
         };
-        let next = settings
-            .resolver
-            .render_for_sites(records.clone(), &settings.additional_sites)?;
+        let next = settings.render(records.clone())?;
         if next == active {
             active_aliases = next_aliases;
             expires_at = next_expiry;
@@ -948,7 +974,7 @@ pub async fn command(args: &[String]) -> Result<String, String> {
         let records = observe(&device.settings).await?;
         return Ok(
             json!({"mode":device.settings.resolver.mode,"records":records,
-            "dnsmasq":device.settings.resolver.render_for_sites(records.clone(), &device.settings.additional_sites)?,
+            "dnsmasq":device.settings.render(records.clone())?,
             "lan_activation_supported":false,"dhcp_changed":false})
             .to_string(),
         );
@@ -974,6 +1000,7 @@ mod tests {
     use super::*;
     pub(super) fn settings() -> Settings {
         Settings {
+            mesh_sites: true,
             additional_sites: vec![],
             resolver: ResolverConfig {
                 namespace_owners: Default::default(),
@@ -1000,20 +1027,79 @@ mod tests {
     #[test]
     fn reviewed_remote_sites_preserve_signed_names_and_reachability() {
         let mut s = settings();
+        s.mesh_sites = false;
         let mut remote = peer("remote", 999);
         remote["hello"]["site"] = json!("titan");
-        assert!(peer_records(&s, &json!([remote.clone()]), 1000).unwrap().is_empty());
+        assert!(peer_records(&s, &json!([remote.clone()]), 1000)
+            .unwrap()
+            .is_empty());
         s.additional_sites = vec!["titan".into()];
         let records = peer_records(&s, &json!([remote]), 1000).unwrap();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].site, "titan");
         assert_eq!(records[0].name, "gpu.titan.myc");
-        let rendered = s.resolver.render_for_sites(records.clone(), &s.additional_sites).unwrap();
+        let rendered = s
+            .resolver
+            .render_for_sites(records.clone(), &s.additional_sites)
+            .unwrap();
         assert!(rendered.contains("host-record=gpu.titan.myc,192.0.2.12"));
-        assert!(!s.resolver.render(records).unwrap().contains("gpu.titan.myc"));
+        assert!(!s
+            .resolver
+            .render(records)
+            .unwrap()
+            .contains("gpu.titan.myc"));
         s.additional_sites = vec!["*.myc".into()];
         assert!(s.validate().is_err());
     }
+    #[test]
+    fn mesh_sites_derive_names_without_configuration() {
+        let s = settings();
+        let mut remote = peer("remote", 999);
+        remote["hello"]["site"] = json!("titan");
+        let records = peer_records(&s, &json!([remote.clone()]), 1000).unwrap();
+        assert_eq!(records.len(), 1); // Unreachable and link-local IPs remain excluded.
+        assert!(s
+            .render(records.clone())
+            .unwrap()
+            .contains("host-record=gpu.titan.myc,192.0.2.12"));
+        assert!(peer_records(&s, &json!([remote.clone()]), 1400)
+            .unwrap()
+            .is_empty());
+        let mut restricted = s.clone();
+        restricted.mesh_sites = false;
+        assert!(peer_records(&restricted, &json!([remote.clone()]), 1000)
+            .unwrap()
+            .is_empty());
+        assert!(restricted.render(records).is_err());
+        remote["hello"]["site"] = json!("fake.site");
+        assert!(peer_records(&s, &json!([remote]), 1000).is_err());
+        let mut config = serde_json::to_value(&s).unwrap();
+        config.as_object_mut().unwrap().remove("mesh_sites");
+        assert!(
+            serde_json::from_value::<Settings>(config)
+                .unwrap()
+                .mesh_sites
+        );
+    }
+
+    #[test]
+    fn mesh_projection_respects_delegated_namespaces() {
+        let mut s = settings();
+        s.resolver
+            .delegations
+            .push(mycelium_dns_policy::Delegation {
+                zone: "titan.myc".into(),
+                site: "lab".into(),
+                owner: "dns-owner".into(),
+                server: "192.0.2.53".parse().unwrap(),
+                port: 53,
+            });
+        let mut remote = peer("remote", 999);
+        remote["hello"]["site"] = json!("titan");
+        assert!(peer_records(&s, &json!([remote]), 1000).unwrap().is_empty());
+        assert!(s.render(vec![]).unwrap().contains("server=/titan.myc/"));
+    }
+
     #[test]
     fn fresh_scoped_addresses_and_expired_identity() {
         let records = peer_records(
@@ -1060,7 +1146,9 @@ mod tests {
     fn retained_records_cannot_extend_expiry_or_cross_policy() {
         let s = settings();
         let records = peer_records(&s, &json!([peer("a", 999)]), 1000).unwrap();
+        let mesh_sites = s.mesh_sites;
         let make = |expiry| Retained {
+            mesh_sites,
             additional_sites: vec![],
             service_aliases: BTreeMap::new(),
             service_index_peers: BTreeMap::new(),
@@ -1072,6 +1160,9 @@ mod tests {
         assert!(make(1100).usable(&s, 1000).is_ok());
         assert!(make(1000).usable(&s, 1000).is_err());
         assert!(make(1301).usable(&s, 1000).is_err());
+        let mut local_only = s.clone();
+        local_only.mesh_sites = false;
+        assert!(make(1100).usable(&local_only, 1000).is_err());
         let mut changed = s.clone();
         changed
             .service_aliases

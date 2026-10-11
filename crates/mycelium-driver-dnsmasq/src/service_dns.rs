@@ -1,7 +1,7 @@
 //! DNS aliases from application-owned leases, never scanned listeners or ACLs.
 use super::Settings;
-use fpl_resource_observation::{SCHEMA_VERSION, ServiceCatalog};
-use mycelium_dns_policy::{DnsRecord, canonical_domain};
+use fpl_resource_observation::{ServiceCatalog, SCHEMA_VERSION};
+use mycelium_dns_policy::{canonical_domain, DnsRecord};
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::Read,
@@ -143,9 +143,7 @@ pub(super) fn project(
     }
     records.sort();
     records.dedup();
-    settings
-        .resolver
-        .render_for_sites(records.clone(), &settings.additional_sites)?;
+    settings.render(records.clone())?;
     Ok((records, deadline))
 }
 
@@ -201,13 +199,11 @@ mod tests {
             1
         );
         c.observations[0].value.kind = "ipfs-gateway".into();
-        assert!(
-            project(&s, vec![host.clone()], &c, 1000, 1200)
-                .unwrap()
-                .0
-                .iter()
-                .any(|r| r.name == "ipfs.neo.lab.myc")
-        );
+        assert!(project(&s, vec![host.clone()], &c, 1000, 1200)
+            .unwrap()
+            .0
+            .iter()
+            .any(|r| r.name == "ipfs.neo.lab.myc"));
         c.observations[0].value.endpoints = BTreeSet::from(["https://127.0.0.1:5002".into()]);
         assert_eq!(project(&s, vec![host], &c, 1000, 1200).unwrap().0.len(), 1);
     }
@@ -267,6 +263,7 @@ mod tests {
         s.service_alias_plugins.push(file.0.clone());
         let snapshot = resolved(&s).unwrap();
         let retained = super::super::Retained {
+            mesh_sites: s.mesh_sites,
             additional_sites: vec![],
             site: "lab".into(),
             suffix: "myc".into(),
@@ -326,13 +323,11 @@ mod tests {
         settings
             .service_index_peers
             .insert("unibus-viewer".into(), "other".into());
-        assert!(
-            !project(&settings, hosts.clone(), &services, 1000, 1200)
-                .unwrap()
-                .0
-                .iter()
-                .any(|r| r.name == "unibus.myc")
-        );
+        assert!(!project(&settings, hosts.clone(), &services, 1000, 1200)
+            .unwrap()
+            .0
+            .iter()
+            .any(|r| r.name == "unibus.myc"));
         settings
             .service_index_peers
             .insert("unibus-viewer".into(), "neo".into());

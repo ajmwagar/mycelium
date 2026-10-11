@@ -158,19 +158,22 @@ Store configuration outside the checkout, for example `~/.mycelium/dns/settings.
 Binary paths must be absolute. Reachable prefixes are an explicit publication
 scope, not a claim that an IP is routable. Start with the attached LAN; do not
 publish every remote private address. Records derive from the authenticated
-daemon's `peers --json`, filtered by site and freshness. Names are
+daemon's authenticated peer observations, filtered by freshness and address scope. Names are
 `hostname.site.suffix`; live competing owners fail closed. Device annotations,
 non-peer discovery is not included in this adapter.
 
 ## Optional daemon-page service names
 
-`additional_sites` in dnsmasq settings optionally admits explicitly reviewed
-remote sites from authenticated peer observations. The default remains local-only.
-Names retain each peer's observed site; this is not a site-alias or rename API.
-Reachable-address prefixes and freshness checks still apply. Changing the list
-invalidates retained policy state. Delegated namespaces cannot overlap these
-locally projected site namespaces. Never add a guessed site or remote private
-prefix merely to make a viewer link appear to work.
+`mesh_sites` defaults to `true`: fresh authenticated peers supply their own site
+names, so adding a mesh site requires no resolver allowlist edit. Names retain
+each peer's observed canonical site; this is not a site-alias or rename API.
+Set `mesh_sites: false` for explicitly local-only projection; `additional_sites`
+can then admit selected remote sites for compatibility with existing settings.
+Reachable-address prefixes and freshness checks still apply. DNS is not an
+application access grant and does not create a route, proxy or Iroh connection.
+Configured delegated subtrees retain ownership and are not projected locally.
+Changing site policy invalidates retained policy state. Never add a guessed site
+or remote private prefix merely to make a viewer link appear to work.
 
 Service aliases are default-off. Add a `service_aliases` map to resolver settings:
 
