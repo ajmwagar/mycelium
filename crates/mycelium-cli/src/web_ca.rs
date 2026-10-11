@@ -153,8 +153,10 @@ fn label(value: &str) -> Result<(), String> {
     Ok(())
 }
 fn names(host: &str, site: &str, index: bool) -> Result<Vec<String>, String> {
-    label(host)?;
-    label(site)?;
+    let host = mycelium_dns_policy::canonical_domain(host)?;
+    let site = mycelium_dns_policy::canonical_domain(site)?;
+    label(&host)?;
+    label(&site)?;
     let mut names = vec![
         format!("{host}.{site}.myc"),
         format!("mycelium.{host}.{site}.myc"),
@@ -450,7 +452,11 @@ mod tests {
             names("neo", "lab", false).unwrap(),
             vec!["neo.lab.myc", "mycelium.neo.lab.myc"]
         );
-        for bad in ["*", "lab\nDNS:evil", "a.b", "-lab", "LAB", ""] {
+        assert_eq!(
+            names("NEO", "LAB", false).unwrap(),
+            names("neo", "lab", false).unwrap()
+        );
+        for bad in ["*", "lab\nDNS:evil", "a.b", "-lab", ""] {
             assert!(names("neo", bad, true).is_err());
         }
         assert!(names("neo", "lab", true)
