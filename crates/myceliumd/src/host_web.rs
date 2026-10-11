@@ -24,9 +24,6 @@ const DEADLINE: Duration = Duration::from_secs(10);
 #[serde(deny_unknown_fields)]
 pub(crate) struct Config {
     pub listen: SocketAddr,
-    /// Publish only an explicit non-loopback page entrance; off by default.
-    #[serde(default)]
-    pub advertise: bool,
     /// Optional HTTPS-only identity; does not replace the peer identity or CA.
     #[serde(default)]
     pub server_identity: Option<ServerIdentity>,
@@ -46,9 +43,6 @@ pub(crate) struct ServerIdentity {
 
 impl Config {
     fn validate(&self) -> Result<()> {
-        if self.advertise && (self.listen.ip().is_loopback() || self.listen.ip().is_unspecified()) {
-            return Err("host web advertisement requires a non-loopback explicit address".into());
-        }
         if self.bootstrap_viewer_certificates.len() > 64 {
             return Err("host web permits at most 64 bootstrap viewer certificates".into());
         }
@@ -169,23 +163,6 @@ fn authorized(
 pub(crate) async fn start(mesh: Arc<Mesh>, config: Config, acceptor: TlsAcceptor) -> Result<()> {
     let listener = TcpListener::bind(config.listen).await?;
     let address = config.listen;
-    if config.advertise {
-        crate::page_advertisement::publish(&crate::home_dir(),mesh.node_id(),address)?;
-        let owner = mesh.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_secs(30)).await;
-                if !load_optional().ok().flatten().is_some_and(|c| c.advertise && c.listen == address) {
-                    eprintln!("myceliumd: host web advertisement changed; renewal stopped");
-                    break;
-                }
-                if let Err(error) = crate::page_advertisement::publish(&crate::home_dir(),owner.node_id(),address) {
-                    eprintln!("myceliumd: host web advertisement renewal failed: {error}");
-                    break;
-                }
-            }
-        });
-    }
     let viewer_certificates = config.bootstrap_viewer_certificates;
     let permits = Arc::new(Semaphore::new(32));
     eprintln!("myceliumd: authenticated host web listening on https://{address}");
@@ -460,7 +437,6 @@ mod tests {
     fn config() -> Config {
         Config {
             listen: "127.0.0.1:8443".parse().unwrap(),
-            advertise: false,
             server_identity: None,
             bootstrap_viewer_certificates: Vec::new(),
             bootstrap_viewer_bindings: [("a".repeat(64), "alice".into())].into(),
