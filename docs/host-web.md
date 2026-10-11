@@ -122,7 +122,14 @@ Do not copy a peer's private key into a browser to impersonate a human.
 
 After each complete, bounded HTTP request header, the daemon's existing authority resolver must find an
 active signed access grant for that exact principal, with the `host-viewer` role
-and the exact `host-web:<node_id>` scope. A role alone has no global authority.
+and either the exact `host-web:<node_id>` scope or the explicit
+`host-web:fleet` scope. The fleet scope lets an authority authorize a human once
+for read-only views on current and future enrolled hosts; enrollment itself
+never creates a viewer grant. A role alone has no global authority.
+Fleet inventory separately requires `discovery-viewer` and either
+`discovery-index:<node_id>` or `discovery-index:fleet`; host viewing does not
+implicitly grant inventory access. These are literal scopes, not wildcard
+matching. Existing certificate-to-human identity validation remains required.
 Grant expiry, access revocation and delegated-signer revocation are evaluated
 through the existing gossiped authority/access state, without contacting an IdP.
 As with existing offline authorization, revocation takes effect after this node
