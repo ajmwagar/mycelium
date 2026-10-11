@@ -144,9 +144,28 @@ pub struct ServiceRecord {
     pub transport: String,
     pub port: u16,
     pub product: Option<String>,
+    /// Non-secret protocol facts; providers must bound and whitelist them.
+    /// Discovery never grants authority.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub attributes: BTreeMap<String, String>,
     pub state: ServiceState,
     pub observed_at: u64,
     pub origin: Origin,
+}
+
+#[cfg(test)]
+mod service_record_compatibility {
+    #[test]
+    fn legacy_records_default_metadata_and_roundtrip_nonsecret_facts() {
+        let mut record: super::ServiceRecord = serde_json::from_value(serde_json::json!({
+            "name":"ipfs-rpc","transport":"tcp","port":5002,"product":"IPFS Kubo/0.43.1",
+            "state":"up","observed_at":100,"origin":super::Origin::new("host","fixture")
+        })).unwrap();
+        assert!(record.attributes.is_empty());
+        assert!(serde_json::to_value(&record).unwrap().get("attributes").is_none());
+        record.attributes.insert("peer_id".into(),"public-peer-identity".into());
+        assert_eq!(serde_json::from_value::<super::ServiceRecord>(serde_json::to_value(&record).unwrap()).unwrap(),record);
+    }
 }
 
 /// A service advertised through DNS-SD/mDNS. Unlike [`ServiceRecord`], this
@@ -869,6 +888,7 @@ impl Topology {
                         transport: discovered.transport,
                         port: discovered.port,
                         product: None,
+                        attributes: BTreeMap::new(),
                         state: ServiceState::Up,
                         observed_at: device.observed_at,
                         origin: origin.clone(),
@@ -1514,6 +1534,7 @@ mod tests {
                 transport: "tcp".into(),
                 port: 8971,
                 product: Some("Frigate".into()),
+                attributes: BTreeMap::new(),
                 state: ServiceState::Up,
                 observed_at: 1,
                 origin: Origin::new("observer", "probe"),

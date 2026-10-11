@@ -177,6 +177,18 @@ mod tests {
     }
     const UNIBUS: &str = include_str!("../../mycelium-plugins-lua/plugins/unibus_dns.lua");
     #[test]
+    fn ipfs_policy_names_only_explicit_owned_gateways_not_rpc() {
+        let file=PolicyFile::new(include_str!("../../mycelium-plugins-lua/plugins/ipfs_dns.lua"));
+        let mut s=crate::tests::settings(); s.service_alias_plugins.push(file.0.clone());
+        let host=DnsRecord {name:"neo.lab.myc".into(),address:"192.0.2.12".parse().unwrap(),site:"lab".into(),node:"neo".into()};
+        let mut c=catalog(); c.observations[0].value.kind="ipfs".into();
+        assert_eq!(project(&s,vec![host.clone()],&c,1000,1200).unwrap().0.len(),1);
+        c.observations[0].value.kind="ipfs-gateway".into();
+        assert!(project(&s,vec![host.clone()],&c,1000,1200).unwrap().0.iter().any(|r|r.name=="ipfs.neo.lab.myc"));
+        c.observations[0].value.endpoints=BTreeSet::from(["https://127.0.0.1:5002".into()]);
+        assert_eq!(project(&s,vec![host],&c,1000,1200).unwrap().0.len(),1);
+    }
+    #[test]
     fn lua_policy_reuses_generic_owner_validation_and_explicit_index() {
         let file = PolicyFile::new(UNIBUS);
         let mut s = crate::tests::settings();

@@ -224,6 +224,7 @@ impl Device for DarwinDevice {
                 mac: None,
                 ip: None,
                 service: ServiceRecord {
+                    attributes: Default::default(),
                     name: listener.process.clone().unwrap_or_else(|| "unknown".into()),
                     transport: listener.transport,
                     port: listener.port,

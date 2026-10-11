@@ -93,6 +93,13 @@ pub fn project(topology: &Topology) -> ServiceCatalog {
                 if local_rpc {
                     protocols.insert("http".into());
                     attributes.insert("administrative".into(), "true".into());
+                    // Preserve only the bounded non-secret Kubo facts selected
+                    // by the Lua dialect; do not expose arbitrary attributes.
+                    for key in ["peer_id", "swarm_addresses"] {
+                        if let Some(value) = service.attributes.get(key).filter(|v|v.len()<=16384) {
+                            attributes.insert(key.into(),value.clone());
+                        }
+                    }
                     if let Some(version) = service
                         .product
                         .as_deref()
@@ -231,6 +238,7 @@ mod tests {
 
     fn service(name: &str, product: Option<&str>, port: u16) -> ServiceRecord {
         ServiceRecord {
+            attributes: Default::default(),
             name: name.into(),
             transport: "tcp".into(),
             port,
@@ -302,6 +310,9 @@ mod tests {
         );
         let mut rpc = service("ipfs-rpc", Some("IPFS Kubo/0.43.1"), 5002);
         rpc.origin.source = "kubo-loopback-version".into();
+        rpc.attributes.insert("peer_id".into(),"12D3KooWfixture".into());
+        rpc.attributes.insert("swarm_addresses".into(),"[\"/ip4/192.0.2.10/tcp/4001/p2p/12D3KooWfixture\"]".into());
+        rpc.attributes.insert("secret".into(),"must-not-project".into());
         node.services.insert("tcp:5002/ipfs-rpc".into(), rpc);
         let mut topology = Topology::default();
         topology.nodes.insert(node.id.clone(), node);
@@ -312,6 +323,9 @@ mod tests {
         assert_eq!(observed.value.attributes["endpoint_scope"], "host-local");
         assert_eq!(observed.value.attributes["version"], "0.43.1");
         assert_eq!(observed.value.attributes["administrative"], "true");
+        assert_eq!(observed.value.attributes["peer_id"],"12D3KooWfixture");
+        assert!(observed.value.attributes["swarm_addresses"].contains("/ip4/192.0.2.10"));
+        assert!(!observed.value.attributes.contains_key("secret"));
         assert_eq!(observed.expires_at, 100 + SERVICE_TTL_SECONDS);
         assert_eq!(observed.provenance.observer, "neo");
         assert!(observed.value.protocols.contains("http"));

@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -426,6 +426,8 @@ impl Device for LinuxDevice {
             .as_secs();
         let mut warnings = Vec::new();
         let mut kubo_versions = BTreeMap::new();
+        let mut kubo_identities = BTreeMap::new();
+        let mut ambiguous_ports = BTreeSet::new();
         for (address, port) in crate::ipfs::candidates(sections[5]) {
             match self
                 .session
@@ -433,13 +435,49 @@ impl Device for LinuxDevice {
                 .await
             {
                 Ok(response) if response.success() => {
-                    if let Some(version) = crate::ipfs::parse_version(&response.stdout) {
-                        kubo_versions.insert(port, version);
+                    match crate::ipfs::parse_version(&response.stdout) {
+                        Ok(Some(version)) => {
+                            if kubo_versions
+                                .insert(port, version.clone())
+                                .is_some_and(|old| old != version)
+                            {
+                                ambiguous_ports.insert(port);
+                            }
+                            match self
+                                .session
+                                .exec(&crate::ipfs::identity_command(address, port))
+                                .await
+                            {
+                                Ok(identity) if identity.success() => {
+                                    match crate::ipfs::parse_identity(&identity.stdout) {
+                                        Ok(facts) => {
+                                            if !crate::ipfs::merge_identity(
+                                                &mut kubo_identities, port, facts,
+                                            ) {
+                                                ambiguous_ports.insert(port);
+                                            }
+                                        }
+                                        Err(error) => warnings.push(format!(
+                                            "Kubo identity probe {port}: {error}"
+                                        )),
+                                    }
+                                }
+                                Ok(_) => warnings.push(format!("Kubo identity probe {port} failed")),
+                                Err(error) => warnings.push(format!("Kubo identity probe {port}: {error}")),
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(error) => warnings.push(format!("Kubo version probe {port}: {error}")),
                     }
                 }
                 Ok(_) => {} // A candidate listener need not speak Kubo.
                 Err(error) => warnings.push(format!("Kubo loopback probe {port}: {error}")),
             }
+        }
+        for port in ambiguous_ports {
+            kubo_versions.remove(&port);
+            kubo_identities.remove(&port);
+            warnings.push(format!("Kubo loopback listeners disagree on identity for port {port}; not projecting verified RPC facts"));
         }
         for listener in parse_listeners(sections[5]) {
             let kubo_version = (listener.transport == "tcp")
@@ -450,6 +488,11 @@ impl Device for LinuxDevice {
                 mac: None,
                 ip: None,
                 service: ServiceRecord {
+                    attributes: if kubo_version.is_some() {
+                        kubo_identities.get(&listener.port).cloned().unwrap_or_default()
+                    } else {
+                        BTreeMap::new()
+                    },
                     name: if kubo_version.is_some() {
                         "ipfs-rpc".into()
                     } else {

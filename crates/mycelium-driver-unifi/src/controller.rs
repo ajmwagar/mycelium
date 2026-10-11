@@ -309,6 +309,7 @@ impl Device for ControllerDevice {
             mac: None,
             ip: None,
             service: ServiceRecord {
+                attributes: Default::default(),
                 name: "unifi-controller".into(),
                 transport: "tcp".into(),
                 port: 8443,

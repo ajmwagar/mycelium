@@ -2414,6 +2414,7 @@ dependencies = [
  "mycelium-dnssd",
  "mycelium-driver-edgeos",
  "mycelium-network-types",
+ "mycelium-plugins-lua",
  "mycelium-ssdp",
  "mycelium-tailscale",
  "serde",

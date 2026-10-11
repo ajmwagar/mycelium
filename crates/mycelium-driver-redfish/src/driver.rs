@@ -389,6 +389,7 @@ impl Device for RedfishDevice {
                     mac: self.management_mac,
                     ip: Some(ip),
                     service: ServiceRecord {
+                        attributes: Default::default(),
                         name: "redfish".into(),
                         transport: "tcp".into(),
                         port: 443,
