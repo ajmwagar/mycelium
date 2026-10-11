@@ -7,6 +7,23 @@ use mycelium_core::{ServiceRecord, Topology};
 
 const SERVICE_TTL_SECONDS: u64 = 15 * 60;
 
+/// Overlay current local owner files without extending their original leases.
+/// Remote signed observations remain retained; local deletions withdraw now.
+pub fn project_with_local(
+    topology: &Topology, home: &std::path::Path, node: &str, now: u64,
+) -> Result<ServiceCatalog, String> {
+    let observations = crate::local_services::observe_sources(home, node, now)?;
+    let mut catalog = project(topology);
+    catalog.observations.retain(|observation| {
+        observation.provenance.provider != "mycelium-application-owner-lease"
+            || observation.provenance.observer != node
+    });
+    let mut local = Topology::empty();
+    local.observe_all(observations);
+    catalog.observations.extend(project(&local).observations);
+    Ok(catalog)
+}
+
 pub fn project(topology: &Topology) -> ServiceCatalog {
     let mut catalog = ServiceCatalog {
         schema_version: SCHEMA_VERSION,
@@ -183,6 +200,31 @@ fn recognize(service: &ServiceRecord) -> Option<(String, Confidence)> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn local_owner_read_refreshes_and_withdraws_without_scan() {
+        let home = std::env::temp_dir().join(format!("mycelium-owner-read-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir(&home).unwrap();
+        let path = home.join("application-services.json");
+        let document = serde_json::json!({"schema_version":1,"observations":[{
+            "schema_version":1,"service_id":"service/peer/application/test","observed_at":100,"expires_at":160,
+            "provenance":{"provider":"application","observer":"peer"},"confidence":"strong",
+            "value":{"kind":"mycelium-host-web","endpoints":["https://127.0.0.1:8443"],"attributes":{"node_id":"peer"}}
+        }]});
+        let bytes = serde_json::to_vec(&document).unwrap();
+        let mut topology = mycelium_core::Topology::empty();
+        topology.observe_all(crate::local_services::observe(&bytes, "peer", 100).unwrap());
+        std::fs::write(&path, &bytes).unwrap();
+        let catalog = super::project_with_local(&topology, &home, "peer", 101).unwrap();
+        assert_eq!(catalog.observations.len(), 1);
+        assert_eq!(catalog.observations[0].expires_at, 160);
+        assert!(super::project_with_local(&topology, &home, "peer", 160).unwrap().observations.is_empty());
+        std::fs::remove_file(&path).unwrap();
+        assert!(super::project_with_local(&topology, &home, "peer", 101).unwrap().observations.is_empty());
+        std::fs::write(&path, b"invalid").unwrap();
+        assert!(super::project_with_local(&topology, &home, "peer", 101).is_err());
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&home).unwrap();
+    }
     use super::*;
     use mycelium_core::{IpRecord, Origin, ServiceState, TopoNode};
     use std::net::IpAddr;

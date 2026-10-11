@@ -1,5 +1,38 @@
 # Optional host web view
 
+## Standard HTTPS port without a root daemon
+
+`mycelium-https-forwarder` accepts exactly one native service-manager socket
+on an explicit local address, port 443. Launchd (macOS) or systemd (Linux)
+opens the privileged listener; the relay runs as `nobody`/`DynamicUser`, without
+TLS keys or authority. TLS bytes pass unchanged to port 8443 on loopback or
+the same local bind address. Remote forwarding is rejected. Mycelium performs
+the original mTLS authentication and signed-grant authorization.
+
+Templates live in `config/host-web/`. Replace the documentation address with
+the host's actual chosen local address and use the matching backend address.
+Build the relay with `cargo build -p mycelium-cli --release --bin
+mycelium-https-forwarder`, install it root-owned at
+`/usr/local/libexec/mycelium-https-forwarder`, and retain its prior version
+before replacement. It is deliberately independent of peer keys and the
+daemon process.
+
+On Linux, install the `.socket`/`.service` files in `/etc/systemd/system`, run
+`systemctl daemon-reload`, then `systemctl enable --now mycelium-https.socket`.
+The daemon may keep its existing unprivileged 8443 listener. On macOS, install
+the plist root-owned in `/Library/LaunchDaemons`; create the stderr log owned
+by `nobody` before `launchctl bootstrap system PLIST`. Socket activation starts
+the relay on demand. Rollback: boot out the launchd job or disable/stop the
+systemd socket and service. Neither action changes the 8443 daemon listener.
+
+Verify an authenticated HTTPS request returns 200 on 443, anonymous TLS is
+rejected, and the relay's process identity is unprivileged. Certificate SANs,
+browser trust and identity preferences must cover the exact URL. This relay
+does not install DNS, certificates, HTTP redirects or a wildcard listener.
+Local lease renewal is read on service-catalog requests without a scan;
+deleted or expired local files withdraw immediately, without extending TTL.
+Remote observations still depend on existing signed gossip freshness.
+
 ## Site index
 
 Set `"index": true` in the existing private host-web configuration to serve

@@ -1,0 +1,16 @@
+[Unit]
+Description=Unprivileged TLS-transparent Mycelium HTTPS ingress
+Requires=mycelium-https.socket
+After=mycelium-https.socket
+
+[Service]
+ExecStart=/usr/local/libexec/mycelium-https-forwarder --target 127.0.0.1:8443
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+Restart=on-failure

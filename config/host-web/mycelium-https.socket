@@ -1,0 +1,10 @@
+[Unit]
+Description=Mycelium HTTPS ingress socket
+
+[Socket]
+# Replace this documentation address with this host's explicit LAN/overlay IP.
+ListenStream=192.0.2.10:443
+NoDelay=true
+
+[Install]
+WantedBy=sockets.target

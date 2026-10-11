@@ -1245,7 +1245,10 @@ impl Daemon {
             Request::Resources => to_value(self.converged_resources().await).map_err(json_err),
             Request::Services => {
                 let topology = self.converged_topology().await?;
-                to_value(crate::services::project(&topology)).map_err(json_err)
+                let catalog = crate::services::project_with_local(
+                    &topology, &crate::home_dir(), self.mesh.node_id(), unix_now(),
+                ).map_err(MyceliumError::Parse)?;
+                to_value(catalog).map_err(json_err)
             }
             Request::DiscoveryScopeList => {
                 let scopes = self
