@@ -128,6 +128,11 @@ mod tests {
         ));
         std::fs::create_dir(&home).unwrap();
         let address = "192.0.2.12:8443".parse().unwrap();
+        // A transient filesystem obstruction must not poison future renewal.
+        let directory = home.join("application-services.d");
+        std::fs::write(&directory, b"temporary obstruction").unwrap();
+        assert!(publish(&home, "neo", address).is_err());
+        std::fs::remove_file(&directory).unwrap();
         publish(&home, "neo", address).unwrap();
         publish(&home, "neo", address).unwrap();
         assert!(publish(&home, "other", address).is_err());

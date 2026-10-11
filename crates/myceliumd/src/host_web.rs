@@ -220,7 +220,9 @@ pub(crate) async fn start(mesh: Arc<Mesh>, config: Config, _acceptor: TlsAccepto
                     crate::page_advertisement::publish(&crate::home_dir(), owner.node_id(), address)
                 {
                     eprintln!("myceliumd: host web advertisement renewal failed: {error}");
-                    break;
+                    // Let the lease expire, but retry at the bounded cadence.
+                    // A transient disk-full/write failure must not permanently
+                    // withdraw an otherwise running page after storage recovers.
                 }
             }
         });
