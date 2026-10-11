@@ -4,10 +4,10 @@ use mycelium_core::{
     ActionRisk, CapResult, CapSpec, Device, DeviceId, DeviceKind, DeviceMeta, ExecContext,
     MyceliumError, Params,
 };
-use mycelium_dns_policy::resolver::{ResolverConfig, ResolverMode, usable_address};
-use mycelium_dns_policy::{DnsRecord, canonical_domain};
+use mycelium_dns_policy::resolver::{usable_address, ResolverConfig, ResolverMode};
+use mycelium_dns_policy::{canonical_domain, DnsRecord};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
@@ -44,7 +44,14 @@ pub struct Settings {
 impl Settings {
     fn validate(&self) -> Result<(), String> {
         service_dns::validate_aliases(&self.service_aliases)?;
-        if self.service_index_peers.len() > 32 || self.service_index_peers.iter().any(|(kind, peer)| !self.service_aliases.contains_key(kind) || peer.is_empty() || peer.len() > 128 || peer.chars().any(char::is_control)) {
+        if self.service_index_peers.len() > 32
+            || self.service_index_peers.iter().any(|(kind, peer)| {
+                !self.service_aliases.contains_key(kind)
+                    || peer.is_empty()
+                    || peer.len() > 128
+                    || peer.chars().any(char::is_control)
+            })
+        {
             return Err("invalid service index peer identity".into());
         }
         self.resolver.render(vec![])?;
@@ -226,7 +233,9 @@ pub fn peer_records(
 
 async fn observation(settings: &Settings) -> Result<(Vec<DnsRecord>, u64), String> {
     let mut command = tokio::process::Command::new(&settings.mycelium);
-    command.args(["peers", "--json"]).kill_on_drop(true);
+    command
+        .args(["peers", "--names-only", "--json"])
+        .kill_on_drop(true);
     let output = tokio::time::timeout(Duration::from_secs(10), command.output())
         .await
         .map_err(|_| "peer observation timed out")?
@@ -997,7 +1006,9 @@ mod tests {
         assert!(make(1000).usable(&s, 1000).is_err());
         assert!(make(1301).usable(&s, 1000).is_err());
         let mut changed = s.clone();
-        changed.service_aliases.insert("unibus-viewer".into(), "unibus".into());
+        changed
+            .service_aliases
+            .insert("unibus-viewer".into(), "unibus".into());
         assert!(make(1100).usable(&changed, 1000).is_err());
         let mut s = s;
         s.reachable_prefixes = vec!["198.51.100.0/24".into()];

@@ -845,12 +845,26 @@ impl Daemon {
         use serde_json::to_value;
         match req {
             Request::NodeObserve => {
-                let intent = crate::node_profile::read().map_err(|error| MyceliumError::Validation(error.to_string()))?;
-                to_value(serde_json::json!({ "hello": self.mesh.local_hello().await, "intent": intent })).map_err(json_err)
+                let intent = crate::node_profile::read()
+                    .map_err(|error| MyceliumError::Validation(error.to_string()))?;
+                to_value(
+                    serde_json::json!({ "hello": self.mesh.local_hello().await, "intent": intent }),
+                )
+                .map_err(json_err)
             }
             Request::NodeRefresh { write } => {
-                if !write { return Err(MyceliumError::WritesNotPermitted("node observation refresh requires --write".into())); }
-                to_value(self.mesh.refresh_local_hello().await.map_err(|error| MyceliumError::Validation(error.to_string()))?).map_err(json_err)
+                if !write {
+                    return Err(MyceliumError::WritesNotPermitted(
+                        "node observation refresh requires --write".into(),
+                    ));
+                }
+                to_value(
+                    self.mesh
+                        .refresh_local_hello()
+                        .await
+                        .map_err(|error| MyceliumError::Validation(error.to_string()))?,
+                )
+                .map_err(json_err)
             }
             Request::Hello => to_value(serde_json::json!({
                 "version": crate::VERSION,
@@ -1099,7 +1113,9 @@ impl Daemon {
                 };
                 let mut observations = Vec::new();
                 match crate::local_services::observe_sources(
-                    &crate::home_dir(), self.mesh.node_id(), unix_now(),
+                    &crate::home_dir(),
+                    self.mesh.node_id(),
+                    unix_now(),
                 ) {
                     Ok(local) => observations.extend(local),
                     Err(error) => warnings.push(format!("application discovery: {error}")),
@@ -1857,6 +1873,7 @@ impl Daemon {
                     .map_err(json_err)
             }
             Request::PeerList => to_value(self.mesh.views().await).map_err(json_err),
+            Request::PeerNames => self.mesh.naming_views().await.map_err(MyceliumError::Parse),
             Request::EgressList => {
                 to_value(self.mesh.egress_observations().await).map_err(json_err)
             }
@@ -3211,11 +3228,16 @@ pub async fn serve() -> std::io::Result<()> {
     );
     // Native recovery can wait on systemd/application readiness. Keep it off
     // the control/gossip event loop and never turn boot into an update trigger.
-    tokio::task::spawn_blocking(|| match crate::software::recover_interrupted_activations() {
-        Ok(names) if !names.is_empty() => eprintln!("myceliumd: restored interrupted packages: {}", names.join(", ")),
-        Ok(_) => {},
-        Err(error) => eprintln!("myceliumd: {error}"),
-    });
+    tokio::task::spawn_blocking(
+        || match crate::software::recover_interrupted_activations() {
+            Ok(names) if !names.is_empty() => eprintln!(
+                "myceliumd: restored interrupted packages: {}",
+                names.join(", ")
+            ),
+            Ok(_) => {}
+            Err(error) => eprintln!("myceliumd: {error}"),
+        },
+    );
 
     loop {
         let (stream, _) = listener.accept().await?;

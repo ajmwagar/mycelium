@@ -376,7 +376,11 @@ impl Mesh {
             if let Some(config) = crate::host_web::load_optional()? {
                 let viewer_roots = config.viewer_roots()?;
                 let server_config = match &config.server_identity {
-                    Some(identity) => tls.server_config_for(&identity.certificate, &identity.private_key, &viewer_roots)?,
+                    Some(identity) => tls.server_config_for(
+                        &identity.certificate,
+                        &identity.private_key,
+                        &viewer_roots,
+                    )?,
                     None => tls.server_config_for(&tls.cert, &tls.key, &viewer_roots)?,
                 };
                 crate::host_web::start(
@@ -416,18 +420,58 @@ impl Mesh {
         let observations = self.observations.lock().await;
         let mut health = None;
         let mut hardware = None;
-        for envelope in observations.values().filter(|value| value.origin == self.node_id()) {
+        for envelope in observations
+            .values()
+            .filter(|value| value.origin == self.node_id())
+        {
             match &envelope.event {
-                PeerEvent::Health(value) if health.is_none_or(|previous: &HostHealth| value.observed_at > previous.observed_at) => health = Some(value),
-                PeerEvent::Hardware(value) if hardware.is_none_or(|previous: &HardwareSnapshot| value.observed_at > previous.observed_at) => hardware = Some(value),
-                _ => {},
+                PeerEvent::Health(value)
+                    if health.is_none_or(|previous: &HostHealth| {
+                        value.observed_at > previous.observed_at
+                    }) =>
+                {
+                    health = Some(value)
+                }
+                PeerEvent::Hardware(value)
+                    if hardware.is_none_or(|previous: &HardwareSnapshot| {
+                        value.observed_at > previous.observed_at
+                    }) =>
+                {
+                    hardware = Some(value)
+                }
+                _ => {}
             }
         }
         project(health, hardware)
     }
 
-    pub(crate) async fn discovery_index(&self, at: u64) -> Result<crate::discovery_index::Index, String> {
+    pub(crate) async fn discovery_index(
+        &self,
+        at: u64,
+    ) -> Result<crate::discovery_index::Index, String> {
         crate::discovery_index::project(self.observations.lock().await.values(), at)
+    }
+
+    pub(crate) async fn naming_views(&self) -> Result<serde_json::Value, String> {
+        let observations = self.observations.lock().await;
+        let names = crate::discovery_index::identities(observations.values())?
+            .into_iter()
+            .map(|(hello, last_seen)| {
+                serde_json::json!({
+                    "origin": hello.node_id,
+                    "hello": {
+                        "node_id": hello.node_id,
+                        "hostname": hello.hostname,
+                        "site": hello.site,
+                        "interfaces": hello.interfaces.iter().map(|interface|
+                            serde_json::json!({"addresses": interface.addresses})
+                        ).collect::<Vec<_>>()
+                    },
+                    "last_seen": last_seen
+                })
+            })
+            .collect::<Vec<_>>();
+        Ok(serde_json::Value::Array(names))
     }
 
     pub async fn views(&self) -> Vec<PeerView> {
@@ -1500,7 +1544,11 @@ struct TcpRegistration<'a> {
 }
 impl<'a> TcpRegistration<'a> {
     fn new(peers: &'a std::sync::Mutex<BTreeMap<String, usize>>, peer: String) -> Self {
-        *peers.lock().expect("TCP path lock poisoned").entry(peer.clone()).or_default() += 1;
+        *peers
+            .lock()
+            .expect("TCP path lock poisoned")
+            .entry(peer.clone())
+            .or_default() += 1;
         Self { peers, peer }
     }
 }
@@ -1509,7 +1557,9 @@ impl Drop for TcpRegistration<'_> {
         let mut peers = self.peers.lock().expect("TCP path lock poisoned");
         if let Some(count) = peers.get_mut(&self.peer) {
             *count -= 1;
-            if *count == 0 { peers.remove(&self.peer); }
+            if *count == 0 {
+                peers.remove(&self.peer);
+            }
         }
     }
 }
@@ -1616,9 +1666,16 @@ impl TlsSettings {
         self.server_config_for(&self.cert, &self.key, &[])
     }
 
-    fn server_config_for(&self, certificate: &str, key: &str, viewer_roots: &[CertificateDer<'static>]) -> Result<ServerConfig, AnyError> {
+    fn server_config_for(
+        &self,
+        certificate: &str,
+        key: &str,
+        viewer_roots: &[CertificateDer<'static>],
+    ) -> Result<ServerConfig, AnyError> {
         let mut roots = self.roots()?;
-        for certificate in viewer_roots { roots.add(certificate.clone())?; }
+        for certificate in viewer_roots {
+            roots.add(certificate.clone())?;
+        }
         let verifier = WebPkiClientVerifier::builder(Arc::new(roots)).build()?;
         Ok(ServerConfig::builder()
             .with_client_cert_verifier(verifier)
@@ -1645,7 +1702,9 @@ async fn send_with_timeout<W: tokio::io::AsyncWrite + Unpin>(
         writer.write_all(&bytes).await?;
         writer.write_all(b"\n").await?;
         writer.flush().await
-    }).await.map_err(|_| "peer sync write timed out")??;
+    })
+    .await
+    .map_err(|_| "peer sync write timed out")??;
     Ok(())
 }
 
@@ -1740,9 +1799,14 @@ fn event_is_authorized(
     match &envelope.event {
         PeerEvent::SyncHints(hints) => {
             #[cfg(feature = "iroh-sync")]
-            { iroh_sync::validate_hints(hints, &envelope.origin).is_ok() }
+            {
+                iroh_sync::validate_hints(hints, &envelope.origin).is_ok()
+            }
             #[cfg(not(feature = "iroh-sync"))]
-            { let _ = hints; false }
+            {
+                let _ = hints;
+                false
+            }
         }
         PeerEvent::Hello(hello) => {
             hello.interfaces.len() <= 64
@@ -2631,30 +2695,59 @@ mod tests {
         let key = SigningKey::from_bytes(&[73; 32]);
         let mesh = Mesh {
             active_tcp: std::sync::Mutex::new(BTreeMap::new()),
-            hello: test_hello(&key), key: key.clone(), sequence: AtomicU64::new(0),
-            observations: Mutex::new(BTreeMap::new()), allowed_origins: None,
-            authority_roots: BTreeSet::new(), trusted_release_keys: BTreeSet::new(),
-            trusted_access_keys: BTreeSet::new(), require_transport_binding: true,
+            hello: test_hello(&key),
+            key: key.clone(),
+            sequence: AtomicU64::new(0),
+            observations: Mutex::new(BTreeMap::new()),
+            allowed_origins: None,
+            authority_roots: BTreeSet::new(),
+            trusted_release_keys: BTreeSet::new(),
+            trusted_access_keys: BTreeSet::new(),
+            require_transport_binding: true,
         };
         for (name, timestamp) in [("a-new", 100), ("z-old", 50)] {
             let health = HostHealth {
-                observed_at: timestamp, uptime_seconds: 0, load_average: [0.0; 3],
-                logical_cpus: 1, memory_total_bytes: 0, memory_available_bytes: 0,
-                swap_total_bytes: 0, swap_free_bytes: 0, filesystems: vec![],
-                process_leaders: vec![], ssh_listening: false, established_ssh_sessions: 0,
+                observed_at: timestamp,
+                uptime_seconds: 0,
+                load_average: [0.0; 3],
+                logical_cpus: 1,
+                memory_total_bytes: 0,
+                memory_available_bytes: 0,
+                swap_total_bytes: 0,
+                swap_free_bytes: 0,
+                filesystems: vec![],
+                process_leaders: vec![],
+                ssh_listening: false,
+                established_ssh_sessions: 0,
                 platform_metrics: BTreeMap::new(),
             };
             let hardware = HardwareSnapshot {
-                schema_version: 1, node_id: mesh.node_id().into(), hostname: "test".into(),
-                observed_at: timestamp, devices: vec![],
+                schema_version: 1,
+                node_id: mesh.node_id().into(),
+                hostname: "test".into(),
+                observed_at: timestamp,
+                devices: vec![],
             };
             let mut observations = mesh.observations.lock().await;
-            observations.insert(format!("{name}-health"), SignedEnvelope::sign(&key, timestamp, timestamp, PeerEvent::Health(health)).unwrap());
-            observations.insert(format!("{name}-hardware"), SignedEnvelope::sign(&key, timestamp, timestamp, PeerEvent::Hardware(hardware)).unwrap());
+            observations.insert(
+                format!("{name}-health"),
+                SignedEnvelope::sign(&key, timestamp, timestamp, PeerEvent::Health(health))
+                    .unwrap(),
+            );
+            observations.insert(
+                format!("{name}-hardware"),
+                SignedEnvelope::sign(&key, timestamp, timestamp, PeerEvent::Hardware(hardware))
+                    .unwrap(),
+            );
         }
-        let times = mesh.project_local(|health, hardware| (
-            health.map(|value| value.observed_at), hardware.map(|value| value.observed_at),
-        )).await;
+        let times = mesh
+            .project_local(|health, hardware| {
+                (
+                    health.map(|value| value.observed_at),
+                    hardware.map(|value| value.observed_at),
+                )
+            })
+            .await;
         assert_eq!(times, (Some(100), Some(100)));
     }
 

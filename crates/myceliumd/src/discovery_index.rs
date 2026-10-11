@@ -1,5 +1,5 @@
 //! Narrow read-only discovery presentation, not a second peer registry.
-use mycelium_peer_protocol::{PeerEvent, SignedEnvelope};
+use mycelium_peer_protocol::{PeerEvent, PeerHello, SignedEnvelope};
 use serde::Serialize;
 use std::collections::BTreeMap;
 
@@ -18,10 +18,9 @@ pub(crate) struct Host {
     pub fresh: bool,
 }
 
-pub(crate) fn project<'a>(
+pub(crate) fn identities<'a>(
     events: impl Iterator<Item = &'a SignedEnvelope>,
-    now: u64,
-) -> Result<Index, String> {
+) -> Result<Vec<(&'a PeerHello, u64)>, String> {
     let mut peers = BTreeMap::new();
     let mut seen = BTreeMap::<&str, u64>::new();
     for event in events {
@@ -43,18 +42,27 @@ pub(crate) fn project<'a>(
             }
         }
     }
+    Ok(peers
+        .into_iter()
+        .map(|(node, (_, hello))| (hello, seen[node]))
+        .collect())
+}
+
+pub(crate) fn project<'a>(
+    events: impl Iterator<Item = &'a SignedEnvelope>,
+    now: u64,
+) -> Result<Index, String> {
     let mut index = Index {
         observed_at: now,
         sites: BTreeMap::new(),
     };
-    for (node, (_, hello)) in peers {
-        let last_observed_at = seen[node];
+    for (hello, last_observed_at) in identities(events)? {
         index
             .sites
             .entry(hello.site.clone())
             .or_default()
             .push(Host {
-                node_id: node.into(),
+                node_id: hello.node_id.clone(),
                 hostname: hello.hostname.clone(),
                 platform: format!("{:?}", hello.platform),
                 architecture: hello.architecture.clone(),
@@ -123,6 +131,16 @@ mod tests {
             .map(|i| hello(&i.to_string(), "home", 1))
             .collect::<Vec<_>>();
         assert!(project(too_many.iter(), 2).is_err());
+    }
+    #[test]
+    fn naming_identity_rejects_origin_mismatch_and_uses_latest_hello() {
+        let mut impostor = hello("wrong", "home", 100);
+        impostor.origin = "other".into();
+        let events = vec![hello("a", "old", 1), hello("a", "new", 2), impostor];
+        let names = identities(events.iter()).unwrap();
+        assert_eq!(names.len(), 1);
+        assert_eq!(names[0].0.site, "new");
+        assert_eq!(names[0].1, 2);
     }
     #[test]
     fn empty_and_escaped_presentation() {

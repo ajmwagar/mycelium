@@ -626,8 +626,17 @@ async fn run(cmd: &str, args: &[String]) -> Result<Vec<String>, ClientError> {
         "networks" => networks(args).await,
         "peers" => {
             let flags = parse_flags(args);
+            let names_only = args.iter().any(|argument| argument == "--names-only");
+            if names_only && !flags.json {
+                return Err(ClientError::Protocol("--names-only requires --json".into()));
+            }
             let mut client = connect().await?;
-            let value = client.call(&Request::PeerList).await?;
+            let request = if names_only {
+                Request::PeerNames
+            } else {
+                Request::PeerList
+            };
+            let value = client.call(&request).await?;
             if flags.json {
                 Ok(vec![value.to_string()])
             } else {
@@ -1459,8 +1468,10 @@ async fn egress_command(args: &[String]) -> Result<Vec<String>, ClientError> {
 async fn dns_command(args: &[String]) -> Result<Vec<String>, ClientError> {
     let action = args.first().map(String::as_str).unwrap_or("");
     if action == "resolver" {
-        return mycelium_driver_dnsmasq::command(&args[1..]).await
-            .map(|output|vec![output]).map_err(|error|err_usage(&error));
+        return mycelium_driver_dnsmasq::command(&args[1..])
+            .await
+            .map(|output| vec![output])
+            .map_err(|error| err_usage(&error));
     }
     if !matches!(action, "zone" | "plan") {
         return Err(err_usage(

@@ -1,5 +1,15 @@
 # Site DNS and namespace ownership
 
+## Lightweight refresh
+
+The managed resolver queries `mycelium peers --names-only --json`, a bounded
+projection of signed peer identities, interface addresses and observation times.
+It shares latest-identity selection with the site index, but does not serialize
+health, processes, hardware or transport diagnostics. The ordinary `peers`
+command retains its full view. Resolver and CLI/daemon upgrades must land
+together: an older daemon rejects the new request rather than silently falling
+back to an expensive inventory read.
+
 ## Local index entrances
 
 Alongside opt-in `service_aliases`, an optional `service_index_peers` map selects

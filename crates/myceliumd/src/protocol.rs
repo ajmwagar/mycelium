@@ -7,7 +7,9 @@ use serde::{Deserialize, Serialize};
 pub enum Request {
     Hello,
     NodeObserve,
-    NodeRefresh { write: bool },
+    NodeRefresh {
+        write: bool,
+    },
     /// Registered drivers (builtin + Lua plugins).
     Drivers,
     /// Recognize + open a device. `driver` pins the class; otherwise each
@@ -178,6 +180,8 @@ pub enum Request {
     },
     /// Return the locally converged view of signed peer observations.
     PeerList,
+    /// Narrow signed identity/address projection for DNS; excludes health and hardware.
+    PeerNames,
     EgressList,
     EgressPublish {
         observation: mycelium_peer_protocol::EgressObservation,
