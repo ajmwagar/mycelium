@@ -1,4 +1,5 @@
 //! Owner-built static Linux Mycelium Debian payload, with no maintainer scripts.
+mod notices;
 use std::os::unix::fs::PermissionsExt;
 use std::{
     env, fs,
@@ -12,6 +13,7 @@ const CONTACT_UNIT: &str = include_str!("../assets/first-contact.conf");
 const MIT: &str = include_str!("../../../LICENSE");
 const APACHE: &str = include_str!("../../../LICENSE-APACHE");
 const WORKSPACE: &str = include_str!("../../../Cargo.toml");
+const LOCK: &[u8] = include_bytes!("../../../Cargo.lock");
 
 fn architecture(bytes: &[u8]) -> Result<&'static str> {
     if bytes.len() < 20 || &bytes[..4] != b"\x7fELF" || bytes[4] != 2 || bytes[5] != 1 {
@@ -82,7 +84,13 @@ fn write(root: &Path, relative: &str, bytes: &[u8], mode: u32) -> Result<()> {
     }
     Ok(())
 }
-fn build(binary: &Path, directory: &Path, artifact_version: &str, source: &str) -> Result<PathBuf> {
+fn build(
+    binary: &Path,
+    directory: &Path,
+    artifact_version: &str,
+    source: &str,
+    notice_root: Option<&Path>,
+) -> Result<PathBuf> {
     if !version(artifact_version) || !revision(source) {
         return Err(
             "requires exact Debian artifact version and full lowercase source commit".into(),
@@ -96,7 +104,10 @@ fn build(binary: &Path, directory: &Path, artifact_version: &str, source: &str) 
     let path = binary.to_str().ok_or("non-UTF8 binary path")?;
     let dynamic = run("readelf", &["--dynamic", path])?;
     let program_headers = run("readelf", &["--program-headers", path])?;
-    if dynamic.contains("(NEEDED)") || program_headers.contains("INTERP") || !program_headers.contains("LOAD") {
+    if dynamic.contains("(NEEDED)")
+        || program_headers.contains("INTERP")
+        || !program_headers.contains("LOAD")
+    {
         return Err("initial owner package requires a static musl binary; dynamic ABI mapping is not qualified".into());
     }
     let digest = run("sha256sum", &[path])?
@@ -104,10 +115,24 @@ fn build(binary: &Path, directory: &Path, artifact_version: &str, source: &str) 
         .next()
         .ok_or("missing binary digest")?
         .to_owned();
-    // The packager is deliberately built and run from the same clean archive as
-    // the binary. The caller supplies the full archived revision; the release
-    // owner's build evidence establishes the binary/source relationship.
+    // Binary and packager revisions can differ for notice-only repackaging.
+    // Release evidence must retain both clean source archives independently.
     let workspace_version = binary_version()?;
+    let packager_source = option_env!("MYCELIUM_PACKAGER_SOURCE_COMMIT");
+    let third_party = if let Some(notice_root) = notice_root {
+        if !packager_source.is_some_and(revision) {
+            return Err("notice package requires compiled MYCELIUM_PACKAGER_SOURCE_COMMIT from its clean archive".into());
+        }
+        Some(notices::load(
+            notice_root,
+            &digest,
+            source,
+            &notices::digest(LOCK)?,
+        )?)
+    } else {
+        None
+    };
+    // Every supplied notice is validated and captured before output creation.
     fs::create_dir_all(directory)?;
     let name = format!("mycelium_{artifact_version}_{architecture}.deb");
     let destination = directory.join(name);
@@ -145,7 +170,7 @@ fn build(binary: &Path, directory: &Path, artifact_version: &str, source: &str) 
             CONTACT_UNIT.as_bytes(),
             0o644,
         )?;
-        let copyright = format!("Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/\nUpstream-Name: Mycelium\nSource: https://github.com/ajmwagar/mycelium/tree/{source}\n\nFiles: *\nCopyright: Mycelium contributors\nLicense: MIT or Apache-2.0\n See LICENSE and LICENSE-APACHE in this directory.\n\n Third-party dependency licenses and corresponding source must accompany\n the complete release source bundle; this notice does not relicense them.\n");
+        let copyright = format!("Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/\nUpstream-Name: Mycelium\nSource: https://github.com/ajmwagar/mycelium/tree/{source}\n\nFiles: usr/lib/* usr/share/doc/mycelium/LICENSE* usr/share/doc/mycelium/build-inputs\nCopyright: Mycelium contributors\nLicense: MIT or Apache-2.0\n See LICENSE and LICENSE-APACHE in this directory.\n\nFiles: usr/bin/mycelium usr/share/doc/mycelium/third-party-notices/*\nCopyright: Mycelium contributors and respective dependency authors\nLicense: multiple\n First-party Mycelium code is MIT or Apache-2.0. Statically embedded\n dependencies retain their individual licenses; see third-party-notices.\n Missing third-party notices make this a qualification-only package.\n Corresponding source must accompany the complete release source bundle;\n this notice does not relicense dependencies or assert legal clearance.\n");
         write(
             &root,
             "usr/share/doc/mycelium/copyright",
@@ -164,13 +189,38 @@ fn build(binary: &Path, directory: &Path, artifact_version: &str, source: &str) 
             APACHE.as_bytes(),
             0o644,
         )?;
-        let provenance = format!("source_url=https://github.com/ajmwagar/mycelium\nsource_commit={source}\nartifact_version={artifact_version}\nworkspace_binary_version={workspace_version}\narchitecture={architecture}\nbinary_sha256={digest}\nupdate_owner=apt\n");
+        let mut provenance = format!("source_url=https://github.com/ajmwagar/mycelium\nsource_commit={source}\npackager_source_commit={}\nartifact_version={artifact_version}\nworkspace_binary_version={workspace_version}\narchitecture={architecture}\nbinary_sha256={digest}\nupdate_owner=apt\nlegal_clearance=not-asserted\n", packager_source.unwrap_or("unrecorded"));
+        if let Some(notices) = &third_party {
+            provenance.push_str(&format!("third_party_coverage=reviewed-complete\nthird_party_inventory_sha256={}\ncargo_lock_sha256={}\n", notices.inventory_sha256, notices.lock_sha256));
+            for (relative, bytes) in &notices.files {
+                write(
+                    &root,
+                    &format!("usr/share/doc/mycelium/third-party-notices/{relative}"),
+                    bytes,
+                    0o644,
+                )?;
+            }
+        } else {
+            provenance.push_str("third_party_coverage=unknown\nrelease_use=qualification-only\n");
+        }
         write(
             &root,
             "usr/share/doc/mycelium/build-inputs",
             provenance.as_bytes(),
             0o644,
         )?;
+        if let Some(notices) = &third_party {
+            // Rehash staged immutable captures, not mutable source paths.
+            for (relative, bytes) in &notices.files {
+                let staged = fs::read(
+                    root.join("usr/share/doc/mycelium/third-party-notices")
+                        .join(relative),
+                )?;
+                if notices::digest(&staged)? != notices::digest(bytes)? {
+                    return Err("staged notice digest mismatch".into());
+                }
+            }
+        }
         let archive = stage.join("package.deb");
         run(
             "dpkg-deb",
@@ -194,10 +244,16 @@ fn build(binary: &Path, directory: &Path, artifact_version: &str, source: &str) 
 }
 fn main() -> Result<()> {
     let args: Vec<_> = env::args().skip(1).collect();
-    if args.len() != 4 {
-        return Err("usage: mycelium-debian-package STATIC_BINARY OUTPUT_DIRECTORY ARTIFACT_VERSION SOURCE_COMMIT".into());
+    if args.len() != 4 && !(args.len() == 6 && args[4] == "--third-party-notices") {
+        return Err("usage: mycelium-debian-package STATIC_BINARY OUTPUT_DIRECTORY ARTIFACT_VERSION BINARY_SOURCE_COMMIT [--third-party-notices DIRECTORY]".into());
     }
-    let path = build(Path::new(&args[0]), Path::new(&args[1]), &args[2], &args[3])?;
+    let path = build(
+        Path::new(&args[0]),
+        Path::new(&args[1]),
+        &args[2],
+        &args[3],
+        args.get(5).map(Path::new),
+    )?;
     println!("{}", path.display());
     Ok(())
 }
@@ -237,7 +293,9 @@ mod tests {
     #[test]
     fn payload_has_no_implicit_activation_or_credentials() {
         assert!(SERVICE.contains("ConditionPathExists=/var/lib/mycelium/node.env"));
-        assert!(CONTACT_UNIT.contains("[Unit]\nConditionPathExists=/run/fungos-first-contact/claim"));
+        assert!(
+            CONTACT_UNIT.contains("[Unit]\nConditionPathExists=/run/fungos-first-contact/claim")
+        );
         assert!(!SERVICE.contains("MYCELIUM_RELEASE_KEYS="));
         assert!(!ADAPTER.contains(". \"$1\""));
     }
