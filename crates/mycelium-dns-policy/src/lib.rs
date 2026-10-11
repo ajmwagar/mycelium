@@ -305,3 +305,4 @@ mod tests {
         assert!(serde_json::from_str::<Delegation>(r#"{"zone":"shroud.svc","site":"lab","owner":"shroud","server":"192.0.2.53","port":53,"members":[]}"#).is_err());
     }
 }
+pub mod resolver;

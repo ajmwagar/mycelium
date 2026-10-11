@@ -194,6 +194,8 @@ usage:
   mycelium egress probe --server HOST:PORT... [--bind IP] [--port PORT] [--json]
   mycelium dns zone [--suffix DOMAIN] [--json]
   mycelium dns plan --site SITE [--suffix DOMAIN] [--delegations FILE] [--json|--dnsmasq]
+  mycelium dns resolver plan|status --config FILE
+  mycelium dns resolver apply|run|system-install|system-remove --config FILE --write [--dry-run]
   mycelium security status|events [--json]
   mycelium security scan [--stig-content PATH --stig-profile ID] [--remediation-plan] [--json]
   mycelium security sinks list [--json]
@@ -1456,6 +1458,10 @@ async fn egress_command(args: &[String]) -> Result<Vec<String>, ClientError> {
 
 async fn dns_command(args: &[String]) -> Result<Vec<String>, ClientError> {
     let action = args.first().map(String::as_str).unwrap_or("");
+    if action == "resolver" {
+        return mycelium_driver_dnsmasq::command(&args[1..]).await
+            .map(|output|vec![output]).map_err(|error|err_usage(&error));
+    }
     if !matches!(action, "zone" | "plan") {
         return Err(err_usage(
             "dns supports `zone` and read-only `plan`; apply is not supported",

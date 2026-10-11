@@ -14,6 +14,7 @@ path = "src/main.rs"
 
 [dependencies]
 mycelium-dns-policy.workspace = true
+mycelium-driver-dnsmasq.workspace = true
 qrcode = { version = "0.14", default-features = false, optional = true }
 mycelium-core.workspace = true
 mycelium-driver-netgear-fastpath = { path = "../mycelium-driver-netgear-fastpath" }

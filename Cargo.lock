@@ -2315,6 +2315,7 @@ dependencies = [
  "jsonwebtoken",
  "mycelium-core",
  "mycelium-dns-policy",
+ "mycelium-driver-dnsmasq",
  "mycelium-driver-netgear-fastpath",
  "mycelium-peer-protocol",
  "myceliumd",
@@ -2369,6 +2370,18 @@ dependencies = [
  "mycelium-driver-edgeos",
  "mycelium-ssdp",
  "mycelium-tailscale",
+]
+
+[[package]]
+name = "mycelium-driver-dnsmasq"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "mycelium-core",
+ "mycelium-dns-policy",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

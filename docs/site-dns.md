@@ -91,3 +91,104 @@ integration; do not make Mycelium seize its bridge or default DNS settings.
 Policy checks: `cargo check -p mycelium-dns-policy`, then
 `cargo test -p mycelium-dns-policy`. CLI integration:
 `cargo check -p mycelium-cli --tests`, then focused CLI DNS tests.
+# Optional local resolver
+
+`mycelium dns resolver` manages an optional dnsmasq companion, not another DNS
+server implementation. Embedded nodes can leave it off and use LAN DNS. Modes:
+
+| Mode | Configuration | Activation in this slice |
+| --- | --- | --- |
+| `off` | No resolver process | macOS stops the owned LaunchAgent |
+| `localhost-only` | Explicit loopback listeners | macOS user LaunchAgent plus optional suffix-only OS routing |
+| `lan-serving` | Explicit interface addresses | Plan only; verified client-network firewall policy is required before activation |
+
+The companion also builds as `mycelium-dns-resolver`; it exposes the same actions
+without requiring an installed CLI upgrade. Linux persistent activation remains
+unsupported. This is not DHCP advertisement or a change to default DNS.
+
+Store configuration outside the checkout, for example `~/.mycelium/dns/settings.json`:
+
+```json
+{
+  "resolver": {
+    "mode": "localhost-only",
+    "site": "lab",
+    "suffix": "myc",
+    "listen": ["127.0.0.1:1053"],
+    "upstreams": ["1.1.1.1:53"],
+    "delegations": []
+  },
+  "dnsmasq": "/opt/homebrew/sbin/dnsmasq",
+  "mycelium": "/Users/you/.local/bin/mycelium",
+  "reachable_prefixes": ["192.0.2.0/24"],
+  "refresh_seconds": 30,
+  "expiry_seconds": 300
+}
+```
+
+Binary paths must be absolute. Reachable prefixes are an explicit publication
+scope, not a claim that an IP is routable. Start with the attached LAN; do not
+publish every remote private address. Records derive from the authenticated
+daemon's `peers --json`, filtered by site and freshness. Names are
+`hostname.site.suffix`; live competing owners fail closed. Device annotations,
+non-peer discovery and service aliases are not included in this first adapter.
+
+`.myc` is configurable private naming, not a registered/reserved public TLD.
+Future public-name collision is possible. Use an owned subdomain or a reserved
+private namespace if that risk is unacceptable. Unknown `.myc` names return a
+local negative response rather than being forwarded. Public HTTPS certificates
+are not supplied by local DNS.
+
+Manual runbook (replace paths for your installation):
+
+```sh
+cargo check -p mycelium-driver-dnsmasq --tests --locked
+cargo test -p mycelium-dns-policy -p mycelium-driver-dnsmasq --locked
+cargo build -p mycelium-driver-dnsmasq --bin mycelium-dns-resolver --locked
+# Install the companion in a stable location before creating its LaunchAgent.
+install -m 755 target/debug/mycelium-dns-resolver "$HOME/.mycelium/bin/mycelium-dns-resolver"
+mycelium-dns-resolver plan --config "$HOME/.mycelium/dns/settings.json"
+mycelium-dns-resolver apply --config "$HOME/.mycelium/dns/settings.json" --dry-run
+mycelium-dns-resolver apply --config "$HOME/.mycelium/dns/settings.json" --write
+mycelium-dns-resolver status --config "$HOME/.mycelium/dns/settings.json"
+```
+
+Activation validates dnsmasq syntax and available UDP/TCP listeners, creates
+`~/Library/LaunchAgents/dev.fpl.mycelium-dns.plist`, then queries an expected
+record's actual address. Failed startup restores the previous owned LaunchAgent
+and its stored settings. Only this agent is managed, not Homebrew's global DNS
+service. LaunchAgent persistence is across logins; it does not serve while the
+user is logged out.
+
+Once the direct listener works, install the macOS supplemental resolver with
+administrator authorization:
+
+```sh
+sudo "$HOME/.mycelium/bin/mycelium-dns-resolver" system-install \
+  --config "$HOME/.mycelium/dns/settings.json" --write
+scutil --dns
+dscacheutil -q host -a name hostname.lab.myc
+```
+
+Only `/etc/resolver/SUFFIX` is written; unowned existing files and symlinks are
+refused. Check that normal internet DNS and existing VPN DNS still work. Browsers
+with independently configured secure DNS may bypass the OS resolver.
+
+The supervisor refreshes at the configured interval, validates a candidate
+before replacing it, verifies the replacement, and restores the previous config
+on failed activation. Observation failure is logged; retained records are
+withdrawn at their observed expiry. It shuts down its own dnsmasq child on
+SIGTERM. No DHCP, TFTP or router advertisement is enabled.
+
+Rollback OS integration first, then stop the companion:
+
+```sh
+sudo "$HOME/.mycelium/bin/mycelium-dns-resolver" system-remove \
+  --config "$HOME/.mycelium/dns/settings.json" --write
+```
+
+Change `resolver.mode` to `off` in the private settings and run `apply --write`.
+Off does not silently delete privileged namespace files; removal is an explicit
+separate operation. DHCP option 6, LAN firewall enforcement and Linux service
+activation remain follow-up work. `dns plan` remains a separate read-only
+site projection, not evidence that a resolver has been activated.
