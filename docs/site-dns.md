@@ -1,5 +1,19 @@
 # Site DNS and namespace ownership
 
+## Local index entrances
+
+Alongside opt-in `service_aliases`, an optional `service_index_peers` map selects
+one stable peer identity per service kind for `mycelium.myc` and `unibus.myc`.
+The same fresh owner leases and reachable address checks used for per-host aliases
+apply. A root alias is emitted only for the selected owner and configured service
+kind, never an arbitrary available peer. Changing that selector invalidates
+retained records; expiry withdraws the alias instead of silently choosing a new
+gateway. The resolver suffix is configurable. DNS still does not choose ports,
+publish a page, provision credentials, or grant access.
+
+Both the server certificate and browser trust must cover the new entrance name.
+Without owned port-443 ingress, use the advertised HTTPS port in the URL.
+
 Mycelium owns mesh/site naming; a workload runtime owns its members. Shroud's
 `.shroud.svc` namespace stays resolver-backed by Shroud, including stable service
 identity, named ports, healthy promoted revisions and replicas. Mycelium must

@@ -27,6 +27,9 @@ pub(crate) struct Config {
     /// Publish only an explicit non-loopback page entrance; off by default.
     #[serde(default)]
     pub advertise: bool,
+    /// Serve the separately authorized discovery index at `/` and `/sites`.
+    #[serde(default)]
+    pub index: bool,
     /// Optional HTTPS-only identity; does not replace the peer identity or CA.
     #[serde(default)]
     pub server_identity: Option<ServerIdentity>,
@@ -144,6 +147,7 @@ pub(crate) fn load_optional() -> Result<Option<Config>> {
     Ok(Some(config))
 }
 
+#[cfg(test)]
 fn authorized(
     config: &Config,
     digest: &str,
@@ -151,16 +155,36 @@ fn authorized(
     node_id: &str,
     at: u64,
 ) -> bool {
+    authorized_for(
+        config,
+        digest,
+        state,
+        node_id,
+        at,
+        "host-viewer",
+        "host-web",
+    )
+}
+
+fn authorized_for(
+    config: &Config,
+    digest: &str,
+    state: &AccessStateView,
+    node_id: &str,
+    at: u64,
+    role: &str,
+    scope_kind: &str,
+) -> bool {
     let Some(principal) = config.bootstrap_viewer_bindings.get(digest) else {
         return false;
     };
-    let scope = format!("host-web:{node_id}");
+    let scope = format!("{scope_kind}:{node_id}");
     state.grants.iter().any(|grant| {
         grant.active
             && grant.revoked_by.is_empty()
             && matches!(&grant.record.statement,
             AccessStatement::Grant { principal: subject, roles, scopes, not_before, not_after, .. }
-            if subject == principal && roles.iter().any(|role| role == "host-viewer")
+            if subject == principal && roles.iter().any(|candidate| candidate == role)
                 && scopes.iter().any(|candidate| candidate == &scope)
                 && *not_before <= at && at < *not_after)
     })
@@ -169,6 +193,7 @@ fn authorized(
 pub(crate) async fn start(mesh: Arc<Mesh>, config: Config, acceptor: TlsAcceptor) -> Result<()> {
     let listener = TcpListener::bind(config.listen).await?;
     let address = config.listen;
+    let index_enabled = config.index;
     let advertisement_alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
     if config.advertise {
         crate::page_advertisement::publish(&crate::home_dir(), mesh.node_id(), address)?;
@@ -227,36 +252,60 @@ pub(crate) async fn start(mesh: Arc<Mesh>, config: Config, acceptor: TlsAcceptor
                         .and_then(|chain| chain.first())
                         .map(|cert| mycelium_peer_protocol::sha256_hex(cert.as_ref()))
                         .ok_or("host web requires a client certificate")?;
-                    let route = match read_authorized_route(&mut stream, || async {
-                        // Evaluate after headers arrive: slow clients cannot retain
-                        // authorization obtained before their binding was removed.
-                        let decision = async {
-                            let fresh = load_optional()?.ok_or("host web disabled")?;
-                            if fresh.listen != address {
-                                return Err("host web listener changed; restart required".into());
+                    let route = match read_authorized_route(&mut stream, |route| {
+                        let index_route = matches!(route, "/sites" | "/api/sites")
+                            || (route == "/" && index_enabled);
+                        let mesh = &mesh;
+                        let digest = &digest;
+                        let viewer_certificates = &viewer_certificates;
+                        async move {
+                            // Evaluate after headers arrive: slow clients cannot retain
+                            // authorization obtained before their binding was removed.
+                            let decision = async {
+                                let fresh = load_optional()?.ok_or("host web disabled")?;
+                                if fresh.listen != address {
+                                    return Err(
+                                        "host web listener changed; restart required".into()
+                                    );
+                                }
+                                if fresh.index != index_enabled || (index_route && !index_enabled) {
+                                    return Err(
+                                        "discovery index configuration changed or disabled".into(),
+                                    );
+                                }
+                                if &fresh.bootstrap_viewer_certificates != viewer_certificates {
+                                    return Err(
+                                        "host web viewer trust changed; restart required".into()
+                                    );
+                                }
+                                let now = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)?
+                                    .as_secs();
+                                Ok::<_, Box<dyn Error + Send + Sync>>(authorized_for(
+                                    &fresh,
+                                    &digest,
+                                    &mesh.access_view(now).await,
+                                    mesh.node_id(),
+                                    now,
+                                    if index_route {
+                                        "discovery-viewer"
+                                    } else {
+                                        "host-viewer"
+                                    },
+                                    if index_route {
+                                        "discovery-index"
+                                    } else {
+                                        "host-web"
+                                    },
+                                ))
                             }
-                            if fresh.bootstrap_viewer_certificates != viewer_certificates {
-                                return Err(
-                                    "host web viewer trust changed; restart required".into()
-                                );
-                            }
-                            let now = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)?
-                                .as_secs();
-                            Ok::<_, Box<dyn Error + Send + Sync>>(authorized(
-                                &fresh,
-                                &digest,
-                                &mesh.access_view(now).await,
-                                mesh.node_id(),
-                                now,
-                            ))
-                        }
-                        .await;
-                        match decision {
-                            Ok(allowed) => allowed,
-                            Err(error) => {
-                                eprintln!("myceliumd: host web authorization failed: {error}");
-                                false
+                            .await;
+                            match decision {
+                                Ok(allowed) => allowed,
+                                Err(error) => {
+                                    eprintln!("myceliumd: host web authorization failed: {error}");
+                                    false
+                                }
                             }
                         }
                     })
@@ -270,9 +319,36 @@ pub(crate) async fn start(mesh: Arc<Mesh>, config: Config, acceptor: TlsAcceptor
                                 "text/plain",
                                 "Request rejected.\n",
                             )
-                            .await
+                            .await;
                         }
                     };
+                    if matches!(route.as_str(), "/sites" | "/api/sites")
+                        || (route == "/" && index_enabled)
+                    {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)?
+                            .as_secs();
+                        let index = mesh.discovery_index(now).await?;
+                        let body = if route == "/api/sites" {
+                            serde_json::to_string_pretty(&index)?
+                        } else {
+                            crate::discovery_index::page(&index)
+                        };
+                        if body.len() > 256 * 1024 {
+                            return Err("discovery index exceeds response bound".into());
+                        }
+                        return respond(
+                            &mut stream,
+                            200,
+                            if route == "/api/sites" {
+                                "application/json"
+                            } else {
+                                "text/html; charset=utf-8"
+                            },
+                            &body,
+                        )
+                        .await;
+                    }
                     let snapshot = local_snapshot(&mesh).await;
                     let json = serde_json::to_string_pretty(&snapshot)?;
                     if json.len() > 256 * 1024 {
@@ -357,7 +433,7 @@ async fn read_route<S: AsyncRead + Unpin>(stream: &mut S) -> std::result::Result
     if method != "GET" {
         return Err(405);
     }
-    if !matches!(path, "/" | "/api/host") {
+    if !matches!(path, "/" | "/host" | "/api/host" | "/sites" | "/api/sites") {
         return Err(404);
     }
     Ok(path.into())
@@ -369,11 +445,11 @@ async fn read_authorized_route<S, F, Fut>(
 ) -> std::result::Result<String, u16>
 where
     S: AsyncRead + Unpin,
-    F: FnOnce() -> Fut,
+    F: FnOnce(&str) -> Fut,
     Fut: std::future::Future<Output = bool>,
 {
     let route = read_route(stream).await?;
-    if !authorize().await {
+    if !authorize(&route).await {
         return Err(403);
     }
     Ok(route)
@@ -393,14 +469,17 @@ async fn respond<S: AsyncWrite + Unpin>(
         431 => "Request Header Fields Too Large",
         _ => "Bad Request",
     };
-    let header = format!("HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nContent-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'\r\n\r\n", body.len());
+    let header = format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nContent-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'\r\n\r\n",
+        body.len()
+    );
     stream.write_all(header.as_bytes()).await?;
     stream.write_all(body.as_bytes()).await?;
     stream.shutdown().await?;
     Ok(())
 }
 
-fn escape_html(text: &str) -> String {
+pub(crate) fn escape_html(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
@@ -460,7 +539,9 @@ fn page(snapshot: &Snapshot) -> String {
             .unwrap_or_else(|| "Not observed".into()),
     );
     let hostname = escape_html(&snapshot.hostname);
-    format!("<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>{hostname} · Mycelium</title><style>body{{background:#252d27;color:#e5ece3;font:16px monospace;max-width:70ch;margin:4rem auto;padding:1rem}}dl{{display:grid;grid-template-columns:minmax(10ch,1fr) 2fr;gap:1rem}}dd{{margin:0;overflow-wrap:anywhere}}dt,p{{color:#b3c4af}}a{{color:#d3e6c6}}</style><header><p>Mycelium · read-only</p><h1>{hostname}</h1></header><main><dl>{rows}</dl><p>Timestamps describe retained observations, not a live connection guarantee.</p><a href=\"/api/host\">JSON observation</a></main></html>")
+    format!(
+        "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>{hostname} · Mycelium</title><style>body{{background:#252d27;color:#e5ece3;font:16px monospace;max-width:70ch;margin:4rem auto;padding:1rem}}dl{{display:grid;grid-template-columns:minmax(10ch,1fr) 2fr;gap:1rem}}dd{{margin:0;overflow-wrap:anywhere}}dt,p{{color:#b3c4af}}a{{color:#d3e6c6}}</style><header><p>Mycelium · read-only</p><h1>{hostname}</h1></header><main><dl>{rows}</dl><p>Timestamps describe retained observations, not a live connection guarantee.</p><a href=\"/api/host\">JSON observation</a></main></html>"
+    )
 }
 
 #[cfg(test)]
@@ -473,6 +554,7 @@ mod tests {
         Config {
             listen: "127.0.0.1:8443".parse().unwrap(),
             advertise: false,
+            index: false,
             server_identity: None,
             bootstrap_viewer_certificates: Vec::new(),
             bootstrap_viewer_bindings: [("a".repeat(64), "alice".into())].into(),
@@ -500,10 +582,12 @@ mod tests {
         value = config();
         value.bootstrap_viewer_bindings.clear();
         assert!(value.validate().is_err());
-        assert!(serde_json::from_str::<Config>(
-            r#"{"listen":"127.0.0.1:8443","bootstrap_viewer_bindings":{},"oidc":true}"#
-        )
-        .is_err());
+        assert!(
+            serde_json::from_str::<Config>(
+                r#"{"listen":"127.0.0.1:8443","bootstrap_viewer_bindings":{},"oidc":true}"#
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -537,6 +621,47 @@ mod tests {
             },
         });
         assert!(authorized(&config(), &digest, &state, "node", 50));
+        assert!(!authorized_for(
+            &config(),
+            &digest,
+            &state,
+            "node",
+            50,
+            "discovery-viewer",
+            "discovery-index"
+        ));
+        if let AccessStatement::Grant { roles, scopes, .. } = &mut state.grants[0].record.statement
+        {
+            roles.push("discovery-viewer".into());
+            scopes.push("discovery-index:node".into());
+        }
+        assert!(authorized_for(
+            &config(),
+            &digest,
+            &state,
+            "node",
+            50,
+            "discovery-viewer",
+            "discovery-index"
+        ));
+        assert!(!authorized_for(
+            &config(),
+            &digest,
+            &state,
+            "other",
+            50,
+            "discovery-viewer",
+            "discovery-index"
+        ));
+        assert!(!authorized_for(
+            &config(),
+            &digest,
+            &state,
+            "node",
+            100,
+            "discovery-viewer",
+            "discovery-index"
+        ));
         assert!(!authorized(&config(), &digest, &state, "node", 100));
         assert!(!authorized(&config(), &digest, &state, "other", 50));
         assert!(!authorized(&config(), &"b".repeat(64), &state, "node", 50));
@@ -685,7 +810,7 @@ mod tests {
         let (mut writer, mut reader) = tokio::io::duplex(128);
         let access = allowed.clone();
         let task = tokio::spawn(async move {
-            read_authorized_route(&mut reader, || async { access.load(Ordering::SeqCst) }).await
+            read_authorized_route(&mut reader, |_| async { access.load(Ordering::SeqCst) }).await
         });
         writer.write_all(b"GET / HTTP/1.1\r\n").await.unwrap();
         tokio::task::yield_now().await;

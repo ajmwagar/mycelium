@@ -426,6 +426,10 @@ impl Mesh {
         project(health, hardware)
     }
 
+    pub(crate) async fn discovery_index(&self, at: u64) -> Result<crate::discovery_index::Index, String> {
+        crate::discovery_index::project(self.observations.lock().await.values(), at)
+    }
+
     pub async fn views(&self) -> Vec<PeerView> {
         let observations = self.observations.lock().await;
         let mut views = BTreeMap::<String, PeerView>::new();

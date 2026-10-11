@@ -24,6 +24,7 @@ pub mod credential_provider;
 mod execution;
 mod hardware;
 mod host_web;
+mod discovery_index;
 mod page_advertisement;
 pub mod peer;
 #[cfg(feature = "iroh-sync")]

@@ -1,5 +1,47 @@
 # Optional host web view
 
+## Site index
+
+Set `"index": true` in the existing private host-web configuration to serve
+the discovery index at `/` and `/sites`; `/api/sites` is its JSON projection.
+`/host` and `/api/host` retain the local host view. Index mode is off by default.
+Restart after changing it; a configuration change denies requests on the old
+listener until restart.
+
+Index access needs its own existing signed grant: role `discovery-viewer`, exact
+scope `discovery-index:<serving-node-id>`, and the same explicitly bound human
+TLS certificate. A `host-viewer` grant does not grant fleet inventory access.
+The index groups observed signed peer identities by site, with explicit freshness
+(five minutes) and original observation timestamps. It is not a health assertion
+or a complete inventory promise. No addresses, interface details, credentials,
+process arguments, or hardware serials are projected. More than 512 peers or a
+256 KiB response fails loudly; there is no silent truncation.
+
+Unibus owns its separate capability/zone-filtered viewer, not this page. Discovery
+can provide its entrance; it cannot substitute Mycelium's grants for the router's
+own authorization.
+
+### Pairing direction (not implemented by this read-only view)
+
+A local page can display the existing public signed peer-to-Iroh identity
+binding as a connection QR, together with observed local addresses and clearly
+labelled WAN/STUN hints. A connection ticket establishes reachability, not
+membership or permission. Address hints may expire or change without changing
+the bound endpoint identity.
+
+An invitation is different: its single-use, expiring claim is sensitive. Issuing
+or revealing one must be an explicit authorized action through the existing
+pairing issuer, with enrollment authority, expiry and requested roles visible.
+Do not mint invitations on page load, put private keys in a QR, bake access roles
+into the stable endpoint binding, or assume every peer can issue invitations.
+
+`localhost.myc`, if enabled, must resolve to this machine's loopback interface,
+never another peer or the site gateway. Localhost is not administrator evidence;
+authenticated requests and action authorization are still required. An
+unenrolled first-boot interface needs a separate local-owner bootstrap policy,
+not an anonymous exception to the enrolled host view. Follow-up is tracked as
+`mycelium-pairing-ui`.
+
 ## Optional service-name advertisement
 
 Set `advertise: true` in `host-web.json` only when the listener binds an explicit

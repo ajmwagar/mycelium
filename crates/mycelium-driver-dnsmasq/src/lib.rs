@@ -36,11 +36,17 @@ pub struct Settings {
     /// qualify; scanned listeners never become browser entrances implicitly.
     #[serde(default)]
     pub service_aliases: BTreeMap<String, String>,
+    /// Explicit index owner. Root aliases never select an arbitrary discovered peer.
+    #[serde(default)]
+    pub service_index_peers: BTreeMap<String, String>,
 }
 
 impl Settings {
     fn validate(&self) -> Result<(), String> {
         service_dns::validate_aliases(&self.service_aliases)?;
+        if self.service_index_peers.len() > 32 || self.service_index_peers.iter().any(|(kind, peer)| !self.service_aliases.contains_key(kind) || peer.is_empty() || peer.len() > 128 || peer.chars().any(char::is_control)) {
+            return Err("invalid service index peer identity".into());
+        }
         self.resolver.render(vec![])?;
         if !self.dnsmasq.is_absolute() || !self.mycelium.is_absolute() {
             return Err("binary paths must be absolute".into());
@@ -717,11 +723,14 @@ struct Retained {
     expires_at: u64,
     #[serde(default)]
     service_aliases: BTreeMap<String, String>,
+    #[serde(default)]
+    service_index_peers: BTreeMap<String, String>,
 }
 impl Retained {
     fn usable(self, settings: &Settings, timestamp: u64) -> Result<(Vec<DnsRecord>, u64), String> {
         if self.site != settings.resolver.site
             || self.service_aliases != settings.service_aliases
+            || self.service_index_peers != settings.service_index_peers
             || self.suffix != settings.resolver.suffix
             || self.expires_at <= timestamp
             || self.expires_at > timestamp.saturating_add(settings.expiry_seconds)
@@ -748,6 +757,7 @@ fn retain(
 ) -> Result<(), String> {
     let retained = Retained {
         service_aliases: settings.service_aliases.clone(),
+        service_index_peers: settings.service_index_peers.clone(),
         site: settings.resolver.site.clone(),
         suffix: settings.resolver.suffix.clone(),
         records,
@@ -923,6 +933,7 @@ mod tests {
             refresh_seconds: 30,
             expiry_seconds: 300,
             service_aliases: BTreeMap::new(),
+            service_index_peers: BTreeMap::new(),
         }
     }
     fn peer(node: &str, seen: u64) -> Value {
@@ -976,6 +987,7 @@ mod tests {
         let records = peer_records(&s, &json!([peer("a", 999)]), 1000).unwrap();
         let make = |expiry| Retained {
             service_aliases: BTreeMap::new(),
+            service_index_peers: BTreeMap::new(),
             site: "lab".into(),
             suffix: "myc".into(),
             records: records.clone(),

@@ -83,6 +83,12 @@ pub(super) fn project(
                     name,
                     ..host.clone()
                 });
+                if settings.service_index_peers.get(&service.value.kind) == Some(&service.provenance.observer) {
+                    records.push(DnsRecord {
+                        name: canonical_domain(&format!("{label}.{}", settings.resolver.suffix))?,
+                        ..host.clone()
+                    });
+                }
                 deadline = deadline.min(service.expires_at);
             }
         }
@@ -121,6 +127,21 @@ mod tests {
         let (records, expiry) = run(&catalog()).unwrap();
         assert_eq!(expiry, 1050);
         assert!(records.iter().any(|r| r.name == "unibus.neo.lab.myc"));
+    }
+    #[test]
+    fn root_index_requires_explicit_owner_and_fresh_matching_lease() {
+        let mut settings = crate::tests::settings();
+        settings.service_aliases.insert("unibus-viewer".into(), "unibus".into());
+        settings.service_index_peers.insert("unibus-viewer".into(), "neo".into());
+        let hosts = vec![DnsRecord { name: "neo.lab.myc".into(), address: "192.0.2.12".parse().unwrap(), site:"lab".into(), node:"neo".into() }];
+        let mut services = catalog();
+        let (records, _) = project(&settings, hosts.clone(), &services, 1000, 1200).unwrap();
+        assert!(records.iter().any(|r| r.name == "unibus.myc"));
+        settings.service_index_peers.insert("unibus-viewer".into(), "other".into());
+        assert!(!project(&settings, hosts.clone(), &services, 1000, 1200).unwrap().0.iter().any(|r| r.name == "unibus.myc"));
+        settings.service_index_peers.insert("unibus-viewer".into(), "neo".into());
+        services.observations[0].expires_at = 999;
+        assert_eq!(project(&settings, hosts, &services, 1000, 1200).unwrap().0.len(), 1);
     }
     #[test]
     fn no_promotion_of_scans_expired_or_other_hosts() {
