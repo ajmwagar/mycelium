@@ -1604,6 +1604,18 @@ struct TlsSettings {
     key: String,
 }
 
+/// Reload only the optional web entrance's TLS identity. Peer TLS and trust
+/// settings retain their existing owner; invalid replacements fail closed.
+pub(crate) fn web_tls_acceptor(config: &crate::host_web::Config) -> Result<TlsAcceptor, AnyError> {
+    let tls = TlsSettings::from_env()?.ok_or("host web requires peer TLS settings")?;
+    let roots = config.viewer_roots()?;
+    let server = match &config.server_identity {
+        Some(identity) => tls.server_config_for(&identity.certificate, &identity.private_key, &roots)?,
+        None => tls.server_config_for(&tls.cert, &tls.key, &roots)?,
+    };
+    Ok(TlsAcceptor::from(Arc::new(server)))
+}
+
 impl TlsSettings {
     fn identity_binding(&self, node_id: &str) -> Result<TransportCredentialBinding, AnyError> {
         let certificate = certs(&self.cert)?

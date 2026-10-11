@@ -1096,8 +1096,9 @@ pub fn encode_hex(bytes: &[u8]) -> String {
     output
 }
 
-fn decode_array<const N: usize>(text: &str) -> Result<[u8; N], String> {
-    if text.len() != N * 2 {
+/// Decode an exact-length hexadecimal key or signature using the protocol parser.
+pub fn decode_array<const N: usize>(text: &str) -> Result<[u8; N], String> {
+    if text.len() != N * 2 || !text.is_ascii() {
         return Err(format!("expected {} hex characters", N * 2));
     }
     let mut output = [0_u8; N];

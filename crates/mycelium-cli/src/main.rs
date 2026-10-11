@@ -21,6 +21,7 @@ mod ssh_access;
 mod stun;
 mod sync;
 mod wireguard;
+mod web_ca;
 
 use mycelium_core::{
     ActionPlan, ActionRisk, AllocationReceipt, BootReachability, DiscoveryProtocol,
@@ -85,6 +86,10 @@ const USAGE: &str = "\
 mycelium — control plane for your network appliances
 
 usage:
+  mycelium web-ca init --path DIR --write
+  mycelium web-ca request --path DIR --write
+  mycelium web-ca issue --ca DIR --request FILE --output DIR [--index] --write
+  mycelium web-ca install --path DIR --certificate FILE --ca FILE --hostname NAME --write
   mycelium completions zsh|bash|fish
   mycelium sync enable --write | export [--qr] | join <rendezvous.json> --write
   mycelium sync relays enable|disable --write
@@ -482,6 +487,7 @@ fn parse_flags(args: &[String]) -> Flags {
 
 async fn run(cmd: &str, args: &[String]) -> Result<Vec<String>, ClientError> {
     match cmd {
+        "web-ca" => web_ca::run(args).await.map_err(access_error),
         "setup" => setup::run(args).await.map_err(access_error),
         "pair" => pair::run(args).await.map_err(access_error),
         "sync" => sync::run(args).map_err(access_error),

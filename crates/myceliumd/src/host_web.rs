@@ -193,7 +193,7 @@ fn authorized_for(
     })
 }
 
-pub(crate) async fn start(mesh: Arc<Mesh>, config: Config, acceptor: TlsAcceptor) -> Result<()> {
+pub(crate) async fn start(mesh: Arc<Mesh>, config: Config, _acceptor: TlsAcceptor) -> Result<()> {
     let listener = TcpListener::bind(config.listen).await?;
     let address = config.listen;
     let index_enabled = config.index;
@@ -242,11 +242,20 @@ pub(crate) async fn start(mesh: Arc<Mesh>, config: Config, acceptor: TlsAcceptor
                 continue;
             };
             let mesh = mesh.clone();
-            let acceptor = acceptor.clone();
             let viewer_certificates = viewer_certificates.clone();
             tokio::spawn(async move {
                 let _permit = permit;
                 let result = tokio::time::timeout(DEADLINE, async {
+                    // A managed leaf renewal must not restart peer sync. Reload
+                    // explicit web identities on each new bounded handshake.
+                    // Never silently fall back after an invalid replacement.
+                    let fresh = load_optional()?.ok_or("host web disabled")?;
+                    if fresh.listen != address {
+                        return Err("host web listener changed; restart required".into());
+                    }
+                    let acceptor =
+                        tokio::task::spawn_blocking(move || crate::peer::web_tls_acceptor(&fresh))
+                            .await??;
                     let mut stream = acceptor.accept(tcp).await?;
                     let digest = stream
                         .get_ref()
@@ -336,7 +345,10 @@ pub(crate) async fn start(mesh: Arc<Mesh>, config: Config, acceptor: TlsAcceptor
                             serde_json::to_string_pretty(&index)?
                         } else {
                             let navigation = load_optional()?.and_then(|c| c.unibus_viewer_url);
-                            crate::discovery_index::page_with_navigation(&index, navigation.as_deref())
+                            crate::discovery_index::page_with_navigation(
+                                &index,
+                                navigation.as_deref(),
+                            )
                         };
                         if body.len() > 256 * 1024 {
                             return Err("discovery index exceeds response bound".into());
@@ -587,12 +599,10 @@ mod tests {
         value = config();
         value.bootstrap_viewer_bindings.clear();
         assert!(value.validate().is_err());
-        assert!(
-            serde_json::from_str::<Config>(
-                r#"{"listen":"127.0.0.1:8443","bootstrap_viewer_bindings":{},"oidc":true}"#
-            )
-            .is_err()
-        );
+        assert!(serde_json::from_str::<Config>(
+            r#"{"listen":"127.0.0.1:8443","bootstrap_viewer_bindings":{},"oidc":true}"#
+        )
+        .is_err());
     }
 
     #[test]
