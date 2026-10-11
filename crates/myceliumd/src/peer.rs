@@ -373,6 +373,14 @@ impl Mesh {
             ))
             .await?;
             let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+            if let Some(config) = crate::host_web::load_optional()? {
+                crate::host_web::start(
+                    self.clone(),
+                    config,
+                    TlsAcceptor::from(Arc::new(tls.server_config()?)),
+                )
+                .await?;
+            }
             #[cfg(feature = "iroh-sync")]
             iroh_sync::start(self.clone(), &tls).await?;
             if let Some(address) = tls.listen.clone() {
@@ -392,6 +400,25 @@ impl Mesh {
             }
         }
         Ok(())
+    }
+
+    /// Project local observations without materializing the whole fleet or
+    /// cloning sensitive process/hardware fields into a presentation layer.
+    pub(crate) async fn project_local<T>(
+        &self,
+        project: impl FnOnce(Option<&HostHealth>, Option<&HardwareSnapshot>) -> T,
+    ) -> T {
+        let observations = self.observations.lock().await;
+        let mut health = None;
+        let mut hardware = None;
+        for envelope in observations.values().filter(|value| value.origin == self.node_id()) {
+            match &envelope.event {
+                PeerEvent::Health(value) => health = Some(value),
+                PeerEvent::Hardware(value) => hardware = Some(value),
+                _ => {},
+            }
+        }
+        project(health, hardware)
     }
 
     pub async fn views(&self) -> Vec<PeerView> {
@@ -1546,7 +1573,8 @@ impl TlsSettings {
         if iroh_enabled && !cfg!(feature = "iroh-sync") {
             return Err("iroh-sync.json exists but this binary lacks the iroh-sync feature".into());
         }
-        if listen.is_none() && seeds.is_empty() && !iroh_enabled {
+        let host_web_enabled = crate::home_dir().join("host-web.json").exists();
+        if listen.is_none() && seeds.is_empty() && !iroh_enabled && !host_web_enabled {
             return Ok(None);
         }
         let required = |name| -> Result<String, AnyError> {

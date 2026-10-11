@@ -956,6 +956,10 @@ endpoint scope; a gateway or reachable swarm endpoint is not inferred from it.
 The observer needs `curl`; it never installs tools or elevates privileges.
 Inspect with `mycelium scan --json` followed by `mycelium services --json`.
 
+An optional [authenticated host web view](docs/host-web.md) presents local
+health and hardware counts. It is off by default; fleet mTLS membership alone
+does not grant viewer access, and browser/443 deployment remains explicit.
+
 `mycelium targets` lists appliances explicitly enrolled behind management
 drivers. The former `mycelium devices` spelling remains a compatibility alias;
 it does not mean discovered hardware or usable resources.
