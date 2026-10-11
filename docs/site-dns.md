@@ -160,11 +160,19 @@ Store configuration outside the checkout, for example `~/.mycelium/dns/settings.
 Binary paths must be absolute. Reachable prefixes are an explicit publication
 scope, not a claim that an IP is routable. Start with the attached LAN; do not
 publish every remote private address. Records derive from the authenticated
-daemon's authenticated peer observations, filtered by freshness and address scope. Names are
+peer observations, filtered by freshness and address scope. Names are
 `hostname.site.suffix`; live competing owners fail closed. Device annotations,
 non-peer discovery is not included in this adapter.
 
 ## Optional daemon-page service names
+
+Host identities and optional service aliases refresh independently. If the
+service catalog times out or fails validation, the resolver explicitly reports
+degraded service discovery and projects only the fresh authenticated host
+records from that refresh. It does not prolong service leases, fabricate
+aliases, or discard those fresh hosts merely because a catalog read failed.
+Peer observation failure still uses only policy-valid, unexpired retained
+evidence; DNS does not treat a stalled daemon as fresh.
 
 `mesh_sites` defaults to `true`: fresh authenticated peers supply their own site
 names, so adding a mesh site requires no resolver allowlist edit. Names retain

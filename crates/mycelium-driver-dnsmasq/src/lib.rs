@@ -8,6 +8,7 @@ use mycelium_dns_policy::resolver::{usable_address, ResolverConfig, ResolverMode
 use mycelium_dns_policy::{canonical_domain, DnsRecord};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use fpl_resource_observation::ServiceCatalog;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
@@ -320,6 +321,16 @@ async fn observation(settings: &Settings) -> Result<(Vec<DnsRecord>, u64), Strin
     if service_dns::aliases(settings)?.is_empty() {
         return Ok((records, deadline));
     }
+    Ok(with_service_observation(
+        settings,
+        records,
+        service_observation(settings).await,
+        timestamp,
+        deadline,
+    ))
+}
+
+async fn service_observation(settings: &Settings) -> Result<ServiceCatalog, String> {
     let mut command = tokio::process::Command::new(&settings.mycelium);
     command.args(["services", "--json"]).kill_on_drop(true);
     let output = tokio::time::timeout(Duration::from_secs(10), command.output())
@@ -329,10 +340,27 @@ async fn observation(settings: &Settings) -> Result<(Vec<DnsRecord>, u64), Strin
     if !output.status.success() || output.stdout.len() > 16 * 1024 * 1024 {
         return Err("Mycelium service observation failed or exceeded bounds".into());
     }
-    let catalog = serde_json::from_slice(&output.stdout).map_err(|_| "invalid service catalog")?;
-    let (records, deadline) =
-        service_dns::project(settings, records, &catalog, timestamp, deadline)?;
-    Ok((records, deadline))
+    serde_json::from_slice(&output.stdout).map_err(|_| "invalid service catalog".into())
+}
+
+fn with_service_observation(
+    settings: &Settings,
+    hosts: Vec<DnsRecord>,
+    catalog: Result<ServiceCatalog, String>,
+    timestamp: u64,
+    deadline: u64,
+) -> (Vec<DnsRecord>, u64) {
+    match catalog.and_then(|catalog| {
+        service_dns::project(settings, hosts.clone(), &catalog, timestamp, deadline)
+    }) {
+        Ok(result) => result,
+        Err(error) => {
+            // Never prolong a service lease or let optional discovery erase fresh
+            // independently authenticated hosts. Invalid aliases are withdrawn.
+            eprintln!("DNS degraded at {timestamp}: service aliases unavailable ({error}); retaining fresh host records until {deadline}");
+            (hosts, deadline)
+        }
+    }
 }
 async fn observe(settings: &Settings) -> Result<Vec<DnsRecord>, String> {
     Ok(observation(settings).await?.0)
@@ -1121,6 +1149,36 @@ mod tests {
         remote["hello"]["site"] = json!("titan");
         assert!(peer_records(&s, &json!([remote]), 1000).unwrap().is_empty());
         assert!(s.render(vec![]).unwrap().contains("server=/titan.myc/"));
+    }
+
+    #[test]
+    fn unavailable_service_catalog_does_not_discard_or_extend_fresh_hosts() {
+        let mut s = settings();
+        s.service_aliases
+            .insert("mycelium-host-web".into(), "mycelium".into());
+        let hosts = peer_records(&s, &json!([peer("a", 999)]), 1000).unwrap();
+        let (records, deadline) = with_service_observation(
+            &s,
+            hosts.clone(),
+            Err("service observation timed out".into()),
+            1000,
+            1299,
+        );
+        assert_eq!(records, hosts);
+        assert_eq!(deadline, 1299);
+        assert!(records.iter().all(|r| !r.name.starts_with("mycelium.")));
+        let (records, deadline) = with_service_observation(
+            &s,
+            hosts.clone(),
+            serde_json::from_value(json!({"invalid":"catalog"})).map_err(|e| e.to_string()),
+            1000,
+            1299,
+        );
+        assert_eq!(records, hosts);
+        assert_eq!(deadline, 1299);
+        assert!(peer_records(&s, &json!([peer("a", 999)]), 1300)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
