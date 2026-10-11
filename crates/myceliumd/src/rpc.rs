@@ -1098,8 +1098,8 @@ impl Daemon {
                     ),
                 };
                 let mut observations = Vec::new();
-                match crate::local_services::observe_file(
-                    &crate::home_dir().join("application-services.json"), self.mesh.node_id(), unix_now(),
+                match crate::local_services::observe_sources(
+                    &crate::home_dir(), self.mesh.node_id(), unix_now(),
                 ) {
                     Ok(local) => observations.extend(local),
                     Err(error) => warnings.push(format!("application discovery: {error}")),

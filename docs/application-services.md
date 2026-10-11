@@ -5,6 +5,19 @@ during the existing scan. The application owns the file and service lifecycle;
 Mycelium owns observation, topology provenance and gossip. No application protocol
 adapter, proxy or permission issuer is introduced into Mycelium.
 
+It also reads up to 32 regular `.json` documents in `application-services.d/`.
+Each application owns its own file; applications must not rewrite a shared
+aggregate to add themselves. Symlink documents, duplicate service IDs across
+files, and more than 128 combined fresh observations fail the source as a whole.
+The legacy aggregate remains supported. The directory is read during the same
+scan, not by a second discovery daemon.
+
+The optional host page publishes `application-services.d/mycelium-host-web.json`
+only with `advertise: true`, after successfully binding a non-loopback listener.
+It renews its 120-second lease every 30 seconds. Unibus's optional viewer uses a
+separate owner file with the same schema and expiry cadence. Keep normal scans
+more frequent than lease expiry; no scanner schedule is automatically installed.
+
 The document uses `fpl-resource-observation::ServiceCatalog` schema version 1.
 Each observation must name the local mesh node as its provenance observer. An
 optional `node_id` attribute must agree. Original observation/expiry timestamps

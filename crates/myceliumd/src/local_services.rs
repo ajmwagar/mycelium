@@ -7,6 +7,51 @@ use std::{collections::BTreeSet, io::Read, path::Path};
 const SERVICE_TYPE: &str = "_application-owner._tcp";
 pub const MAX_DOCUMENT_BYTES: usize = 65536;
 
+/// Independent applications own independent files. Preserve the legacy aggregate
+/// while allowing bounded per-app documents without read/modify/write races.
+pub fn observe_sources(home: &Path, node: &str, now: u64) -> Result<Vec<Observation>, String> {
+    let mut all = observe_file(&home.join("application-services.json"), node, now)?;
+    let directory = home.join("application-services.d");
+    let entries = match std::fs::read_dir(&directory) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(all),
+        Err(_) => return Err("cannot read application owner directory".into()),
+    };
+    let mut files = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|_| "cannot read application owner entry")?;
+        if entry.path().extension().is_some_and(|ext| ext == "json") {
+            if !entry
+                .file_type()
+                .map_err(|_| "cannot inspect application owner entry")?
+                .is_file()
+            {
+                return Err("application owner documents must be regular files".into());
+            }
+            files.push(entry.path());
+            if files.len() > 32 {
+                return Err("too many application owner documents".into());
+            }
+        }
+    }
+    files.sort();
+    for file in files {
+        all.extend(observe_file(&file, node, now)?);
+    }
+    if all.len() > 128 {
+        return Err("application owner inventory exceeds bound".into());
+    }
+    let mut ids = BTreeSet::new();
+    for observation in &all {
+        if let Observation::ServiceAdvertisement { advertisement, .. } = observation {
+            if !ids.insert(&advertisement.instance) {
+                return Err("duplicate application owner identity across documents".into());
+            }
+        }
+    }
+    Ok(all)
+}
+
 fn validate(observation: &ServiceObservation, node: &str) -> Result<(), String> {
     let label = |s: &str| {
         !s.is_empty()
@@ -140,6 +185,33 @@ pub fn project(ad: &ServiceAdvertisement) -> Result<Option<ServiceObservation>, 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn independent_owner_files_merge_and_collisions_fail() {
+        let home = std::env::temp_dir().join(format!(
+            "mycelium-owner-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&home).unwrap();
+        let directory = home.join("application-services.d");
+        std::fs::create_dir(&directory).unwrap();
+        let mut a = document();
+        std::fs::write(directory.join("a.json"), serde_json::to_vec(&a).unwrap()).unwrap();
+        a["observations"][0]["service_id"] = serde_json::json!("service/peer/application/other");
+        std::fs::write(directory.join("b.json"), serde_json::to_vec(&a).unwrap()).unwrap();
+        assert_eq!(observe_sources(&home, "peer", 100).unwrap().len(), 2);
+        std::fs::write(
+            home.join("application-services.json"),
+            serde_json::to_vec(&a).unwrap(),
+        )
+        .unwrap();
+        assert!(observe_sources(&home, "peer", 100).is_err());
+        assert!(observe_sources(&home, "other", 100).is_err());
+        std::fs::remove_dir_all(home).unwrap();
+    }
     fn document() -> serde_json::Value {
         serde_json::json!({"schema_version":1,"observations":[{
             "schema_version":1,"service_id":"service/peer/application/test","observed_at":100,"expires_at":160,

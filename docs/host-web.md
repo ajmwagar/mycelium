@@ -1,5 +1,23 @@
 # Optional host web view
 
+## Optional service-name advertisement
+
+Set `advertise: true` in `host-web.json` only when the listener binds an explicit
+non-loopback address. Default is false. The page then owns
+`application-services.d/mycelium-host-web.json`, renewing a 120-second lease
+every 30 seconds after a successful bind. Listener failure, invalid/disabled
+configuration, or advertisement-write failure stops renewal. This is availability
+metadata, not a permission grant; it does not change human authentication.
+
+Mycelium imports the file during normal scans and gossips its original expiry.
+With `service_aliases: {"mycelium-host-web": "mycelium"}` in the optional DNS
+resolver's settings, fresh matching peer evidence yields
+`mycelium.HOST.SITE.myc`. Unibus pages use the same naming/projection mechanism
+with the `unibus-viewer` kind and `unibus` label. Neither app installs ingress,
+DNS, or certificates automatically. Use the advertised port and issue a server
+certificate covering the exact service hostname. Keep scan cadence below 120
+seconds; file removal is not immediate distributed revocation.
+
 The host view is an embedded, read-only page in `myceliumd`. It is off unless
 `$MYCELIUM_HOME/host-web.json` exists. No frontend build, separate registry or
 OIDC service is required. This initial slice is not deployed to the fleet.
