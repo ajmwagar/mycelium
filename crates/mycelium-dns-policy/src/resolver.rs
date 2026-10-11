@@ -1,5 +1,5 @@
 //! Optional resolver policy. Naming is separate from reachability and grants.
-use crate::{Delegation, DnsRecord, canonical_domain, plan};
+use crate::{canonical_domain, plan, Delegation, DnsRecord};
 use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, SocketAddr};
 
@@ -68,6 +68,26 @@ impl ResolverConfig {
         if self.mode == ResolverMode::Off {
             return Ok(String::new());
         }
+        // Each admitted site's existing plan is the validation boundary. Raw
+        // observations from unadmitted sites must never supply namespace owners.
+        let additional_zones = additional_sites
+            .iter()
+            .map(|site| plan(site, &self.suffix, remote_records.clone(), vec![]))
+            .collect::<Result<Vec<_>, _>>()?;
+        let admitted_records: Vec<_> = zone
+            .records
+            .iter()
+            .chain(additional_zones.iter().flat_map(|zone| zone.records.iter()))
+            .collect();
+        let mut record_owners = std::collections::BTreeMap::new();
+        for record in &admitted_records {
+            if record_owners
+                .insert(&record.name, &record.node)
+                .is_some_and(|owner| owner != &record.node)
+            {
+                return Err("DNS name has competing owners across admitted sites".into());
+            }
+        }
         if self.listen.is_empty() || self.listen.len() > 8 || self.upstreams.len() > 8 {
             return Err("resolver needs 1..8 explicit listeners and at most 8 upstreams".into());
         }
@@ -119,27 +139,32 @@ impl ResolverConfig {
                 || owner.len() > 128
                 || owner.chars().any(char::is_control)
                 || zone.delegations.iter().any(|d| {
-                    namespace == &d.zone || namespace.ends_with(&format!(".{}", d.zone))
+                    namespace == &d.zone
+                        || namespace.ends_with(&format!(".{}", d.zone))
                         || d.zone.ends_with(&format!(".{namespace}"))
                 })
-                || self.namespace_owners.keys().any(|other| {
-                    other != namespace && other.ends_with(&format!(".{namespace}"))
-                })
-                || zone.records.iter().any(|r| {
-                    r.name == *namespace || r.name.ends_with(&format!(".{namespace}"))
-                })
+                || self
+                    .namespace_owners
+                    .keys()
+                    .any(|other| other != namespace && other.ends_with(&format!(".{namespace}")))
+                || admitted_records
+                    .iter()
+                    .any(|r| r.name == *namespace || r.name.ends_with(&format!(".{namespace}")))
             {
                 return Err("invalid or conflicting child namespace ownership".into());
             }
             // No owner evidence means no answer; never choose another gateway.
-            let addresses: std::collections::BTreeSet<_> = zone.records.iter()
-                .filter(|r| &r.node == owner).map(|r| r.address).collect();
+            let addresses: std::collections::BTreeSet<_> = admitted_records
+                .iter()
+                .filter(|r| &r.node == owner)
+                .map(|r| r.address)
+                .collect();
             for address in addresses {
                 config.push_str(&format!("address=/{namespace}/{address}\n"));
             }
         }
-        for site in additional_sites {
-            config.push_str(&plan(site, &self.suffix, remote_records.clone(), vec![])?.dnsmasq);
+        for additional_zone in additional_zones {
+            config.push_str(&additional_zone.dnsmasq);
         }
         Ok(config)
     }
@@ -181,13 +206,82 @@ pub fn usable_address(address: IpAddr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn remote_record(site: &str, name: &str, owner: &str) -> DnsRecord {
+        DnsRecord {
+            name: name.into(),
+            site: site.into(),
+            node: owner.into(),
+            address: "192.0.2.20".parse().unwrap(),
+        }
+    }
+    #[test]
+    fn owned_namespace_uses_only_validated_admitted_remote_site() {
+        let mut c = config();
+        c.namespace_owners
+            .insert("invoker.myc".into(), "gateway".into());
+        let records = vec![remote_record("cloud", "gateway.cloud.myc", "gateway")];
+        assert!(!c
+            .render(records.clone())
+            .unwrap()
+            .contains("address=/invoker.myc/"));
+        let text = c.render_for_sites(records, &["cloud".into()]).unwrap();
+        assert!(text.contains("address=/invoker.myc/192.0.2.20\n"));
+        assert!(text.contains("host-record=gateway.cloud.myc,192.0.2.20\n"));
+    }
+    #[test]
+    fn remote_site_namespace_collision_is_not_hidden_by_render_order() {
+        let mut c = config();
+        c.namespace_owners
+            .insert("invoker.myc".into(), "gateway".into());
+        let records = vec![remote_record("cloud", "service.invoker.myc", "other")];
+        assert!(c.render(records.clone()).is_ok());
+        assert!(c
+            .render_for_sites(records, &["cloud".into()])
+            .unwrap_err()
+            .contains("conflicting"));
+    }
+    #[test]
+    fn rejects_competing_names_across_admitted_sites() {
+        let c = config();
+        let records = vec![
+            remote_record("lab", "same.myc", "one"),
+            remote_record("cloud", "same.myc", "two"),
+        ];
+        assert!(c.render(records.clone()).is_ok());
+        assert!(c
+            .render_for_sites(records, &["cloud".into()])
+            .unwrap_err()
+            .contains("competing owners"));
+    }
+    #[test]
+    fn admitted_remote_owner_must_pass_existing_plan_guards() {
+        let mut c = config();
+        c.namespace_owners
+            .insert("invoker.myc".into(), "gateway".into());
+        let record = remote_record("cloud", "gateway.external.example", "gateway");
+        assert!(c.render(vec![record.clone()]).is_ok());
+        assert!(c.render_for_sites(vec![record], &["cloud".into()]).is_err());
+        assert!(!c
+            .render_for_sites(vec![], &["cloud".into()])
+            .unwrap()
+            .contains("address=/invoker.myc/"));
+    }
     #[test]
     fn namespace_answers_follow_explicit_fresh_owner_records() {
         let mut c = config();
-        c.namespace_owners.insert("ipfs.myc".into(), "gateway".into());
+        c.namespace_owners
+            .insert("ipfs.myc".into(), "gateway".into());
         assert!(!c.render(vec![]).unwrap().contains("address=/ipfs.myc/"));
-        let record = DnsRecord { name: "agora.lab.myc".into(), site: "lab".into(), node: "gateway".into(), address: "192.168.1.20".parse().unwrap() };
-        assert!(c.render(vec![record]).unwrap().contains("address=/ipfs.myc/192.168.1.20"));
+        let record = DnsRecord {
+            name: "agora.lab.myc".into(),
+            site: "lab".into(),
+            node: "gateway".into(),
+            address: "192.168.1.20".parse().unwrap(),
+        };
+        assert!(c
+            .render(vec![record])
+            .unwrap()
+            .contains("address=/ipfs.myc/192.168.1.20"));
         for invalid in ["myc", "external.example", "*.ipfs.myc"] {
             c.namespace_owners.clear();
             c.namespace_owners.insert(invalid.into(), "gateway".into());
@@ -240,11 +334,10 @@ mod tests {
         let mut c = config();
         c.mode = ResolverMode::LanServing;
         c.listen.push("192.0.2.1:1053".parse().unwrap());
-        assert!(
-            c.render(vec![])
-                .unwrap()
-                .contains("listen-address=192.0.2.1")
-        );
+        assert!(c
+            .render(vec![])
+            .unwrap()
+            .contains("listen-address=192.0.2.1"));
         c.delegations.push(Delegation {
             zone: "myc".into(),
             site: "lab".into(),

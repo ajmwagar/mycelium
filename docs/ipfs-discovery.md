@@ -137,7 +137,12 @@ the authorized peer, not a configured IP or a hardcoded IPFS implementation:
 
 Put this map inside `resolver`. Addresses derive only from that peer's fresh
 site-scoped records and reviewed reachable prefixes; absent owner evidence
-withdraws answers rather than choosing another gateway. Configured child zones
+withdraws the answer. Owners may be in another admitted mesh site: the resolver
+unions the existing validated site plans before namespace ownership and
+collision checks. Unadmitted raw observations cannot supply an owner address;
+conflicting canonical names across admitted sites fail closed. This is generic
+namespace policy, not an IPFS-specific address table; no substitute gateway is
+chosen when the owner disappears. Configured child zones
 cannot overlap delegations, other child owners or exact peer/service records.
 The `.myc` local guard prevents public DNS fallback. This is intentional
 namespace provisioning, not an inference that any detected Kubo is a gateway.
