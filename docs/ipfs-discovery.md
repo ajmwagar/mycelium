@@ -60,3 +60,55 @@ IPFS content CIDs remain content identities, independent of host names and ACLs.
 Titan and Agora were inspected read-only during this slice. Both reported Kubo
 0.43.1 on loopback port 5002 and distinct peer IDs. Each advertised only its
 `/p2p/<id>` address, which supplies no dialable host or browser gateway.
+
+## First private HTTPS gateway
+
+Agora now serves a dedicated tailnet-only content entrance:
+`https://agora-one.tail5ba253.ts.net:8446/ipfs/CID`.
+This deployment reuses existing Tailscale Serve TLS; it does not require
+Tailscale in the Mycelium contract or expose a public gateway. Tailnet policy,
+not Mycelium viewer grants, currently controls who can reach this entrance.
+No `ipfs.myc` alias or owner lease has been activated.
+
+The reviewed configuration is `examples/ipfs-gateway/nginx.conf`. A dedicated
+unprivileged, read-only nginx container shares the existing private Kubo Docker
+network and publishes only `127.0.0.1:8789`. It permits GET/HEAD under `/ipfs/`,
+blocks all other paths, strips cookies and authorization, disables scripts in
+content, and forwards to Kubo's content port 8080, never RPC port 5001.
+This is a path gateway, not an arbitrary application-hosting origin.
+Authorized clients can retrieve content available through this Kubo node;
+there is no per-CID ACL or local-pins-only restriction.
+
+Deployment runbook (Agora-specific existing network/container names):
+
+1. Copy the configuration to `/etc/mycelium/ipfs-gateway/nginx.conf`, root-owned.
+2. Validate with `nginx -t` using the same image and mounted configuration.
+3. Start the container:
+
+   ```sh
+   sudo docker run -d --name mycelium-ipfs-gateway --restart unless-stopped \
+     --network unibus-ipfs-private_default --read-only --cap-drop ALL \
+     --security-opt no-new-privileges --user 101:101 \
+     --tmpfs /tmp:rw,noexec,nosuid,size=16m -p 127.0.0.1:8789:8080 \
+     -v /etc/mycelium/ipfs-gateway/nginx.conf:/etc/nginx/nginx.conf:ro \
+     --entrypoint nginx \
+     nginx@sha256:0985e772fb9f729e6fa0980da05fca5d9c468e870eed43071545afa9d2e27d94 \
+     -g 'daemon off;'
+   sudo tailscale serve --bg --https=8446 --yes http://127.0.0.1:8789
+   ```
+
+4. Add the non-secret `examples/ipfs-gateway/welcome.txt` document using Kubo's
+   local `ipfs add --cid-version=1 -Q` CLI. This pins the sample; no existing
+   pins or Kubo settings are changed. Verified CID:
+   `bafkreig6d4replmun3e5fdcs7aql2sffhyjmrgez7h2ebdnoczmznwyypa`.
+5. Verify HTTPS without `-k`: GET and HEAD on that CID return 200; GET
+   `/api/v0/version` returns 404; POST on the content path returns 405.
+   Compare downloaded document bytes with the source file. Confirm prior
+   Serve routes are still present and only loopback port 8789 is published.
+
+Rollback without touching other HTTPS routes or Kubo:
+`sudo tailscale serve --https=8446 off`, then
+`sudo docker stop mycelium-ipfs-gateway`. These preserve the container,
+configuration and pinned sample for inspection/recovery. Re-enable with
+`docker start` and the Serve command above. Restart policies are configured;
+a full host reboot has not been tested.
