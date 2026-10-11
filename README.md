@@ -925,6 +925,10 @@ mycelium services --kind adb --node agora-one
 mycelium services watch
 ```
 
+For site-scoped mesh names and delegation to runtime-owned namespaces such as
+Shroud, see [site DNS planning](docs/site-dns.md). `mycelium dns plan` is read-only;
+it does not install a resolver or replace workload discovery.
+
 Topology answers where things are and how they connect. Resources answer what
 usable things exist and what they can do. The topology projection carries only
 resource attachment edges, so refreshing GPU or storage facts does not create a

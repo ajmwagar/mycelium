@@ -2314,6 +2314,7 @@ dependencies = [
  "fpl-resource-observation",
  "jsonwebtoken",
  "mycelium-core",
+ "mycelium-dns-policy",
  "mycelium-driver-netgear-fastpath",
  "mycelium-peer-protocol",
  "myceliumd",
@@ -2341,6 +2342,14 @@ dependencies = [
  "sha2 0.10.9",
  "thiserror 2.0.21",
  "tokio",
+]
+
+[[package]]
+name = "mycelium-dns-policy"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
