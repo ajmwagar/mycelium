@@ -3,8 +3,11 @@
 fn save_config(home: &std::path::Path, config: &myceliumd::peer::SyncConfig) -> Result<(), String> {
     config.validate()?;
     let temporary = home.join("iroh-sync.json.tmp");
-    std::fs::write(&temporary, serde_json::to_vec_pretty(config).map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())?;
+    std::fs::write(
+        &temporary,
+        serde_json::to_vec_pretty(config).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
     std::fs::rename(temporary, home.join("iroh-sync.json")).map_err(|e| e.to_string())
 }
 
@@ -39,12 +42,15 @@ pub fn run(args: &[String]) -> Result<Vec<String>, String> {
             save_config(&home, &config)?;
             Ok(vec![format!("public relays {}; restart the managed daemon (peer authentication is unchanged)", args[1])])
         }
-        Some("export") if args.len() == 1 || args == ["export", "--qr"] => {
+        Some("export") if args.len() == 1 || args == ["export", "--qr"] || args == ["export", "--presentation"] => {
             let rendezvous: SyncRendezvous =
                 serde_json::from_slice(&read(&home.join("iroh-rendezvous.json"))?)
                     .map_err(|e| e.to_string())?;
             rendezvous.validate(Some(at))?;
             let json = serde_json::to_string(&rendezvous).map_err(|e| e.to_string())?;
+            if args.get(1).map(String::as_str) == Some("--presentation") {
+                return Ok(vec![presentation(&rendezvous, at)?]);
+            }
             if args.len() == 2 {
                 let qr = qrcode::QrCode::new(json.as_bytes()).map_err(|e| e.to_string())?;
                 Ok(vec![
@@ -84,10 +90,50 @@ pub fn run(args: &[String]) -> Result<Vec<String>, String> {
             Ok(vec!["sync seed saved; restart myceliumd to connect (enrollment and trust are unchanged)".into()])
         }
         _ => Err(
-            "usage: mycelium sync enable --write | export [--qr] | join <rendezvous.json> --write | relays enable|disable --write"
+            "usage: mycelium sync enable --write | export [--qr|--presentation] | join <rendezvous.json> --write | relays enable|disable --write"
                 .into(),
         ),
     }
+}
+
+/// Public, read-only presentation of the existing sync export. Renderers never
+/// receive an invite, signing key, identity grant, or authority to enroll.
+#[cfg(feature = "iroh-sync")]
+fn presentation(rendezvous: &myceliumd::peer::SyncRendezvous, at: u64) -> Result<String, String> {
+    rendezvous.validate(Some(at))?;
+    let payload = serde_json::to_string(rendezvous).map_err(|e| e.to_string())?;
+    let qr = qrcode::QrCode::new(payload.as_bytes()).map_err(|e| format!("connection QR: {e}"))?;
+    // Fixed black/white and four-module quiet zone are barcode requirements,
+    // not application theme colors. SVG contains only integer QR geometry.
+    let width = qr.width();
+    let size = width + 8;
+    let mut svg = format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {size} {size}\"><rect width=\"{size}\" height=\"{size}\" fill=\"white\"/><g fill=\"black\">"
+    );
+    for y in 0..width {
+        for x in 0..width {
+            if qr[(x, y)] == qrcode::Color::Dark {
+                svg.push_str(&format!(
+                    "<rect x=\"{}\" y=\"{}\" width=\"1\" height=\"1\"/>",
+                    x + 4,
+                    y + 4
+                ));
+            }
+        }
+    }
+    svg.push_str("</g></svg>");
+    serde_json::to_string(&serde_json::json!({
+        "mode": "connection", "target_endpoint_id": rendezvous.endpoint.endpoint_id,
+        "target_server_name": rendezvous.server_name,
+        "observed_at": rendezvous.endpoint.observed_at,
+        "expires_at": rendezvous.endpoint.expires_at,
+        "direct_address_hints": rendezvous.endpoint.direct_addresses,
+        "relay_hints": rendezvous.endpoint.relay_urls,
+        "remaining_seconds": rendezvous.endpoint.expires_at - at,
+        "payload": payload, "qr_svg": svg,
+        "handoff": "mycelium sync join <rendezvous.json> --write",
+        "notice": "Connection hints only. Existing fleet membership and transport authentication are still required. This does not enroll a device."
+    })).map_err(|e| e.to_string())
 }
 
 #[cfg(not(feature = "iroh-sync"))]
@@ -100,9 +146,42 @@ mod tests {
     use super::*;
 
     #[test]
+    fn presentation_is_public_and_clears_at_expiry() {
+        let rendezvous: myceliumd::peer::SyncRendezvous =
+            serde_json::from_value(serde_json::json!({
+                "server_name":"peer.test", "endpoint":{
+                    "id":"mycelium-sync", "endpoint_id":"a".repeat(64),
+                    "alpns":["mycelium/sync/1"], "direct_addresses":["192.168.10.74:7444"],
+                    "relay_urls":[], "observed_at":100,"expires_at":200
+                }
+            }))
+            .unwrap();
+        let p: serde_json::Value =
+            serde_json::from_str(&presentation(&rendezvous, 150).unwrap()).unwrap();
+        assert_eq!(p["mode"], "connection");
+        assert_eq!(p["remaining_seconds"], 50);
+        let decoded: myceliumd::peer::SyncRendezvous =
+            serde_json::from_str(p["payload"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            decoded.endpoint.endpoint_id,
+            rendezvous.endpoint.endpoint_id
+        );
+        assert!(p["qr_svg"].as_str().unwrap().contains("fill=\"white\""));
+        assert!(p.get("token").is_none() && p.get("private_key").is_none());
+        assert!(presentation(&rendezvous, 200).is_err());
+        assert!(presentation(&rendezvous, 99).is_err());
+    }
+
+    #[test]
     fn relay_policy_roundtrip_preserves_bootstrap_seeds() {
-        let home = std::env::temp_dir().join(format!("mycelium-sync-policy-{}-{}", std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let home = std::env::temp_dir().join(format!(
+            "mycelium-sync-policy-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         std::fs::create_dir(&home).unwrap();
         let mut config: myceliumd::peer::SyncConfig = serde_json::from_value(serde_json::json!({
             "public_relays": false,
@@ -111,20 +190,22 @@ mod tests {
                 "alpns": ["mycelium/sync/1"], "direct_addresses": ["127.0.0.1:7444"],
                 "relay_urls": [], "observed_at": 100, "expires_at": 130
             }}]
-        })).unwrap();
+        }))
+        .unwrap();
         let original_seeds = serde_json::to_value(&config.seeds).unwrap();
         for enabled in [true, false] {
             config.public_relays = enabled;
             save_config(&home, &config).unwrap();
-            let saved: myceliumd::peer::SyncConfig = serde_json::from_slice(
-                &std::fs::read(home.join("iroh-sync.json")).unwrap()).unwrap();
+            let saved: myceliumd::peer::SyncConfig =
+                serde_json::from_slice(&std::fs::read(home.join("iroh-sync.json")).unwrap())
+                    .unwrap();
             assert_eq!(saved.public_relays, enabled);
             assert_eq!(serde_json::to_value(saved.seeds).unwrap(), original_seeds);
         }
         config.seeds.push(config.seeds[0].clone());
         assert!(save_config(&home, &config).is_err());
-        let retained: myceliumd::peer::SyncConfig = serde_json::from_slice(
-            &std::fs::read(home.join("iroh-sync.json")).unwrap()).unwrap();
+        let retained: myceliumd::peer::SyncConfig =
+            serde_json::from_slice(&std::fs::read(home.join("iroh-sync.json")).unwrap()).unwrap();
         assert_eq!(retained.seeds.len(), 1);
         std::fs::remove_file(home.join("iroh-sync.json")).unwrap();
         std::fs::remove_dir(home).unwrap();

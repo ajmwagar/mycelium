@@ -13,6 +13,8 @@ movement detection; adjacent systems remain replaceable adapters.
 
 Optional [Iroh peer sync](docs/iroh-sync.md) carries existing authenticated
 gossip over QUIC, with expiring public rendezvous QR codes for enrolled peers.
+The [pairing presentation adapter](docs/pairing-presentation.md) exports public
+QR artwork and composes compact Canvas or TV layouts without issuing invites.
 
 Desired state follows one boundary: intent produces read-only proposals, and
 supported proposals lower into the single vendor-neutral `ActionPlan` executor.
