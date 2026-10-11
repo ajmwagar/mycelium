@@ -374,10 +374,15 @@ impl Mesh {
             .await?;
             let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
             if let Some(config) = crate::host_web::load_optional()? {
+                let viewer_roots = config.viewer_roots()?;
+                let server_config = match &config.server_identity {
+                    Some(identity) => tls.server_config_for(&identity.certificate, &identity.private_key, &viewer_roots)?,
+                    None => tls.server_config_for(&tls.cert, &tls.key, &viewer_roots)?,
+                };
                 crate::host_web::start(
                     self.clone(),
                     config,
-                    TlsAcceptor::from(Arc::new(tls.server_config()?)),
+                    TlsAcceptor::from(Arc::new(server_config)),
                 )
                 .await?;
             }
@@ -1604,10 +1609,16 @@ impl TlsSettings {
     }
 
     fn server_config(&self) -> Result<ServerConfig, AnyError> {
-        let verifier = WebPkiClientVerifier::builder(Arc::new(self.roots()?)).build()?;
+        self.server_config_for(&self.cert, &self.key, &[])
+    }
+
+    fn server_config_for(&self, certificate: &str, key: &str, viewer_roots: &[CertificateDer<'static>]) -> Result<ServerConfig, AnyError> {
+        let mut roots = self.roots()?;
+        for certificate in viewer_roots { roots.add(certificate.clone())?; }
+        let verifier = WebPkiClientVerifier::builder(Arc::new(roots)).build()?;
         Ok(ServerConfig::builder()
             .with_client_cert_verifier(verifier)
-            .with_single_cert(certs(&self.cert)?, private_key(&self.key)?)?)
+            .with_single_cert(certs(certificate)?, private_key(key)?)?)
     }
 }
 

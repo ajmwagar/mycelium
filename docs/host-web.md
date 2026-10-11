@@ -8,8 +8,18 @@ OIDC service is required. This initial slice is not deployed to the fleet.
 
 HTTPS uses exactly the existing peer TLS configuration:
 `MYCELIUM_PEER_CA`, `MYCELIUM_PEER_CERT`, and `MYCELIUM_PEER_KEY`.
-The TLS client must present an unexpired certificate trusted by that fleet CA.
+The TLS client must present an unexpired certificate trusted by that fleet CA
+or an explicitly pinned bootstrap human leaf described below.
 Fleet membership alone does **not** authorize a human to view the page.
+
+Optionally set `server_identity` to an object containing absolute `certificate`
+and `private_key` file paths. This changes only the host web server's HTTPS
+identity, allowing a certificate with the host's `.myc` DNS SAN without changing
+the peer certificate or its signed transport binding. The client verifier still
+uses `MYCELIUM_PEER_CA` plus any explicitly pinned bootstrap human leaves. Omitting it
+uses the existing peer server certificate. Both fields are mandatory when set;
+invalid paths, unreadable PEM, mismatched keys and bind errors fail startup.
+Changes to these files require a daemon restart.
 
 The current human transport-binding seam is an administrator-installed bootstrap
 mapping from the client's certificate SHA-256 digest to a principal. This is
@@ -28,6 +38,33 @@ receives it; there is no promise of instantaneous revocation during a partition.
 OIDC browser login and production signed human-to-certificate bindings are
 future integration gates. The view does not accept a bare JWT, browser cookie,
 trusted forwarding header, or anonymous fallback.
+
+### Native browser bootstrap compatibility
+
+Some native certificate stores cannot use an Ed25519 fleet issuer chain.
+An optional `bootstrap_viewer_certificates` array supplies absolute paths to
+individual human certificates trusted **only by this host web listener**. Each
+file is limited to 64 KiB and must contain exactly one PEM certificate whose DER
+digest is already in `bootstrap_viewer_bindings`. At most 64 leaves are allowed.
+There is no new CA, no peer TLS verifier change and no automatic enrollment.
+Possession of that human private key still grants nothing without the active,
+exactly scoped signed access grant. Removing the binding denies requests;
+changing the leaf-path list denies requests until the daemon is restarted.
+
+For a native bootstrap, a short-lived self-signed P256 human certificate with
+`clientAuth` can be pinned this way, and a dedicated self-signed P256 HTTPS leaf
+can be trusted for the specific hostname. Keep both separate from peer keys.
+This is an explicit administrator-installed compatibility bridge, not a
+canonical human identity issuer or a replacement for signed identity bindings.
+
+When creating a password-protected P12 for macOS Keychain import, OpenSSL 3's
+default encoding may produce a generic MAC verification error. Its compatible
+export options are `-keypbe PBE-SHA1-3DES -certpbe PBE-SHA1-3DES -macalg sha1`.
+These affect the local encrypted import container, not TLS encryption. Use a
+random strong password via a protected password file (`-passout file:PATH`),
+restrict both artifacts to mode 0600, and never put the password in a command
+argument, repository or log. Import using the native UI, then verify that the
+identity is usable for TLS client authentication before claiming browser access.
 
 ## Manual configuration
 

@@ -24,12 +24,54 @@ const DEADLINE: Duration = Duration::from_secs(10);
 #[serde(deny_unknown_fields)]
 pub(crate) struct Config {
     pub listen: SocketAddr,
+    /// Publish only an explicit non-loopback page entrance; off by default.
+    #[serde(default)]
+    pub advertise: bool,
+    /// Optional HTTPS-only identity; does not replace the peer identity or CA.
+    #[serde(default)]
+    pub server_identity: Option<ServerIdentity>,
+    /// Explicit human leaf trust, only for this listener; not a peer CA change.
+    #[serde(default)]
+    pub bootstrap_viewer_certificates: Vec<String>,
     /// Temporary, administrator-installed certificate-to-human bindings, NOT ACLs.
     pub bootstrap_viewer_bindings: BTreeMap<String, String>,
 }
 
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ServerIdentity {
+    pub certificate: String,
+    pub private_key: String,
+}
+
 impl Config {
     fn validate(&self) -> Result<()> {
+        if self.advertise && (self.listen.ip().is_loopback() || self.listen.ip().is_unspecified()) {
+            return Err("host web advertisement requires a non-loopback explicit address".into());
+        }
+        if self.bootstrap_viewer_certificates.len() > 64 {
+            return Err("host web permits at most 64 bootstrap viewer certificates".into());
+        }
+        for path in &self.bootstrap_viewer_certificates {
+            if !std::path::Path::new(path).is_absolute()
+                || path.len() > 4096
+                || path.chars().any(char::is_control)
+            {
+                return Err("host web viewer certificates require absolute paths".into());
+            }
+        }
+        if let Some(identity) = &self.server_identity {
+            for path in [&identity.certificate, &identity.private_key] {
+                if !std::path::Path::new(path).is_absolute()
+                    || path.len() > 4096
+                    || path.chars().any(char::is_control)
+                {
+                    return Err(
+                        "host web server identity requires absolute certificate/key paths".into(),
+                    );
+                }
+            }
+        }
         if self.listen.port() == 0 || self.listen.port() == 80 || self.listen.ip().is_multicast() {
             return Err("host web requires an explicit HTTPS port (not HTTP port 80)".into());
         }
@@ -49,6 +91,37 @@ impl Config {
             }
         }
         Ok(())
+    }
+
+    pub(crate) fn viewer_roots(&self) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>> {
+        use std::io::Read;
+        let mut roots = Vec::new();
+        for path in &self.bootstrap_viewer_certificates {
+            let file = std::fs::File::open(path)?;
+            let mut bytes = Vec::new();
+            file.take(64 * 1024 + 1).read_to_end(&mut bytes)?;
+            if bytes.len() > 64 * 1024 {
+                return Err("bootstrap viewer certificate exceeds 64 KiB".into());
+            }
+            let certificates =
+                rustls_pemfile::certs(&mut std::io::BufReader::new(bytes.as_slice()))
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+            if certificates.len() != 1 {
+                return Err("bootstrap viewer file must contain exactly one certificate".into());
+            }
+            let certificate = certificates
+                .into_iter()
+                .next()
+                .expect("one certificate checked");
+            let digest = mycelium_peer_protocol::sha256_hex(certificate.as_ref());
+            if !self.bootstrap_viewer_bindings.contains_key(&digest) {
+                return Err(
+                    "bootstrap viewer certificate lacks an explicit principal binding".into(),
+                );
+            }
+            roots.push(certificate);
+        }
+        Ok(roots)
     }
 }
 
@@ -96,6 +169,24 @@ fn authorized(
 pub(crate) async fn start(mesh: Arc<Mesh>, config: Config, acceptor: TlsAcceptor) -> Result<()> {
     let listener = TcpListener::bind(config.listen).await?;
     let address = config.listen;
+    if config.advertise {
+        crate::page_advertisement::publish(&crate::home_dir(),mesh.node_id(),address)?;
+        let owner = mesh.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                if !load_optional().ok().flatten().is_some_and(|c| c.advertise && c.listen == address) {
+                    eprintln!("myceliumd: host web advertisement changed; renewal stopped");
+                    break;
+                }
+                if let Err(error) = crate::page_advertisement::publish(&crate::home_dir(),owner.node_id(),address) {
+                    eprintln!("myceliumd: host web advertisement renewal failed: {error}");
+                    break;
+                }
+            }
+        });
+    }
+    let viewer_certificates = config.bootstrap_viewer_certificates;
     let permits = Arc::new(Semaphore::new(32));
     eprintln!("myceliumd: authenticated host web listening on https://{address}");
     tokio::spawn(async move {
@@ -112,6 +203,7 @@ pub(crate) async fn start(mesh: Arc<Mesh>, config: Config, acceptor: TlsAcceptor
             };
             let mesh = mesh.clone();
             let acceptor = acceptor.clone();
+            let viewer_certificates = viewer_certificates.clone();
             tokio::spawn(async move {
                 let _permit = permit;
                 let result = tokio::time::timeout(DEADLINE, async {
@@ -130,6 +222,11 @@ pub(crate) async fn start(mesh: Arc<Mesh>, config: Config, acceptor: TlsAcceptor
                             let fresh = load_optional()?.ok_or("host web disabled")?;
                             if fresh.listen != address {
                                 return Err("host web listener changed; restart required".into());
+                            }
+                            if fresh.bootstrap_viewer_certificates != viewer_certificates {
+                                return Err(
+                                    "host web viewer trust changed; restart required".into()
+                                );
                             }
                             let now = std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)?
@@ -363,6 +460,9 @@ mod tests {
     fn config() -> Config {
         Config {
             listen: "127.0.0.1:8443".parse().unwrap(),
+            advertise: false,
+            server_identity: None,
+            bootstrap_viewer_certificates: Vec::new(),
             bootstrap_viewer_bindings: [("a".repeat(64), "alice".into())].into(),
         }
     }
@@ -372,6 +472,12 @@ mod tests {
         config().validate().unwrap();
         let mut value = config();
         value.listen.set_port(80);
+        assert!(value.validate().is_err());
+        value = config();
+        value.server_identity = Some(ServerIdentity {
+            certificate: "relative.pem".into(),
+            private_key: "/private/key.pem".into(),
+        });
         assert!(value.validate().is_err());
         value = config();
         value.bootstrap_viewer_bindings.clear();
@@ -465,6 +571,43 @@ mod tests {
         assert!(rendered.contains("&lt;script&gt;"));
         assert!(rendered.contains("<dt>Hardware devices</dt>"));
         assert!(rendered.contains("Not observed"));
+    }
+
+    #[test]
+    fn bootstrap_leaf_trust_requires_exact_configured_identity_binding() {
+        let certificate =
+            rcgen::generate_simple_self_signed(vec!["viewer.example".into()]).unwrap();
+        let directory = std::env::temp_dir().join(format!(
+            "mycelium-viewer-roots-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("viewer.pem");
+        std::fs::write(&path, certificate.cert.pem()).unwrap();
+        let mut value = config();
+        value
+            .bootstrap_viewer_certificates
+            .push(path.to_str().unwrap().into());
+        assert!(value.viewer_roots().is_err());
+        value.bootstrap_viewer_bindings.insert(
+            mycelium_peer_protocol::sha256_hex(certificate.cert.der()),
+            "alice".into(),
+        );
+        assert_eq!(value.viewer_roots().unwrap().len(), 1);
+        std::fs::write(
+            &path,
+            format!("{}{}", certificate.cert.pem(), certificate.cert.pem()),
+        )
+        .unwrap();
+        assert!(value.viewer_roots().is_err());
+        std::fs::write(&path, vec![b'a'; 64 * 1024 + 1]).unwrap();
+        assert!(value.viewer_roots().is_err());
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(directory).unwrap();
     }
 
     #[test]
