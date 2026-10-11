@@ -2377,6 +2377,7 @@ name = "mycelium-driver-dnsmasq"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "fpl-resource-observation",
  "mycelium-core",
  "mycelium-dns-policy",
  "serde",

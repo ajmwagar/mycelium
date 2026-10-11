@@ -4,10 +4,10 @@ use mycelium_core::{
     ActionRisk, CapResult, CapSpec, Device, DeviceId, DeviceKind, DeviceMeta, ExecContext,
     MyceliumError, Params,
 };
-use mycelium_dns_policy::resolver::{usable_address, ResolverConfig, ResolverMode};
-use mycelium_dns_policy::{canonical_domain, DnsRecord};
+use mycelium_dns_policy::resolver::{ResolverConfig, ResolverMode, usable_address};
+use mycelium_dns_policy::{DnsRecord, canonical_domain};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
@@ -20,6 +20,7 @@ use std::{
 
 const LABEL: &str = "dev.fpl.mycelium-dns";
 const MARKER: &str = "# Managed by Mycelium DNS resolver\n";
+mod service_dns;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -31,10 +32,15 @@ pub struct Settings {
     pub reachable_prefixes: Vec<String>,
     pub refresh_seconds: u64,
     pub expiry_seconds: u64,
+    /// Opt-in application kind -> DNS service label. Only fresh owner leases
+    /// qualify; scanned listeners never become browser entrances implicitly.
+    #[serde(default)]
+    pub service_aliases: BTreeMap<String, String>,
 }
 
 impl Settings {
     fn validate(&self) -> Result<(), String> {
+        service_dns::validate_aliases(&self.service_aliases)?;
         self.resolver.render(vec![])?;
         if !self.dnsmasq.is_absolute() || !self.mycelium.is_absolute() {
             return Err("binary paths must be absolute".into());
@@ -245,6 +251,21 @@ async fn observation(settings: &Settings) -> Result<(Vec<DnsRecord>, u64), Strin
         .map(|seen| seen.saturating_add(settings.expiry_seconds))
         .min()
         .unwrap_or(timestamp + settings.expiry_seconds);
+    if settings.service_aliases.is_empty() {
+        return Ok((records, deadline));
+    }
+    let mut command = tokio::process::Command::new(&settings.mycelium);
+    command.args(["services", "--json"]).kill_on_drop(true);
+    let output = tokio::time::timeout(Duration::from_secs(10), command.output())
+        .await
+        .map_err(|_| "service observation timed out")?
+        .map_err(|e| e.to_string())?;
+    if !output.status.success() || output.stdout.len() > 16 * 1024 * 1024 {
+        return Err("Mycelium service observation failed or exceeded bounds".into());
+    }
+    let catalog = serde_json::from_slice(&output.stdout).map_err(|_| "invalid service catalog")?;
+    let (records, deadline) =
+        service_dns::project(settings, records, &catalog, timestamp, deadline)?;
     Ok((records, deadline))
 }
 async fn observe(settings: &Settings) -> Result<Vec<DnsRecord>, String> {
@@ -391,7 +412,11 @@ fn launch_plist(executable: &Path, config: &Path, directory: &Path) -> String {
         .iter()
         .map(|a| format!("<string>{}</string>", xml(a)))
         .collect::<String>();
-    format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?><!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\"><plist version=\"1.0\"><dict><key>Label</key><string>{LABEL}</string><key>ProgramArguments</key><array>{args}</array><key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>15</integer><key>StandardOutPath</key><string>{}</string><key>StandardErrorPath</key><string>{}</string></dict></plist>",xml(&directory.join("resolver.log").display().to_string()),xml(&directory.join("resolver.log").display().to_string()))
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?><!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\"><plist version=\"1.0\"><dict><key>Label</key><string>{LABEL}</string><key>ProgramArguments</key><array>{args}</array><key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>15</integer><key>StandardOutPath</key><string>{}</string><key>StandardErrorPath</key><string>{}</string></dict></plist>",
+        xml(&directory.join("resolver.log").display().to_string()),
+        xml(&directory.join("resolver.log").display().to_string())
+    )
 }
 fn gui_domain() -> Result<String, String> {
     let output = Command::new("id")
@@ -690,10 +715,13 @@ struct Retained {
     suffix: String,
     records: Vec<DnsRecord>,
     expires_at: u64,
+    #[serde(default)]
+    service_aliases: BTreeMap<String, String>,
 }
 impl Retained {
     fn usable(self, settings: &Settings, timestamp: u64) -> Result<(Vec<DnsRecord>, u64), String> {
         if self.site != settings.resolver.site
+            || self.service_aliases != settings.service_aliases
             || self.suffix != settings.resolver.suffix
             || self.expires_at <= timestamp
             || self.expires_at > timestamp.saturating_add(settings.expiry_seconds)
@@ -719,6 +747,7 @@ fn retain(
     expires_at: u64,
 ) -> Result<(), String> {
     let retained = Retained {
+        service_aliases: settings.service_aliases.clone(),
         site: settings.resolver.site.clone(),
         suffix: settings.resolver.suffix.clone(),
         records,
@@ -878,7 +907,7 @@ pub async fn command(args: &[String]) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn settings() -> Settings {
+    pub(super) fn settings() -> Settings {
         Settings {
             resolver: ResolverConfig {
                 mode: ResolverMode::LocalhostOnly,
@@ -893,6 +922,7 @@ mod tests {
             reachable_prefixes: vec!["192.0.2.0/24".into()],
             refresh_seconds: 30,
             expiry_seconds: 300,
+            service_aliases: BTreeMap::new(),
         }
     }
     fn peer(node: &str, seen: u64) -> Value {
@@ -945,6 +975,7 @@ mod tests {
         let s = settings();
         let records = peer_records(&s, &json!([peer("a", 999)]), 1000).unwrap();
         let make = |expiry| Retained {
+            service_aliases: BTreeMap::new(),
             site: "lab".into(),
             suffix: "myc".into(),
             records: records.clone(),
@@ -953,6 +984,9 @@ mod tests {
         assert!(make(1100).usable(&s, 1000).is_ok());
         assert!(make(1000).usable(&s, 1000).is_err());
         assert!(make(1301).usable(&s, 1000).is_err());
+        let mut changed = s.clone();
+        changed.service_aliases.insert("unibus-viewer".into(), "unibus".into());
+        assert!(make(1100).usable(&changed, 1000).is_err());
         let mut s = s;
         s.reachable_prefixes = vec!["198.51.100.0/24".into()];
         assert!(make(1100).usable(&s, 1000).is_err());

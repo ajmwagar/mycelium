@@ -8,6 +8,7 @@ description = "Gated optional local DNS resolver management"
 [dependencies]
 mycelium-core.workspace = true
 mycelium-dns-policy.workspace = true
+fpl-resource-observation.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 async-trait.workspace = true

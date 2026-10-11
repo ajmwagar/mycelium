@@ -131,7 +131,38 @@ scope, not a claim that an IP is routable. Start with the attached LAN; do not
 publish every remote private address. Records derive from the authenticated
 daemon's `peers --json`, filtered by site and freshness. Names are
 `hostname.site.suffix`; live competing owners fail closed. Device annotations,
-non-peer discovery and service aliases are not included in this first adapter.
+non-peer discovery is not included in this adapter.
+
+## Optional daemon-page service names
+
+Service aliases are default-off. Add a `service_aliases` map to resolver settings:
+
+```json
+"service_aliases": {
+  "unibus-viewer": "unibus",
+  "mycelium-host-web": "mycelium"
+}
+```
+
+Labels must be unique canonical single DNS labels. The resolver reads the
+existing `mycelium services --json` catalog, never scans ports itself. Only
+fresh `mycelium-application-owner-lease` entries with matching node provenance
+qualify. Their literal HTTPS endpoint must match a fresh reachable peer address
+in this resolver's site. Names are `SERVICE.HOST.SITE.SUFFIX`, for example
+`unibus.neo.wagar-house.myc` and `mycelium.neo.wagar-house.myc`.
+
+Addresses outside that owner's peer evidence, loopback, scanned services,
+expired leases, hostname endpoints and credential/path-bearing URLs are not
+promoted. Competing entrances using different ports for the same name/address
+fail closed. Retained snapshots expire no later than the earliest included
+service lease or peer observation; changing alias policy invalidates them.
+Failure to read the service catalog retains only the already-validated snapshot
+until its original expiry, not a newly synthesized availability claim.
+
+DNS does not carry ports or grant access. Use the port advertised in the service
+catalog and a certificate with this name's DNS SAN. No port 443 proxy, certificate,
+Iroh route, site-wide gateway selection, or automatic resolver activation is
+installed here. Host pages and Unibus continue to enforce their own grants.
 
 `.myc` is configurable private naming, not a registered/reserved public TLD.
 Future public-name collision is possible. Use an owned subdomain or a reserved
