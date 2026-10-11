@@ -105,7 +105,7 @@ pub(super) fn page(host: &Snapshot, gpu: bool) -> String {
     };
     let css = include_str!("viewer-shell/coherence-product.css");
     let widgets = if gpu {
-        "<link rel=\"stylesheet\" href=\"/widgets/widgets.css\"><section class=\"co-widget\" data-co-widget=\"host\"><canvas aria-label=\"Host telemetry\"></canvas><div data-co-labels></div><p data-co-status>Connecting to owner observations…</p></section><script type=\"module\" src=\"/widgets/coherence-widgets.js\"></script>".to_owned()
+        "<link rel=\"stylesheet\" href=\"/widgets/widgets.css\"><div class=\"co-widget\" data-co-widget=\"host\"><canvas aria-label=\"Host telemetry\"></canvas><div class=\"co-widget__labels\" data-co-labels></div><p data-co-status>Connecting to owner observations…</p></div><script type=\"module\" src=\"/widgets/coherence-widgets.js\"></script>".to_owned()
     } else {
         "<p>GPU widgets are not installed on this host. <a href=\"/api/widgets/host\">Telemetry JSON</a></p>".into()
     };
