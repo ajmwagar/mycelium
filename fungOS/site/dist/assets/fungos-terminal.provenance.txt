@@ -1,0 +1,6 @@
+kind=actual-qemu-framebuffer
+captured_at=2026-10-06T21:34:55Z
+capture_transport=capture-vnc
+endpoint=127.0.0.1:5901
+source_commit=da41019
+4810cdbdc8f6e892d70021fc419451467349961df5800bbb15204cffdbb28113  /home/ajmwagar/.cache/fungos-theme-captures/terminal.png

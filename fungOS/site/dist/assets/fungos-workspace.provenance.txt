@@ -1,0 +1,6 @@
+kind=actual-qemu-framebuffer
+captured_at=2026-10-06T21:37:54Z
+capture_transport=capture-vnc
+endpoint=127.0.0.1:5901
+source_commit=da41019
+5c14533f75c5e2dbd3f917b5edbdc2f9cc9aac874d1bf10d8dff711e5db65edc  /home/ajmwagar/.cache/fungos-theme-captures/workspace.png
