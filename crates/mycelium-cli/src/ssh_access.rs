@@ -240,7 +240,7 @@ pub(crate) fn require_root(action: &str) -> Result<(), String> {
     }
 }
 
-fn host_bundle_matches_installed(bundle: &Path) -> Result<bool, String> {
+pub(crate) fn host_bundle_matches_installed(bundle: &Path) -> Result<bool, String> {
     let installed = Path::new("/etc/ssh");
     if !public_policy_directory_matches(&installed.join("mycelium"))
         || !public_policy_directory_matches(&installed.join("mycelium/principals"))

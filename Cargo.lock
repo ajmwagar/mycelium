@@ -2311,6 +2311,7 @@ name = "mycelium-cli"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "ed25519-dalek 2.2.0",
  "fpl-resource-observation",
  "jsonwebtoken",
  "mycelium-core",

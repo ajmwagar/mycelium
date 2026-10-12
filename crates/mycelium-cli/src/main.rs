@@ -8,6 +8,7 @@
 mod completions;
 mod dns;
 mod enroll;
+mod host_access;
 mod invite;
 mod node;
 mod oidc;
@@ -158,6 +159,9 @@ usage:
   mycelium node plan INTENT.json [--json]
   mycelium node apply --plan PLAN.json (--write | --dry-run) [--json]
   mycelium access list [--json]
+  mycelium access host plan --policy /etc/mycelium/access.json
+  mycelium access host apply --policy /etc/mycelium/access.json (--write | --dry-run)
+  mycelium access host install-timer --policy /etc/mycelium/access.json --daemon-home /home/USER/.mycelium --write
   mycelium access keygen --path PATH --write [--json]
   mycelium access publish --statement PATH --signing-key PATH --write [--dry-run] [--json]
   mycelium authority list [--json]
@@ -884,6 +888,21 @@ async fn fleet(args: &[String]) -> Result<Vec<String>, ClientError> {
 }
 
 async fn access(args: &[String]) -> Result<Vec<String>, ClientError> {
+    if args.first().is_some_and(|value| value == "host") {
+        let snapshot = async {
+            let mut client = connect().await?;
+            let access = client.call(&Request::AccessList).await?;
+            let authority = client.call(&Request::AuthorityList).await?;
+            Ok::<_, ClientError>((access, authority))
+        }.await;
+        return match snapshot {
+            Ok((access, authority)) => host_access::run(&args[1..], &access, &authority),
+            Err(error) => {
+                eprintln!("mycelium: access carrier unavailable ({error}); enforcing retained signed evidence only");
+                host_access::run(&args[1..], &serde_json::Value::Null, &serde_json::Value::Null)
+            }
+        }.map_err(access_error);
+    }
     if args.first().is_some_and(|value| value == "ssh") {
         let state = if args.get(1).is_some_and(|value| value == "host-apply") {
             serde_json::json!({})
