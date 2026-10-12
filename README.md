@@ -550,6 +550,14 @@ mycelium scp ./bundle dgx-spark:/tmp/bundle --recursive
 Exactly one operand must be a Mycelium `DEVICE:PATH`; remote-to-remote copies
 are rejected because they do not have one unambiguous identity and route.
 
+Linux hosts can also reconcile accounts, SSH principals, sudo and PAM account
+authorization from signed grants. The privileged helper independently verifies
+the shared authority graph and retains signed evidence for offline expiry;
+joining as a peer does not confer grant-issuing authority. See the
+[host access runbook](docs/host-access-grants.md) for root-owned policy,
+periodic enforcement and recovery. Local administrator ownership remains
+separate from fleet signing authority.
+
 ## Allocation-backed logical networks
 
 Allocation evidence is persisted separately from logical network ownership.

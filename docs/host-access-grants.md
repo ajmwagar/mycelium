@@ -90,3 +90,20 @@ stack from its root-owned `.mycelium-pre` backup and use the SSH host-apply
 rollback copy if needed. Do not delete user homes or replace trusted issuers
 as a troubleshooting shortcut. Certificate renewal and grant lifetime are
 separate: renewing a certificate does not extend an expired access grant.
+
+## Qualification
+
+The initial implementation passed all 74 CLI tests, including signature
+tampering, untrusted issuers, expiry, revocation ordering, issuer removal and
+retained-evidence reauthorization. A disposable Ubuntu 26.04 canary exercised
+native account creation, OpenSSH reload, passwordless sudo, PAM denial and
+offline enforcement of an actually expired signed grant. Issuer removal denied
+access; restoring the issuer restored valid access while the daemon remained
+unavailable. User account/home data remained intact.
+
+The Linux helper built on Agora from `54fde4c` plus `3e8d67a` and `342f9bf`
+has SHA-256 `5cfb4d7f2d2f79a6ef770e2592a9595410afffd4f549796de00e30d32f55db6a`.
+Titan's canary deployment verified a fresh personal SSH session, managed sudo,
+preserved local-owner sudo/authorized keys and successful systemd timer apply.
+This is a single-host qualification, not a fleet-wide rollout or automatic
+grant renewal claim.
