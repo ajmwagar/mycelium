@@ -794,8 +794,12 @@ fn copy_directory_files(source: &Path, destination: &Path) -> Result<(), String>
 fn reload_sshd() -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
-        if command("systemctl", &["reload", "sshd"]).is_err() {
-            command("systemctl", &["reload", "ssh"])?;
+        if command("systemctl", &["reload", "sshd"]).is_err()
+            && command("systemctl", &["reload", "ssh"]).is_err()
+        {
+            // Minimal Linux containers and non-systemd hosts retain the
+            // distribution's init-script reload; never fake a successful reload.
+            command("service", &["ssh", "reload"])?;
         }
     }
     // launchd invokes sshd for each inbound macOS connection, so the next
