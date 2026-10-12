@@ -107,6 +107,8 @@ fn derive(
         now,
     );
     let mut records = Vec::new();
+    let mut retained_grants = Vec::new();
+    let mut retained_revocations = Vec::new();
     for (field, wrapped) in [("grants", true), ("revocations", false)] {
         for value in access[field]
             .as_array()
@@ -118,12 +120,21 @@ fn derive(
                 value.clone()
             })
             .map_err(|e| format!("decode access record: {e}"))?;
-            if !resolver.access(&record.signer).authorized {
+            let authorized = resolver.access(&record.signer).authorized;
+            if let Err(error) = record.verify() {
+                if authorized {
+                    return Err(format!("invalid trusted access signature: {error}"));
+                }
                 continue;
             }
-            record
-                .verify()
-                .map_err(|e| format!("invalid trusted access signature: {e}"))?;
+            if wrapped {
+                retained_grants.push(serde_json::json!({"record":record}));
+            } else {
+                retained_revocations.push(serde_json::json!(record));
+            }
+            if !authorized {
+                continue;
+            }
             records.push(record);
         }
     }
@@ -199,7 +210,8 @@ fn derive(
         pam_access.push_str(&format!("- : {user} : ALL\n"));
     }
     pam_access.push_str("+ : ALL : ALL\n");
-    let sanitized = serde_json::json!({"grants": verified, "revocations": revocations});
+    let sanitized = serde_json::json!({"grants": verified, "revocations": revocations,
+        "_retained": {"grants": retained_grants, "revocations": retained_revocations}});
     Ok((
         Plan {
             accounts,
@@ -343,11 +355,21 @@ pub fn run(args: &[String], access: &Value, authority: &Value) -> Result<Vec<Str
     } else {
         authority.clone()
     };
+    if !retained_access["grants"].is_array()
+        || !retained_access["revocations"].is_array()
+        || !retained_authority.is_array()
+    {
+        eprintln!("mycelium: malformed carrier snapshot; enforcing retained signed evidence only");
+        retained_access = serde_json::json!({"grants":[],"revocations":[]});
+        retained_authority = serde_json::json!([]);
+    }
+    let mut cached_evidence = None;
     if evidence_path.exists() {
         protected(evidence_path)?;
         let retained: Value =
             serde_json::from_slice(&fs::read(evidence_path).map_err(|e| e.to_string())?)
                 .map_err(|e| e.to_string())?;
+        cached_evidence = Some(retained.clone());
         for field in ["grants", "revocations"] {
             let entries = retained_access[field]
                 .as_array_mut()
@@ -377,13 +399,30 @@ pub fn run(args: &[String], access: &Value, authority: &Value) -> Result<Vec<Str
         .duration_since(UNIX_EPOCH)
         .map_err(|e| e.to_string())?
         .as_secs();
-    let (plan, verified) = derive(
+    let result = derive(
         &policy,
         &retained_access,
         &retained_authority,
-        previous,
+        previous.clone(),
         now,
-    )?;
+    );
+    let (plan, verified) = match result {
+        Ok(result) => result,
+        Err(error) => {
+            let Some(cached) = cached_evidence else {
+                return Err(error);
+            };
+            eprintln!("mycelium: invalid fresh access evidence ({error}); enforcing root-retained signed evidence only");
+            retained_authority = cached["authority"].clone();
+            derive(
+                &policy,
+                &cached["access"],
+                &retained_authority,
+                previous,
+                now,
+            )?
+        }
+    };
     if action == "plan" || args.iter().any(|a| a == "--dry-run") {
         return Ok(vec![
             serde_json::to_string_pretty(&plan).map_err(|e| e.to_string())?
@@ -449,7 +488,7 @@ pub fn run(args: &[String], access: &Value, authority: &Value) -> Result<Vec<Str
     install(
         evidence_path,
         &serde_json::to_vec(
-            &serde_json::json!({"access": verified, "authority": retained_authority}),
+            &serde_json::json!({"access": verified["_retained"], "authority": retained_authority}),
         )
         .map_err(|e| e.to_string())?,
         0o600,
@@ -726,6 +765,28 @@ mod tests {
         .unwrap();
         assert!(plan.sudo_users.is_empty());
         assert!(plan.pam_access.contains("- : mames : ALL"));
+    }
+    #[test]
+    fn issuer_reauthorization_uses_retained_signed_evidence() {
+        let (p, r) = signed_fixture();
+        let (denied, retained) = derive(
+            &policy(),
+            &snapshot(&r, true, vec![]),
+            &serde_json::json!([]),
+            BTreeSet::from(["mames".into()]),
+            15,
+        )
+        .unwrap();
+        assert!(denied.sudo_users.is_empty());
+        let (restored, _) = derive(
+            &p,
+            &retained["_retained"],
+            &serde_json::json!([]),
+            denied.managed_users,
+            16,
+        )
+        .unwrap();
+        assert!(restored.sudo_users.contains("mames"));
     }
     #[test]
     fn retained_revocation_prevents_carrier_resurrection() {
