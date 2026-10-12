@@ -226,7 +226,7 @@ fn derive(
 
 /// Reject user-owned binaries, policies and writable/symlinked path ancestors.
 #[cfg(unix)]
-fn protected(path: &Path) -> Result<(), String> {
+pub(crate) fn protected(path: &Path) -> Result<(), String> {
     use std::os::unix::fs::MetadataExt;
     if !path.is_absolute() {
         return Err("privileged paths must be absolute".into());
@@ -625,6 +625,24 @@ mod tests {
             assert!(atom(s).is_err());
         }
         assert!(atom("mames").is_ok());
+    }
+    #[test]
+    fn privileged_paths_reject_writable_files() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = std::env::temp_dir().join(format!(
+            "mycelium-host-access-writable-{}",
+            std::process::id()
+        ));
+        let file = fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        file.set_permissions(fs::Permissions::from_mode(0o666))
+            .unwrap();
+        assert!(protected(&path).is_err());
+        drop(file);
+        fs::remove_file(path).unwrap();
     }
     #[test]
     fn sudo_requires_host_accepted_role() {

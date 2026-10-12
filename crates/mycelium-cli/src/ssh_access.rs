@@ -352,6 +352,14 @@ fn host_policy_install_timer(args: &[String]) -> Result<Vec<String>, String> {
     load_host_policy()?;
     let binary = std::env::current_exe().map_err(|error| format!("locate Mycelium: {error}"))?;
     let home = myceliumd::home_dir();
+    // Legacy SSH-only timers must not execute user-owned code as root or
+    // trust user-writable policy/state. User-daemon installations should use
+    // access host install-timer, which independently verifies signed evidence.
+    for path in [&binary, &home, &host_policy_path()] {
+        crate::host_access::protected(path).map_err(|error| format!(
+            "unsafe legacy SSH timer: {error}; use access host install-timer with root-owned policy instead"
+        ))?;
+    }
     for path in [&binary, &home] {
         config_value_text("systemd path", &path.to_string_lossy())?;
     }

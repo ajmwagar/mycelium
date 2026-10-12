@@ -91,6 +91,10 @@ rollback copy if needed. Do not delete user homes or replace trusted issuers
 as a troubleshooting shortcut. Certificate renewal and grant lifetime are
 separate: renewing a certificate does not extend an expired access grant.
 
+The legacy SSH-only timer now refuses user-owned executable/home/policy paths.
+Use the host-access timer for a user-run daemon. Existing fleet timers need an
+explicit migration; installing this on one host does not replace every timer.
+
 ## Qualification
 
 The initial implementation passed all 74 CLI tests, including signature
