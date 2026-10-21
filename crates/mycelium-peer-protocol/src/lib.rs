@@ -240,8 +240,7 @@ pub const MAX_SECURITY_FINDINGS: usize = 256;
 pub const MAX_SECURITY_EVENTS: usize = 128;
 pub const MAX_HARDWARE_DEVICES: usize = 4096;
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum HardwareKind {
     PciDevice,
     UsbDevice,
@@ -250,6 +249,48 @@ pub enum HardwareKind {
     StorageVolume,
     Accelerator,
     SecurityModule,
+    /// A kind introduced by a newer peer. The original wire string is kept
+    /// verbatim so a decoded envelope re-serializes to the same bytes and its
+    /// signature still verifies when it is gossiped onward. Callers ignore it
+    /// rather than failing the whole sync exchange.
+    Unknown(String),
+}
+
+impl HardwareKind {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::PciDevice => "pci_device",
+            Self::UsbDevice => "usb_device",
+            Self::StorageController => "storage_controller",
+            Self::StorageDevice => "storage_device",
+            Self::StorageVolume => "storage_volume",
+            Self::Accelerator => "accelerator",
+            Self::SecurityModule => "security_module",
+            Self::Unknown(value) => value,
+        }
+    }
+}
+
+impl Serialize for HardwareKind {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for HardwareKind {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        Ok(match value.as_str() {
+            "pci_device" => Self::PciDevice,
+            "usb_device" => Self::UsbDevice,
+            "storage_controller" => Self::StorageController,
+            "storage_device" => Self::StorageDevice,
+            "storage_volume" => Self::StorageVolume,
+            "accelerator" => Self::Accelerator,
+            "security_module" => Self::SecurityModule,
+            _ => Self::Unknown(value),
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -1119,6 +1160,16 @@ mod tests {
             serde_json::from_str::<super::HardwareKind>(&encoded).unwrap(),
             super::HardwareKind::SecurityModule
         );
+    }
+
+    #[test]
+    fn unknown_hardware_kind_is_preserved_verbatim() {
+        let encoded = "\"quantum_annealer\"";
+        let kind: super::HardwareKind = serde_json::from_str(encoded).unwrap();
+        assert_eq!(kind, super::HardwareKind::Unknown("quantum_annealer".into()));
+        // Critical for gossip: re-serializing must reproduce the original
+        // string, otherwise a forwarded envelope's signature no longer verifies.
+        assert_eq!(serde_json::to_string(&kind).unwrap(), encoded);
     }
     use super::*;
 

@@ -63,7 +63,7 @@ pub fn run(args: &[String]) -> Result<Vec<String>, String> {
                 .create_new(true)
                 .open(home.join("iroh-sync.json"))
                 .map_err(|e| e.to_string())?;
-            file.write_all(b"{\"public_relays\":false,\"seeds\":[]}\n")
+            file.write_all(b"{\"public_relays\":false,\"direct_first\":true,\"seeds\":[]}\n")
                 .map_err(|e| e.to_string())?;
             file.sync_all().map_err(|e| e.to_string())?;
             Ok(vec!["Iroh enabled; set MYCELIUM_IROH_SERVER_NAME to your certificate SAN and restart myceliumd".into()])

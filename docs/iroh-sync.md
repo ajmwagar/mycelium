@@ -71,8 +71,12 @@ backoff capped at 60 seconds. Expired learned hints cannot start new dials;
 saved bootstrap seeds retain their original, explicitly configured hints.
 
 Within Iroh, direct QUIC paths and encrypted relay paths use the same peer
-authentication. Public relays remain disabled by default. Enable them explicitly
-on the participating peers when NAT/firewalls prevent direct QUIC:
+authentication. Direct-first is mandatory and explicit in configuration:
+`iroh-sync.json` carries `"direct_first": true` (the default, and the only
+value accepted by `validate()`). Iroh prefers a direct QUIC path whenever one
+is reachable; a relay is used only when no direct path can be established.
+Public relays remain disabled by default. Enable them explicitly on the
+participating peers when NAT/firewalls prevent direct QUIC:
 
 ```sh
 mycelium sync relays enable --write
@@ -84,6 +88,32 @@ UPnP mapping, cloud firewall rule, WireGuard route, or ACL is changed. Removing
 TCP access alone does not guarantee Iroh connectivity: direct UDP must work or
 relay policy must be enabled. TLS SAN checks and both TLS/Iroh signed bindings
 remain mandatory for Iroh, including relayed connections.
+
+### What a relay operator can observe
+
+Mycelium's signed gossip is end-to-end encrypted from Iroh endpoint to Iroh
+endpoint (QUIC/TLS with inner mTLS), so a relay forwards ciphertext only. A
+relay operator can observe **metadata**: the two endpoint ids (public iroh
+keys), relay session timing and durations, packet sizes and counts, and the
+relaying server's view of each endpoint's source IP/port. It cannot read
+hardware, health, security, or bus payloads, and it cannot forge a peer
+identity because the inner mTLS certificate and signed envelopes are verified
+beyond the relay. Relayed connections are therefore a privacy downgrade in
+metadata terms only, not a confidentiality one.
+
+### Rollback to direct-only
+
+```sh
+mycelium sync relays disable --write   # sets public_relays=false, keeps seeds
+# Restart the managed daemon / LaunchAgent.
+```
+
+That revokes the relay list: the runtime clears relay hints from every
+rendezvous and refuses new relay dials, leaving direct QUIC (and authenticated
+TCP) only. Existing direct connections are unaffected. To remove all Iroh
+bootstrap state as well, restore `iroh-sync.json` from backup or delete it and
+restart; the transport key in `iroh-secret.key` may be retained for a stable
+identity. Backups: `~/.mycelium/iroh-sync.json.bak-*`.
 
 ## Enroll a new peer using a QR claim
 
@@ -157,7 +187,7 @@ yet issued by enrollment and do not replace mTLS.
 `iroh-sync.json` is strict, bounded JSON, with at most 32 unique seeds:
 
 ```json
-{"public_relays":false,"seeds":[]}
+{"public_relays":false,"direct_first":true,"seeds":[]}
 ```
 
 Public n0 relays are opt-in via `public_relays: true` followed by restart.
@@ -185,6 +215,8 @@ cargo check -p mycelium-cli --features iroh-sync --tests
 cargo test -p myceliumd --features iroh-sync iroh_sync
 cargo test -p myceliumd peer_framing_bounds_and_cancellation
 cargo test -p mycelium-cli --features iroh-sync pair_iroh -- --test-threads=1
+# Relay-only carriage (needs reachable public n0 relays; asserts no direct path):
+cargo test --release -p myceliumd --features iroh-sync relay_only -- --ignored --nocapture
 ```
 
 Tests use isolated loopback Iroh endpoints and freshly generated test mTLS

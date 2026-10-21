@@ -298,6 +298,7 @@ pub(crate) fn install_seed(
 ) -> Result<(), String> {
     let config = SyncConfig {
         public_relays,
+        direct_first: true,
         seeds: vec![seed],
     };
     config.validate()?;
