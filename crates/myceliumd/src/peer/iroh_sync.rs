@@ -729,6 +729,82 @@ mod tests {
         server.close().await;
     }
 
+    /// Fleet verification: connect to a live, relay-enabled peer as this host's
+    /// real identity, but with every IP transport removed, so the path must be
+    /// a relay. Completes the peer handshake by reading the server's Hello.
+    /// Requires the local daemon to be stopped (it owns `iroh-secret.key`).
+    #[tokio::test]
+    #[ignore = "requires a live relay-enabled peer and the local fleet identity; set MYCELIUM_PROBE_*"]
+    async fn relay_only_probe_against_live_peer() {
+        let Ok(peer) = std::env::var("MYCELIUM_PROBE_ENDPOINT_ID") else {
+            return;
+        };
+        let relay: iroh::RelayUrl = std::env::var("MYCELIUM_PROBE_RELAY_URL")
+            .expect("MYCELIUM_PROBE_RELAY_URL")
+            .parse()
+            .unwrap();
+        let tls_name = std::env::var("MYCELIUM_PROBE_SERVER_NAME").expect("MYCELIUM_PROBE_SERVER_NAME");
+        let home = std::env::var("MYCELIUM_PROBE_HOME").expect("MYCELIUM_PROBE_HOME");
+        let home = std::path::Path::new(&home);
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let key: [u8; 32] = std::fs::read(home.join("iroh-secret.key"))
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let endpoint = Endpoint::builder(iroh::endpoint::presets::N0)
+            .secret_key(SecretKey::from_bytes(&key))
+            .clear_address_lookup()
+            .clear_ip_transports()
+            .portmapper_config(iroh::endpoint::PortmapperConfig::Disabled)
+            .alpns(vec![ALPN.to_vec()])
+            .bind()
+            .await
+            .unwrap();
+        endpoint.online().await;
+        let pki = |name: &str| home.join("pki").join(name).to_string_lossy().into_owned();
+        let mut roots = RootCertStore::empty();
+        for certificate in certs(&pki("ca.pem")).unwrap() {
+            roots.add(certificate).unwrap();
+        }
+        let client = ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_client_auth_cert(
+                certs(&pki("node.pem")).unwrap(),
+                private_key(&pki("node-key.pem")).unwrap(),
+            )
+            .unwrap();
+        let connector = TlsConnector::from(Arc::new(client));
+        let addr = EndpointAddr::new(peer.parse().unwrap()).with_relay_url(relay.clone());
+        let connection = tokio::time::timeout(HANDSHAKE, endpoint.connect(addr, ALPN))
+            .await
+            .expect("connect timed out")
+            .unwrap();
+        assert_relay_only_path(&connection);
+        let (send_stream, recv) = connection.open_bi().await.unwrap();
+        let stream = tokio::time::timeout(
+            HANDSHAKE,
+            connector.connect(server_name(&tls_name).unwrap(), tokio::io::join(recv, send_stream)),
+        )
+        .await
+        .expect("mTLS timed out")
+        .unwrap();
+        let mut reader = BufReader::new(stream);
+        let line = next_peer_line(&mut reader, &mut Vec::new())
+            .await
+            .unwrap()
+            .expect("peer closed before Hello");
+        let message: PeerMessage = serde_json::from_str(&line).unwrap();
+        assert!(
+            matches!(message, PeerMessage::Hello(_)),
+            "expected Hello over relay, got {line}"
+        );
+        println!(
+            "relay-only live probe ok: peer={peer} relay={relay} endpoint_id={} ",
+            endpoint.id()
+        );
+        endpoint.close().await;
+    }
+
     #[tokio::test]
     async fn signed_gossip_over_mutually_authenticated_iroh() {
         let server = local_endpoint().await;
