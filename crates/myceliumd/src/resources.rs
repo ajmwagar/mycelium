@@ -87,7 +87,7 @@ fn project_snapshot(snapshot: HardwareSnapshot, catalog: &mut ResourceCatalog) {
 }
 
 fn resource_kind_prefix(device: &HardwareDevice) -> Option<&'static str> {
-    match device.kind {
+    match &device.kind {
         HardwareKind::Accelerator if is_gpu(device) => Some("gpu"),
         HardwareKind::Accelerator => None,
         HardwareKind::StorageDevice | HardwareKind::StorageVolume => Some("storage"),
@@ -97,6 +97,15 @@ fn resource_kind_prefix(device: &HardwareDevice) -> Option<&'static str> {
         | HardwareKind::UsbDevice
         | HardwareKind::StorageController
         | HardwareKind::SecurityModule => None,
+        // Additive kinds from newer peers are ignored, not fatal. The envelope
+        // signature still verifies because HardwareKind preserves the raw string.
+        HardwareKind::Unknown(kind) => {
+            eprintln!(
+                "myceliumd: ignoring hardware device {} of unknown kind {kind:?}",
+                device.locator
+            );
+            None
+        }
     }
 }
 

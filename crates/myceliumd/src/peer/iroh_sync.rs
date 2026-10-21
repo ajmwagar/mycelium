@@ -84,8 +84,17 @@ pub struct SyncConfig {
     /// Public relays are opt-in. No public DNS address publication is enabled.
     #[serde(default)]
     pub public_relays: bool,
+    /// Relays are fallback only; direct QUIC paths are always preferred.
+    /// Set explicitly in config so the ordering is visible, and reject any
+    /// attempt to make relay-first/relay-only policy.
+    #[serde(default = "default_direct_first")]
+    pub direct_first: bool,
     #[serde(default)]
     pub seeds: Vec<SyncRendezvous>,
+}
+
+fn default_direct_first() -> bool {
+    true
 }
 
 /// Public, expiring connection hints. This is NOT an enrollment claim.
@@ -137,6 +146,12 @@ impl SyncRendezvous {
 
 impl SyncConfig {
     pub fn validate(&self) -> Result<(), String> {
+        if !self.direct_first {
+            return Err(
+                "direct_first=false is unsupported: relays are fallback only, direct QUIC stays preferred"
+                    .into(),
+            );
+        }
         if self.seeds.len() > LIMIT {
             return Err("at most 32 Iroh seeds are allowed".into());
         }
@@ -530,11 +545,22 @@ mod tests {
         let r = rendezvous();
         assert!(SyncConfig {
             public_relays: false,
+            direct_first: true,
             seeds: vec![r.clone(), r]
         }
         .validate()
         .is_err());
+        assert!(SyncConfig {
+            public_relays: true,
+            direct_first: false,
+            seeds: vec![]
+        }
+        .validate()
+        .is_err());
         assert!(serde_json::from_str::<SyncConfig>(r#"{"ssh_access":true}"#).is_err());
+        // An older config without the field defaults to direct-first.
+        let parsed: SyncConfig = serde_json::from_str(r#"{"public_relays":true,"seeds":[]}"#).unwrap();
+        assert!(parsed.direct_first);
     }
 
     #[test]
@@ -603,6 +629,104 @@ mod tests {
             .bind()
             .await
             .unwrap()
+    }
+
+    /// Relay-only endpoint: no IP transports exist, so every path must be a
+    /// relay path. This is the "block direct, prove fallback" case from the
+    /// mesh brief. Ignored by default because it needs the public n0 relays.
+    async fn relay_only_endpoint() -> Endpoint {
+        let endpoint = Endpoint::builder(iroh::endpoint::presets::N0)
+            .clear_address_lookup()
+            .clear_ip_transports()
+            .portmapper_config(iroh::endpoint::PortmapperConfig::Disabled)
+            .alpns(vec![ALPN.to_vec()])
+            .bind()
+            .await
+            .unwrap();
+        endpoint.online().await;
+        endpoint
+    }
+
+    /// The handshake itself completed, so a carriage path exists; assert it is a relay path.
+    fn assert_relay_only_path(connection: &iroh::endpoint::Connection) {
+        let paths = connection.paths();
+        assert!(!paths.is_empty(), "relay-only connection reported no paths");
+        for path in paths.iter() {
+            assert!(!path.is_ip(), "direct path leaked: {path:?}");
+        }
+        assert!(paths.iter().any(|path| path.is_relay()));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires reachable n0 public relays"]
+    async fn signed_gossip_completes_over_relay_only_iroh() {
+        let server = relay_only_endpoint().await;
+        let client = relay_only_endpoint().await;
+        println!("relay-only server endpoint_id={} client endpoint_id={}", server.id(), client.id());
+        println!("relay-only server addr={:?}", server.addr());
+        // Construction proof: neither side can offer a direct IP address, and
+        // the server has at least one relay hint to dial.
+        assert_eq!(server.addr().ip_addrs().count(), 0);
+        assert_eq!(client.addr().ip_addrs().count(), 0);
+        assert!(server.addr().relay_urls().next().is_some());
+        let (acceptor, connector) = tls_pair();
+        let receiver = server.clone();
+        let task = tokio::spawn(async move {
+            let connection = receiver.accept().await.unwrap().await.unwrap();
+            assert_relay_only_path(&connection);
+            let (send_stream, recv) = connection.accept_bi().await.unwrap();
+            let stream = acceptor
+                .accept(tokio::io::join(recv, send_stream))
+                .await
+                .unwrap();
+            let mut reader = BufReader::new(stream);
+            let line = next_peer_line(&mut reader, &mut Vec::new())
+                .await
+                .unwrap()
+                .unwrap();
+            let PeerMessage::Observations(values) = serde_json::from_str(&line).unwrap() else {
+                panic!("wrong frame")
+            };
+            assert_eq!(values.len(), 1);
+            values[0].verify().unwrap();
+            send(reader.get_mut(), &PeerMessage::Ping { sent_at: 1 })
+                .await
+                .unwrap();
+            assert!(next_peer_line(&mut reader, &mut Vec::new())
+                .await
+                .unwrap()
+                .is_some());
+        });
+        let connection = client.connect(server.addr(), ALPN).await.unwrap();
+        let (send_stream, recv) = connection.open_bi().await.unwrap();
+        let mut stream = connector
+            .connect(
+                ServerName::try_from("peer.test").unwrap(),
+                tokio::io::join(recv, send_stream),
+            )
+            .await
+            .unwrap();
+        let mesh = Mesh::ephemeral_for_test();
+        let envelope =
+            SignedEnvelope::sign(&mesh.key, 1, 1, PeerEvent::Hello(mesh.hello.clone())).unwrap();
+        send(&mut stream, &PeerMessage::Observations(vec![envelope]))
+            .await
+            .unwrap();
+        let mut reader = BufReader::new(stream);
+        assert!(next_peer_line(&mut reader, &mut Vec::new())
+            .await
+            .unwrap()
+            .unwrap()
+            .contains("ping"));
+        send(reader.get_mut(), &PeerMessage::Ping { sent_at: 2 })
+            .await
+            .unwrap();
+        tokio::time::timeout(HANDSHAKE, task)
+            .await
+            .unwrap()
+            .unwrap();
+        client.close().await;
+        server.close().await;
     }
 
     #[tokio::test]
